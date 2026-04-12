@@ -83,7 +83,6 @@ export function useTerminal({
     // First check if there's already a PTY for this pane (e.g., backgrounded from workspace switch)
     const existingPtyId = await window.electronAPI.getPtyForPane(paneId)
     if (existingPtyId) {
-      console.log('[Terminal] Reconnecting to existing PTY:', existingPtyId)
       ptyIdRef.current = existingPtyId
       setIsConnected(true)
       setIsLoading(false)
@@ -110,7 +109,6 @@ export function useTerminal({
     if (config.sshServerId) {
       const sshCmd = await window.electronAPI.getSSHCommand(config.sshServerId)
       if (sshCmd) {
-        console.log('[Terminal] Using fresh SSH command with tmux:', sshCmd)
         command = sshCmd.command
         args = sshCmd.args
       }
@@ -251,15 +249,6 @@ export function useTerminal({
   // Track if we've already sent SSH password (to avoid sending multiple times)
   const sshPasswordSentRef = useRef(false)
 
-  // Debug: log config when it changes
-  useEffect(() => {
-    console.log('[Terminal] Config updated:', {
-      paneId: config.id,
-      command: config.command,
-      sshServerId: config.sshServerId
-    })
-  }, [config])
-
   // Reset password sent flag when command changes (e.g., new SSH connection)
   useEffect(() => {
     sshPasswordSentRef.current = false
@@ -275,24 +264,20 @@ export function useTerminal({
         // Check for SSH password prompt and auto-send password
         if (config.sshServerId && !sshPasswordSentRef.current) {
           const lowerData = data.toLowerCase()
-          console.log('[SSH] Checking for password prompt, sshServerId:', config.sshServerId, 'data:', lowerData.substring(0, 100))
           if (lowerData.includes('password:') || lowerData.includes('password for') || lowerData.includes("'s password")) {
-            console.log('[SSH] Password prompt detected!')
             try {
               const password = await window.electronAPI.getSSHPassword(config.sshServerId)
-              console.log('[SSH] Got password:', password ? '(has password)' : '(no password)')
               if (password && ptyIdRef.current) {
                 // Small delay to ensure prompt is ready
                 setTimeout(() => {
                   if (ptyIdRef.current) {
-                    console.log('[SSH] Sending password...')
                     window.electronAPI.writePty(ptyIdRef.current, password + '\r')
                     sshPasswordSentRef.current = true
                   }
                 }, 100)
               }
-            } catch (error) {
-              console.error('Failed to get SSH password:', error)
+            } catch {
+              // Password retrieval failed, user will need to enter manually
             }
           }
         }

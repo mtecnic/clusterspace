@@ -400,16 +400,11 @@ function registerIpcHandlers() {
   // Get SSH password for auto-entry
   ipcMain.handle(IPC_CHANNELS.SSH_GET_PASSWORD, async (_event, serverId: string) => {
     try {
-      console.log('[SSH] Getting password for server:', serverId)
       const server = credentialsStore?.getServer(serverId)
-      console.log('[SSH] Server found:', server?.name, 'authMethod:', server?.authMethod)
       if (!server || server.authMethod !== 'password') {
-        console.log('[SSH] No password auth, returning null')
         return null
       }
-      const password = credentialsStore?.getPassword(serverId)
-      console.log('[SSH] Password retrieved:', password ? '(has password)' : '(no password)')
-      return password || null
+      return credentialsStore?.getPassword(serverId) || null
     } catch (error) {
       console.error('Failed to get SSH password:', error)
       return null
@@ -419,12 +414,7 @@ function registerIpcHandlers() {
   // Get fresh SSH command (always rebuilds with latest settings like tmux)
   ipcMain.handle(IPC_CHANNELS.SSH_GET_COMMAND, async (_event, serverId: string) => {
     try {
-      const sshCmd = credentialsStore?.buildSSHCommand(serverId)
-      if (!sshCmd) {
-        return null
-      }
-      console.log('[SSH] Built command:', sshCmd.command, sshCmd.args)
-      return sshCmd
+      return credentialsStore?.buildSSHCommand(serverId) || null
     } catch (error) {
       console.error('Failed to get SSH command:', error)
       return null

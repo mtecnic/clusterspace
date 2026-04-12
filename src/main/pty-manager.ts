@@ -39,8 +39,6 @@ export class PtyManager {
     }
     const args = config.args || []
 
-    console.log('PTY spawn config:', { shell, args, cwd: config.cwd })
-
     // Spawn the PTY
     const ptyProcess = pty.spawn(shell, args, {
       name: 'xterm-256color',
@@ -133,7 +131,6 @@ export class PtyManager {
       // Don't kill backgrounded PTYs unless forced (e.g., workspace deletion)
       // This preserves sessions when switching workspaces
       if (instance.isBackground && !force) {
-        console.log('PTY is backgrounded, skipping kill:', ptyId)
         return
       }
       try {
@@ -218,15 +215,11 @@ export class PtyManager {
   }
 
   getPtyIdForPane(paneId: string): string | undefined {
-    console.log(`[PTY] Looking for PTY with paneId: ${paneId}, total PTYs: ${this.ptys.size}`)
     for (const [ptyId, instance] of this.ptys) {
-      console.log(`[PTY] Checking: ptyId=${ptyId}, paneId=${instance.paneId}, isBackground=${instance.isBackground}`)
       if (instance.paneId === paneId) {
-        console.log(`[PTY] Found existing PTY: ${ptyId}`)
         return ptyId
       }
     }
-    console.log(`[PTY] No PTY found for paneId: ${paneId}`)
     return undefined
   }
 

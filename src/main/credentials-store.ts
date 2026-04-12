@@ -115,15 +115,12 @@ export class CredentialsStore {
 
   // Securely store a password using Electron's safeStorage
   private setPassword(serverId: string, password: string): void {
-    console.log('[SSH] Storing password for server:', serverId, 'length:', password.length)
     try {
       if (safeStorage.isEncryptionAvailable()) {
-        console.log('[SSH] Using safe storage encryption')
         const encrypted = safeStorage.encryptString(password)
         const passwords = this.store.get('encryptedPasswords', {})
         passwords[serverId] = encrypted.toString('base64')
         this.store.set('encryptedPasswords', passwords)
-        console.log('[SSH] Password stored successfully')
       } else {
         // Fallback: store in plain text (not recommended for production)
         console.warn('Safe storage not available, storing password in plain text')
