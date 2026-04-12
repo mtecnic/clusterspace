@@ -9,7 +9,7 @@
 
 A powerful desktop application for managing multiple terminal sessions across configurable workspace layouts. Built for developers who work with remote servers and need persistent, organized terminal workflows.
 
-<!-- ![Fleet Term Screenshot](screenshot.png) -->
+![Fleet Term Screenshot](screenshot.png)
 
 ---
 
