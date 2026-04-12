@@ -1,19 +1,39 @@
-# ClusterSpace
+# Fleet Term
 
-Multi-Agent Claude Code Workspace Manager - A desktop app for running multiple Claude Code terminal instances in a configurable grid, organized into user-created workspace tabs.
+[![Electron](https://img.shields.io/badge/Electron-33-47848F?logo=electron&logoColor=white)](https://www.electronjs.org/)
+[![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=white)](https://reactjs.org/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+
+> **Multi-terminal workspace manager with SSH server management and persistent tmux sessions**
+
+A powerful desktop application for managing multiple terminal sessions across configurable workspace layouts. Built for developers who work with remote servers and need persistent, organized terminal workflows.
+
+<!-- ![Fleet Term Screenshot](screenshot.png) -->
+
+---
 
 ## Features
 
-- **Dynamic workspace tabs** - Create, rename, reorder, close. Each tab is an independent layout.
-- **Configurable grid per tab** - Choose rows × columns when creating (1×1 to 4×4).
-- **Per-pane terminals** - Each cell is a real terminal running Claude Code (or any CLI command).
-- **Pane labels** - Name each pane for quick identification (e.g., "@api", "@frontend").
-- **Auto-launch configs** - Each pane stores its command + working directory.
-- **Bypass permissions toggle** - Global or per-pane `--dangerously-skip-permissions` control.
-- **Broadcast mode** - Type in one pane, mirror input to all panes.
-- **Command palette** - Quick actions via Ctrl+Shift+P.
-- **Persistent layouts** - Workspaces saved to disk as JSON, survive app restart.
-- **Workspace import/export** - Share configurations as JSON files.
+### Terminal Management
+- **Multi-pane workspaces** — Configurable grid layouts (1×1 to 4×4)
+- **Workspace tabs** — Switch between different project contexts
+- **Session persistence** — PTY sessions survive workspace tab switches
+- **Broadcast mode** — Type once, send to all panes simultaneously
+
+### SSH Integration
+- **SSH server management** — Save and organize remote server connections
+- **Secure credential storage** — Passwords encrypted with Electron's safeStorage API
+- **Auto-login** — Automatic password entry on connection
+- **Persistent sessions via tmux** — Remote sessions survive app restarts
+
+### Developer Experience
+- **Command palette** — Quick actions with `Ctrl+P`
+- **Clipboard support** — Copy-on-select, `Ctrl+V` paste
+- **Pane labels** — Name your terminals (`@api`, `@frontend`, `@db`)
+- **Import/Export** — Share workspace configurations as JSON
+
+---
 
 ## Keyboard Shortcuts
 
@@ -21,73 +41,120 @@ Multi-Agent Claude Code Workspace Manager - A desktop app for running multiple C
 |----------|--------|
 | `Ctrl+T` | New workspace |
 | `Ctrl+W` | Close workspace |
-| `Ctrl+1-9` | Switch to workspace by index |
+| `Ctrl+1-9` | Switch to workspace |
 | `Ctrl+Tab` | Next workspace |
 | `Ctrl+Shift+Tab` | Previous workspace |
 | `Ctrl+B` | Toggle broadcast mode |
-| `Ctrl+Shift+P` | Command palette |
+| `Ctrl+P` | Command palette |
 | `Ctrl+Enter` | Maximize/restore pane |
-| `Alt+Arrows` | Navigate between panes |
+| `Right-click` | Pane context menu |
 
-## Tech Stack
+---
 
-- **Electron** - Desktop application framework
-- **React** - UI framework
-- **xterm.js** - Terminal emulator
-- **node-pty** - Pseudoterminal backend
-- **Tailwind CSS** - Styling
-- **TypeScript** - Type safety
-- **Vite** - Build tooling
-
-## Development
+## Quick Start
 
 ### Prerequisites
-
 - Node.js 20+
-- Visual Studio Build Tools 2022 (for node-pty on Windows)
-- Claude Code CLI installed (`npm install -g @anthropic-ai/claude-code`)
+- Windows: Visual Studio Build Tools 2022 (for node-pty)
 
-### Setup
+### Installation
 
 ```bash
+# Clone the repository
+git clone https://github.com/mtecnic/fleet-term.git
+cd fleet-term
+
 # Install dependencies
 npm install
 
+# Rebuild native modules for Electron
+npm run rebuild
+
 # Start development server
 npm run dev
+```
 
+### Build
+
+```bash
 # Build for production
 npm run build
 
-# Create Windows installer
+# Create distributable
 npm run dist
 ```
 
-### Project Structure
+---
+
+## SSH + Tmux Integration
+
+Fleet Term automatically wraps SSH connections in tmux sessions for persistence:
+
+```bash
+# What happens when you connect:
+ssh -t user@server tmux new-session -A -s <server-name>
+```
+
+**Benefits:**
+- Close the app → your remote sessions keep running
+- Reopen and reconnect → reattach to existing sessions
+- Running processes, vim sessions, logs — all preserved
+
+**Requirement:** tmux must be installed on remote servers
+
+---
+
+## Tech Stack
+
+| Component | Technology |
+|-----------|------------|
+| Framework | Electron 33 |
+| Frontend | React 18 + TypeScript |
+| Terminal | xterm.js + WebGL |
+| PTY | node-pty (ConPTY on Windows) |
+| Styling | Tailwind CSS |
+| Build | Vite |
+| Storage | electron-store |
+
+---
+
+## Project Structure
 
 ```
-clusterspace/
+fleet-term/
 ├── src/
-│   ├── main/           # Electron main process
-│   │   ├── index.ts    # App entry point
-│   │   ├── pty-manager.ts
-│   │   └── workspace-store.ts
-│   ├── preload/        # Secure IPC bridge
-│   ├── renderer/       # React frontend
-│   │   ├── components/
-│   │   ├── context/
-│   │   ├── hooks/
-│   │   └── styles/
-│   └── shared/         # Shared types
-├── resources/          # App icons
-└── dist/               # Build output
+│   ├── main/                 # Electron main process
+│   │   ├── index.ts          # App entry, IPC handlers
+│   │   ├── pty-manager.ts    # PTY lifecycle management
+│   │   ├── workspace-store.ts # Workspace persistence
+│   │   └── credentials-store.ts # Secure SSH credentials
+│   ├── preload/              # Secure IPC bridge
+│   ├── renderer/             # React frontend
+│   │   ├── components/       # UI components
+│   │   ├── context/          # React context (workspace state)
+│   │   └── hooks/            # Custom hooks (terminal, shortcuts)
+│   └── shared/               # Shared types & constants
+└── resources/                # App icons
 ```
+
+---
 
 ## Configuration
 
-Workspaces are stored in your user data directory:
-- Windows: `%APPDATA%/clusterspace/clusterspace-config.json`
+Data is stored in your user directory:
+
+| Platform | Location |
+|----------|----------|
+| Windows | `%APPDATA%/clusterspace/` |
+| macOS | `~/Library/Application Support/clusterspace/` |
+| Linux | `~/.config/clusterspace/` |
+
+**Files:**
+- `clusterspace-config.json` — Workspaces and settings
+- `clusterspace-credentials.json` — SSH servers (passwords encrypted)
+
+---
 
 ## License
 
-MIT
+MIT © 2024
