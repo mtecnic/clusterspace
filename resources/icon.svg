@@ -1,0 +1,41 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background -->
+  <rect width="256" height="256" rx="48" fill="#0d1117"/>
+
+  <!-- Grid pattern representing terminal panes -->
+  <g stroke="#30363d" stroke-width="2">
+    <line x1="128" y1="40" x2="128" y2="216"/>
+    <line x1="40" y1="128" x2="216" y2="128"/>
+  </g>
+
+  <!-- Terminal cursors in each quadrant -->
+  <g fill="#58a6ff">
+    <!-- Top left -->
+    <rect x="56" y="72" width="16" height="24" rx="2">
+      <animate attributeName="opacity" values="1;0;1" dur="1s" repeatCount="indefinite"/>
+    </rect>
+    <!-- Top right -->
+    <rect x="144" y="72" width="16" height="24" rx="2">
+      <animate attributeName="opacity" values="1;0;1" dur="1.2s" repeatCount="indefinite"/>
+    </rect>
+    <!-- Bottom left -->
+    <rect x="56" y="160" width="16" height="24" rx="2">
+      <animate attributeName="opacity" values="1;0;1" dur="0.8s" repeatCount="indefinite"/>
+    </rect>
+    <!-- Bottom right -->
+    <rect x="144" y="160" width="16" height="24" rx="2">
+      <animate attributeName="opacity" values="1;0;1" dur="1.1s" repeatCount="indefinite"/>
+    </rect>
+  </g>
+
+  <!-- Terminal prompt symbols -->
+  <g fill="#3fb950" font-family="Consolas, monospace" font-size="20" font-weight="bold">
+    <text x="78" y="88">></text>
+    <text x="166" y="88">></text>
+    <text x="78" y="176">></text>
+    <text x="166" y="176">></text>
+  </g>
+
+  <!-- Outer glow ring -->
+  <rect x="32" y="32" width="192" height="192" rx="40" stroke="#58a6ff" stroke-width="2" fill="none" opacity="0.5"/>
+</svg>

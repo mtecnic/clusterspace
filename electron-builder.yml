@@ -1,0 +1,52 @@
+appId: com.clusterspace.app
+productName: ClusterSpace
+copyright: Copyright © 2024 ClusterSpace
+
+directories:
+  output: release
+  buildResources: resources
+
+files:
+  - dist/**/*
+  - dist-electron/**/*
+  - package.json
+  - "!node_modules/**/*"
+  - node_modules/electron-store/**/*
+  - node_modules/conf/**/*
+  - node_modules/atomically/**/*
+  - node_modules/dot-prop/**/*
+  - node_modules/env-paths/**/*
+  - node_modules/json-schema-typed/**/*
+  - node_modules/ajv/**/*
+  - node_modules/ajv-formats/**/*
+  - node_modules/uuid/**/*
+
+extraResources:
+  - from: node_modules/node-pty/build
+    to: node_modules/node-pty/build
+    filter:
+      - "**/*"
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  artifactName: ${productName}-${version}-Setup.${ext}
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: ClusterSpace
+  perMachine: false
+  allowElevation: true
+
+asar: true
+asarUnpack:
+  - node_modules/node-pty/**/*
+
+# Rebuild native modules for Electron
+npmRebuild: true
+buildDependenciesFromSource: true
