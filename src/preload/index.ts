@@ -1,5 +1,28 @@
 import { contextBridge, ipcRenderer, IpcRendererEvent } from 'electron'
-import { IPC_CHANNELS, PtySpawnConfig, WorkspaceConfig, GridConfig, AppSettings, PaneConfig, SSHServer } from '../shared/types'
+import {
+  IPC_CHANNELS,
+  PtySpawnConfig,
+  WorkspaceConfig,
+  GridConfig,
+  AppSettings,
+  PaneConfig,
+  SSHServer,
+  AISettings,
+  AIProviderConfig,
+  AIMessage,
+  AIToolCall,
+  AIToolResult,
+  AIPaneInfo,
+  AIDiscoveryResult,
+  AIConversation,
+  PaneAgentState,
+  AgentTask,
+  OrchestrationGoal,
+  OrchestrationEvent,
+  Persona,
+  TaskTemplate,
+  Skill
+} from '../shared/types'
 
 // Type for the exposed API
 export interface ElectronAPI {
@@ -62,6 +85,90 @@ export interface ElectronAPI {
   testSSHServer: (id: string) => Promise<{ success: boolean; command?: string; args?: string[]; password?: string; error?: string }>
   getSSHPassword: (serverId: string) => Promise<string | null>
   getSSHCommand: (serverId: string) => Promise<{ command: string; args: string[] } | null>
+
+  // AI Settings operations
+  getAISettings: () => Promise<AISettings>
+  updateAISettings: (updates: Partial<AISettings>) => Promise<AISettings>
+
+  // AI Provider operations
+  getAIProviders: () => Promise<AIProviderConfig[]>
+  createAIProvider: (
+    name: string,
+    endpoint: string,
+    model: string,
+    visionModel?: string,
+    apiKey?: string,
+    systemPrompt?: string,
+    temperature?: number,
+    maxTokens?: number
+  ) => Promise<AIProviderConfig>
+  updateAIProvider: (
+    id: string,
+    updates: Partial<Omit<AIProviderConfig, 'id' | 'createdAt'>>,
+    apiKey?: string
+  ) => Promise<AIProviderConfig | null>
+  deleteAIProvider: (id: string) => Promise<boolean>
+  testAIProvider: (config: AIProviderConfig, apiKey?: string) => Promise<{ success: boolean; error?: string }>
+  discoverAIProvider: (ipAddress: string) => Promise<AIDiscoveryResult>
+
+  // AI Chat operations
+  aiSendMessage: (messages: AIMessage[]) => Promise<AIMessage>
+  aiStreamMessage: (messages: AIMessage[]) => void
+  onAIStreamChunk: (callback: (chunk: string) => void) => () => void
+  onAIStreamEnd: (callback: (message: AIMessage) => void) => () => void
+  onAIStreamError: (callback: (error: string) => void) => () => void
+  aiCancel: () => void
+
+  // AI Tool operations
+  aiGetPanes: () => Promise<AIPaneInfo[]>
+  aiGetTerminalOutput: (paneId: string, lines?: number) => Promise<string>
+  aiScreenshot: (paneId?: string) => Promise<string | null>
+  aiWriteTerminal: (paneId: string, text: string) => Promise<{ success: boolean; error?: string }>
+  aiExecuteTool: (toolCall: AIToolCall) => Promise<AIToolResult>
+
+  // AI pane control (triggered by AI tools)
+  onAIFocusPane: (callback: (paneId: string) => void) => () => void
+  onAIMaximizePane: (callback: (paneId: string) => void) => () => void
+
+  // AI Memory operations
+  getAIConversations: (limit?: number) => Promise<AIConversation[]>
+  getAIConversation: (id: string) => Promise<AIConversation | null>
+  saveAIConversation: (conversation: AIConversation) => Promise<boolean>
+  deleteAIConversation: (id: string) => Promise<boolean>
+  clearAllAIConversations: () => Promise<boolean>
+
+  // Agent operations
+  getAgentState: (paneId: string) => Promise<PaneAgentState | null>
+  getAllAgentStates: () => Promise<PaneAgentState[]>
+  initializeAgent: (paneId: string, role?: string, purpose?: string) => Promise<PaneAgentState>
+  setAgentRole: (paneId: string, role: string, purpose: string) => Promise<PaneAgentState | null>
+  assignAgentTask: (paneId: string, task: Omit<AgentTask, 'id' | 'status'>) => Promise<AgentTask>
+  startAgentTask: (paneId: string) => Promise<AgentTask | null>
+  completeAgentTask: (paneId: string, result?: string) => Promise<AgentTask | null>
+  failAgentTask: (paneId: string, error: string) => Promise<AgentTask | null>
+
+  // Orchestration operations
+  createOrchestrationGoal: (description: string, paneIds: string[]) => Promise<OrchestrationGoal>
+  getActiveOrchestrationGoal: () => Promise<OrchestrationGoal | null>
+  getAllOrchestrationGoals: () => Promise<OrchestrationGoal[]>
+  pauseOrchestration: (goalId: string) => Promise<void>
+  resumeOrchestration: (goalId: string) => Promise<void>
+  getOrchestrationEvents: (limit?: number) => Promise<OrchestrationEvent[]>
+  onOrchestrationEvent: (callback: (event: OrchestrationEvent) => void) => () => void
+
+  // Coordination operations
+  coordinationWaitFor: (waitingPaneId: string, targetPaneId: string) => Promise<void>
+  coordinationNotifyComplete: (paneId: string) => Promise<string[]>
+  coordinationShareContext: (fromPaneId: string, toPaneId: string, context: string) => Promise<void>
+
+  // Config operations
+  listPersonas: () => Promise<Persona[]>
+  loadPersona: (id: string) => Promise<Persona | null>
+  listTasks: () => Promise<TaskTemplate[]>
+  loadTask: (id: string, category?: string) => Promise<TaskTemplate | null>
+  listSkills: () => Promise<Skill[]>
+  loadSkill: (id: string) => Promise<Skill | null>
+  getConfigDir: () => Promise<string | null>
 }
 
 const electronAPI: ElectronAPI = {
@@ -236,6 +343,279 @@ const electronAPI: ElectronAPI = {
 
   getSSHCommand: (serverId: string) => {
     return ipcRenderer.invoke(IPC_CHANNELS.SSH_GET_COMMAND, serverId)
+  },
+
+  // AI Settings operations
+  getAISettings: () => {
+    return ipcRenderer.invoke(IPC_CHANNELS.AI_SETTINGS_GET)
+  },
+
+  updateAISettings: (updates: Partial<AISettings>) => {
+    return ipcRenderer.invoke(IPC_CHANNELS.AI_SETTINGS_UPDATE, updates)
+  },
+
+  // AI Provider operations
+  getAIProviders: () => {
+    return ipcRenderer.invoke(IPC_CHANNELS.AI_PROVIDERS_GET)
+  },
+
+  createAIProvider: (
+    name: string,
+    endpoint: string,
+    model: string,
+    visionModel?: string,
+    apiKey?: string,
+    systemPrompt?: string,
+    temperature?: number,
+    maxTokens?: number
+  ) => {
+    return ipcRenderer.invoke(
+      IPC_CHANNELS.AI_PROVIDERS_CREATE,
+      name,
+      endpoint,
+      model,
+      visionModel,
+      apiKey,
+      systemPrompt,
+      temperature,
+      maxTokens
+    )
+  },
+
+  updateAIProvider: (
+    id: string,
+    updates: Partial<Omit<AIProviderConfig, 'id' | 'createdAt'>>,
+    apiKey?: string
+  ) => {
+    return ipcRenderer.invoke(IPC_CHANNELS.AI_PROVIDERS_UPDATE, id, updates, apiKey)
+  },
+
+  deleteAIProvider: (id: string) => {
+    return ipcRenderer.invoke(IPC_CHANNELS.AI_PROVIDERS_DELETE, id)
+  },
+
+  testAIProvider: (config: AIProviderConfig, apiKey?: string) => {
+    return ipcRenderer.invoke(IPC_CHANNELS.AI_PROVIDER_TEST, config, apiKey)
+  },
+
+  discoverAIProvider: (ipAddress: string) => {
+    return ipcRenderer.invoke(IPC_CHANNELS.AI_PROVIDER_DISCOVER, ipAddress)
+  },
+
+  // AI Chat operations
+  aiSendMessage: (messages: AIMessage[]) => {
+    return ipcRenderer.invoke(IPC_CHANNELS.AI_CHAT_SEND, messages)
+  },
+
+  aiStreamMessage: (messages: AIMessage[]) => {
+    ipcRenderer.send(IPC_CHANNELS.AI_CHAT_STREAM, messages)
+  },
+
+  onAIStreamChunk: (callback: (chunk: string) => void) => {
+    const handler = (_event: IpcRendererEvent, chunk: string) => {
+      callback(chunk)
+    }
+    ipcRenderer.on(IPC_CHANNELS.AI_STREAM_CHUNK, handler)
+    return () => {
+      ipcRenderer.removeListener(IPC_CHANNELS.AI_STREAM_CHUNK, handler)
+    }
+  },
+
+  onAIStreamEnd: (callback: (message: AIMessage) => void) => {
+    const handler = (_event: IpcRendererEvent, message: AIMessage) => {
+      callback(message)
+    }
+    ipcRenderer.on(IPC_CHANNELS.AI_STREAM_END, handler)
+    return () => {
+      ipcRenderer.removeListener(IPC_CHANNELS.AI_STREAM_END, handler)
+    }
+  },
+
+  onAIStreamError: (callback: (error: string) => void) => {
+    const handler = (_event: IpcRendererEvent, error: string) => {
+      callback(error)
+    }
+    ipcRenderer.on(IPC_CHANNELS.AI_STREAM_ERROR, handler)
+    return () => {
+      ipcRenderer.removeListener(IPC_CHANNELS.AI_STREAM_ERROR, handler)
+    }
+  },
+
+  aiCancel: () => {
+    ipcRenderer.send(IPC_CHANNELS.AI_CANCEL)
+  },
+
+  // AI Tool operations
+  aiGetPanes: () => {
+    return ipcRenderer.invoke(IPC_CHANNELS.AI_GET_PANES)
+  },
+
+  aiGetTerminalOutput: (paneId: string, lines?: number) => {
+    return ipcRenderer.invoke(IPC_CHANNELS.AI_GET_TERMINAL_OUTPUT, paneId, lines)
+  },
+
+  aiScreenshot: (paneId?: string) => {
+    return ipcRenderer.invoke(IPC_CHANNELS.AI_SCREENSHOT_PANE, paneId)
+  },
+
+  aiWriteTerminal: (paneId: string, text: string) => {
+    return ipcRenderer.invoke(IPC_CHANNELS.AI_WRITE_TERMINAL, paneId, text)
+  },
+
+  aiExecuteTool: (toolCall: AIToolCall) => {
+    return ipcRenderer.invoke('ai:execute:tool', toolCall)
+  },
+
+  // AI pane control (triggered by AI tools)
+  onAIFocusPane: (callback: (paneId: string) => void) => {
+    const handler = (_event: IpcRendererEvent, paneId: string) => {
+      callback(paneId)
+    }
+    ipcRenderer.on(IPC_CHANNELS.AI_FOCUS_PANE, handler)
+    return () => {
+      ipcRenderer.removeListener(IPC_CHANNELS.AI_FOCUS_PANE, handler)
+    }
+  },
+
+  onAIMaximizePane: (callback: (paneId: string) => void) => {
+    const handler = (_event: IpcRendererEvent, paneId: string) => {
+      callback(paneId)
+    }
+    ipcRenderer.on(IPC_CHANNELS.AI_MAXIMIZE_PANE, handler)
+    return () => {
+      ipcRenderer.removeListener(IPC_CHANNELS.AI_MAXIMIZE_PANE, handler)
+    }
+  },
+
+  // AI Memory operations
+  getAIConversations: (limit?: number) => {
+    return ipcRenderer.invoke(IPC_CHANNELS.AI_MEMORY_GET_CONVERSATIONS, limit)
+  },
+
+  getAIConversation: (id: string) => {
+    return ipcRenderer.invoke(IPC_CHANNELS.AI_MEMORY_GET_CONVERSATION, id)
+  },
+
+  saveAIConversation: (conversation: AIConversation) => {
+    return ipcRenderer.invoke(IPC_CHANNELS.AI_MEMORY_SAVE_CONVERSATION, conversation)
+  },
+
+  deleteAIConversation: (id: string) => {
+    return ipcRenderer.invoke(IPC_CHANNELS.AI_MEMORY_DELETE_CONVERSATION, id)
+  },
+
+  clearAllAIConversations: () => {
+    return ipcRenderer.invoke(IPC_CHANNELS.AI_MEMORY_CLEAR_ALL)
+  },
+
+  // Agent operations
+  getAgentState: (paneId: string) => {
+    return ipcRenderer.invoke(IPC_CHANNELS.AGENT_GET_STATE, paneId)
+  },
+
+  getAllAgentStates: () => {
+    return ipcRenderer.invoke(IPC_CHANNELS.AGENT_GET_ALL_STATES)
+  },
+
+  initializeAgent: (paneId: string, role?: string, purpose?: string) => {
+    return ipcRenderer.invoke(IPC_CHANNELS.AGENT_INITIALIZE, paneId, role, purpose)
+  },
+
+  setAgentRole: (paneId: string, role: string, purpose: string) => {
+    return ipcRenderer.invoke(IPC_CHANNELS.AGENT_SET_ROLE, paneId, role, purpose)
+  },
+
+  assignAgentTask: (paneId: string, task: Omit<AgentTask, 'id' | 'status'>) => {
+    return ipcRenderer.invoke(IPC_CHANNELS.AGENT_ASSIGN_TASK, paneId, task)
+  },
+
+  startAgentTask: (paneId: string) => {
+    return ipcRenderer.invoke(IPC_CHANNELS.AGENT_START_TASK, paneId)
+  },
+
+  completeAgentTask: (paneId: string, result?: string) => {
+    return ipcRenderer.invoke(IPC_CHANNELS.AGENT_COMPLETE_TASK, paneId, result)
+  },
+
+  failAgentTask: (paneId: string, error: string) => {
+    return ipcRenderer.invoke(IPC_CHANNELS.AGENT_FAIL_TASK, paneId, error)
+  },
+
+  // Orchestration operations
+  createOrchestrationGoal: (description: string, paneIds: string[]) => {
+    return ipcRenderer.invoke(IPC_CHANNELS.ORCHESTRATION_CREATE_GOAL, description, paneIds)
+  },
+
+  getActiveOrchestrationGoal: () => {
+    return ipcRenderer.invoke(IPC_CHANNELS.ORCHESTRATION_GET_ACTIVE_GOAL)
+  },
+
+  getAllOrchestrationGoals: () => {
+    return ipcRenderer.invoke(IPC_CHANNELS.ORCHESTRATION_GET_GOALS)
+  },
+
+  pauseOrchestration: (goalId: string) => {
+    return ipcRenderer.invoke(IPC_CHANNELS.ORCHESTRATION_PAUSE, goalId)
+  },
+
+  resumeOrchestration: (goalId: string) => {
+    return ipcRenderer.invoke(IPC_CHANNELS.ORCHESTRATION_RESUME, goalId)
+  },
+
+  getOrchestrationEvents: (limit?: number) => {
+    return ipcRenderer.invoke(IPC_CHANNELS.ORCHESTRATION_GET_EVENTS, limit)
+  },
+
+  onOrchestrationEvent: (callback: (event: OrchestrationEvent) => void) => {
+    const handler = (_event: IpcRendererEvent, orchestrationEvent: OrchestrationEvent) => {
+      callback(orchestrationEvent)
+    }
+    ipcRenderer.on(IPC_CHANNELS.ORCHESTRATION_EVENT, handler)
+    return () => {
+      ipcRenderer.removeListener(IPC_CHANNELS.ORCHESTRATION_EVENT, handler)
+    }
+  },
+
+  // Coordination operations
+  coordinationWaitFor: (waitingPaneId: string, targetPaneId: string) => {
+    return ipcRenderer.invoke(IPC_CHANNELS.COORDINATION_WAIT_FOR, waitingPaneId, targetPaneId)
+  },
+
+  coordinationNotifyComplete: (paneId: string) => {
+    return ipcRenderer.invoke(IPC_CHANNELS.COORDINATION_NOTIFY_COMPLETE, paneId)
+  },
+
+  coordinationShareContext: (fromPaneId: string, toPaneId: string, context: string) => {
+    return ipcRenderer.invoke(IPC_CHANNELS.COORDINATION_SHARE_CONTEXT, fromPaneId, toPaneId, context)
+  },
+
+  // Config operations
+  listPersonas: () => {
+    return ipcRenderer.invoke('config:listPersonas')
+  },
+
+  loadPersona: (id: string) => {
+    return ipcRenderer.invoke('config:loadPersona', id)
+  },
+
+  listTasks: () => {
+    return ipcRenderer.invoke('config:listTasks')
+  },
+
+  loadTask: (id: string, category?: string) => {
+    return ipcRenderer.invoke('config:loadTask', id, category)
+  },
+
+  listSkills: () => {
+    return ipcRenderer.invoke('config:listSkills')
+  },
+
+  loadSkill: (id: string) => {
+    return ipcRenderer.invoke('config:loadSkill', id)
+  },
+
+  getConfigDir: () => {
+    return ipcRenderer.invoke('config:getUserConfigDir')
   }
 }
 

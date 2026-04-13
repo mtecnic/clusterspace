@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react'
-import { AppSettings } from '@shared/types'
+import { AppSettings, AgentStatus } from '@shared/types'
+import { useAgent } from '../context/AgentContext'
 
 interface StatusBarProps {
   workspaceName: string
@@ -7,6 +8,15 @@ interface StatusBarProps {
   settings: AppSettings | null
   onToggleBypass: () => void
   onOpenSettings?: () => void
+  onOpenFleetDashboard?: () => void
+}
+
+const statusColors: Record<AgentStatus, string> = {
+  idle: 'bg-gray-400',
+  working: 'bg-blue-500',
+  blocked: 'bg-yellow-500',
+  complete: 'bg-green-500',
+  error: 'bg-red-500'
 }
 
 export function StatusBar({
@@ -14,9 +24,12 @@ export function StatusBar({
   paneCount,
   settings,
   onToggleBypass,
-  onOpenSettings
+  onOpenSettings,
+  onOpenFleetDashboard
 }: StatusBarProps) {
   const [memoryUsage, setMemoryUsage] = useState<string>('--')
+  const { getStatusCounts, activeGoal } = useAgent()
+  const statusCounts = getStatusCounts()
 
   useEffect(() => {
     const updateMemory = async () => {
@@ -38,7 +51,12 @@ export function StatusBar({
   return (
     <div className="status-bar">
       <div className="status-bar-section">
-        <div className="status-item">
+        {/* Fleet Status Button */}
+        <div
+          className="status-item clickable flex items-center gap-2"
+          onClick={onOpenFleetDashboard}
+          title="Open Fleet Dashboard"
+        >
           <svg
             width="12"
             height="12"
@@ -51,8 +69,36 @@ export function StatusBar({
             <line x1="8" y1="21" x2="16" y2="21" />
             <line x1="12" y1="17" x2="12" y2="21" />
           </svg>
-          <span>Agents: {paneCount} active</span>
+          <span>Fleet</span>
+
+          {/* Status counts */}
+          <div className="flex items-center gap-1 ml-1">
+            {Object.entries(statusCounts).map(([status, count]) => (
+              count > 0 && (
+                <div key={status} className="flex items-center gap-0.5" title={`${status}: ${count}`}>
+                  <span className={`w-1.5 h-1.5 rounded-full ${statusColors[status as AgentStatus]}`} />
+                  <span className="text-[10px]">{count}</span>
+                </div>
+              )
+            ))}
+          </div>
         </div>
+
+        {/* Active Goal Indicator */}
+        {activeGoal && (
+          <div
+            className={`status-item px-2 py-0.5 rounded text-[10px] ${
+              activeGoal.status === 'executing' ? 'bg-blue-600/30 text-blue-400' :
+              activeGoal.status === 'complete' ? 'bg-green-600/30 text-green-400' :
+              activeGoal.status === 'failed' ? 'bg-red-600/30 text-red-400' :
+              activeGoal.status === 'paused' ? 'bg-yellow-600/30 text-yellow-400' :
+              'bg-gray-600/30 text-gray-400'
+            }`}
+            title={activeGoal.description}
+          >
+            Goal: {activeGoal.status}
+          </div>
+        )}
       </div>
 
       <div className="status-bar-section">

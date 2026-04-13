@@ -22,6 +22,7 @@ interface UseTerminalReturn {
   hasExited: boolean
   exitCode: number | null
   restart: () => Promise<void>
+  kill: () => void
   clear: () => void
   search: (query: string) => boolean
   searchNext: () => boolean
@@ -315,6 +316,16 @@ export function useTerminal({
     await spawnPty()
   }, [spawnPty])
 
+  // Kill function (kill without respawn)
+  const kill = useCallback(() => {
+    if (ptyIdRef.current) {
+      window.electronAPI.killPty(ptyIdRef.current)
+      ptyIdRef.current = null
+    }
+    setIsConnected(false)
+    setHasExited(true)
+  }, [])
+
   // Auto-restart when command changes (e.g., SSH connect)
   const prevCommandRef = useRef(config.command)
   useEffect(() => {
@@ -350,6 +361,7 @@ export function useTerminal({
     hasExited,
     exitCode,
     restart,
+    kill,
     clear,
     search,
     searchNext,

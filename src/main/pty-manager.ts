@@ -10,6 +10,7 @@ interface PtyInstance {
   isBackground: boolean
   scrollbackBuffer: string[]
   maxScrollback: number
+  lastDataTimestamp: number  // For activity tracking
 }
 
 export class PtyManager {
@@ -60,13 +61,17 @@ export class PtyManager {
       workspaceId: config.workspaceId || 'default',
       isBackground: false,
       scrollbackBuffer: [],
-      maxScrollback: this.maxScrollbackLines
+      maxScrollback: this.maxScrollbackLines,
+      lastDataTimestamp: Date.now()
     })
 
     // Handle data from PTY
     ptyProcess.onData((data: string) => {
       const instance = this.ptys.get(ptyId)
       if (instance) {
+        // Update activity timestamp
+        instance.lastDataTimestamp = Date.now()
+
         // Store in scrollback buffer for session restore
         this.appendToScrollback(ptyId, data)
 
@@ -226,5 +231,13 @@ export class PtyManager {
   isPtyBackground(ptyId: string): boolean {
     const instance = this.ptys.get(ptyId)
     return instance?.isBackground ?? false
+  }
+
+  // Get activity status for a PTY (for AI polling)
+  getActivityStatus(ptyId: string): { idleMs: number; isActive: boolean } | null {
+    const instance = this.ptys.get(ptyId)
+    if (!instance) return null
+    const idleMs = Date.now() - instance.lastDataTimestamp
+    return { idleMs, isActive: idleMs < 500 }  // Active if data received in last 500ms
   }
 }

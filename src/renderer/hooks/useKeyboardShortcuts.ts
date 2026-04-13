@@ -12,6 +12,7 @@ interface KeyboardShortcutHandlers {
   onRestartPane?: () => void
   onFocusNextPane?: () => void
   onFocusPreviousPane?: () => void
+  onToggleAI?: () => void
 }
 
 export function useKeyboardShortcuts(handlers: KeyboardShortcutHandlers) {
@@ -33,6 +34,13 @@ export function useKeyboardShortcuts(handlers: KeyboardShortcutHandlers) {
     if (ctrlKey && shiftKey && key === 'P') {
       event.preventDefault()
       handlers.onCommandPalette?.()
+      return
+    }
+
+    // Ctrl+Shift+A - Toggle AI Chat
+    if (ctrlKey && shiftKey && key === 'A') {
+      event.preventDefault()
+      handlers.onToggleAI?.()
       return
     }
 

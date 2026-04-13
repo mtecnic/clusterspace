@@ -7,6 +7,7 @@ interface PaneContextMenuProps {
   onClose: () => void
   onUpdateConfig: (updates: Partial<PaneConfig>) => void
   onRestart: () => void
+  onKill: () => void
   onManageSSH?: () => void
 }
 
@@ -16,6 +17,7 @@ export function PaneContextMenu({
   onClose,
   onUpdateConfig,
   onRestart,
+  onKill,
   onManageSSH
 }: PaneContextMenuProps) {
   const [showEditPanel, setShowEditPanel] = useState(false)
@@ -283,7 +285,7 @@ export function PaneContextMenu({
       <div
         className="context-menu-item danger"
         onClick={() => {
-          // Kill is handled by restart with no respawn
+          onKill()
           onClose()
         }}
       >

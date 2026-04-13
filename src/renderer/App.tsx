@@ -1,5 +1,7 @@
 import React, { useState, useCallback } from 'react'
 import { WorkspaceProvider, useWorkspace } from './context/WorkspaceContext'
+import { AIProvider, useAI } from './context/AIContext'
+import { AgentProvider } from './context/AgentContext'
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts'
 import { WorkspaceTabBar } from './components/WorkspaceTabBar'
 import { PaneGrid } from './components/PaneGrid'
@@ -9,9 +11,17 @@ import { CommandPalette } from './components/CommandPalette'
 import { SettingsDialog } from './components/SettingsDialog'
 import { GridResizeDialog } from './components/GridResizeDialog'
 import { SSHServersDialog } from './components/SSHServersDialog'
+import { AIChatPanel } from './components/AIChatPanel'
+import { AISettingsDialog } from './components/AISettingsDialog'
+import { FleetDashboard } from './components/FleetDashboard'
 import { GridConfig, PaneConfig } from '@shared/types'
 
-function AppContent() {
+interface AppContentProps {
+  onRegisterFocusPane?: (cb: (id: string) => void) => void
+  onRegisterMaximizePane?: (cb: (id: string) => void) => void
+}
+
+function AppContent({ onRegisterFocusPane, onRegisterMaximizePane }: AppContentProps) {
   const {
     workspaces,
     activeWorkspace,
@@ -31,8 +41,14 @@ function AppContent() {
   const [showSettingsDialog, setShowSettingsDialog] = useState(false)
   const [showGridResizeDialog, setShowGridResizeDialog] = useState(false)
   const [showSSHServersDialog, setShowSSHServersDialog] = useState(false)
+  const [showAISettingsDialog, setShowAISettingsDialog] = useState(false)
+  const [showFleetDashboard, setShowFleetDashboard] = useState(false)
   const [focusedPaneId, setFocusedPaneId] = useState<string | null>(null)
   const [broadcastEnabled, setBroadcastEnabled] = useState(false)
+  const [maximizedPaneId, setMaximizedPaneId] = useState<string | null>(null)
+
+  // AI context
+  const { togglePanel: toggleAIPanel, isPanelOpen, clearChat: clearAIChat } = useAI()
 
   // Handle workspace creation
   const handleCreateWorkspace = useCallback(async (name: string, grid: GridConfig) => {
@@ -171,8 +187,17 @@ function AppContent() {
     onToggleBroadcast: () => setBroadcastEnabled(prev => !prev),
     onCommandPalette: () => setShowCommandPalette(true),
     onFocusNextPane: () => navigatePane('next'),
-    onFocusPreviousPane: () => navigatePane('prev')
+    onFocusPreviousPane: () => navigatePane('prev'),
+    onToggleAI: toggleAIPanel
   })
+
+  // Register AI pane control callbacks
+  React.useEffect(() => {
+    onRegisterFocusPane?.(setFocusedPaneId)
+    onRegisterMaximizePane?.((id) => {
+      setMaximizedPaneId(prev => prev === id ? null : id)
+    })
+  }, [onRegisterFocusPane, onRegisterMaximizePane])
 
   // Set initial focused pane
   React.useEffect(() => {
@@ -243,6 +268,7 @@ function AppContent() {
         settings={settings}
         onToggleBypass={toggleGlobalBypass}
         onOpenSettings={() => setShowSettingsDialog(true)}
+        onOpenFleetDashboard={() => setShowFleetDashboard(true)}
       />
 
       {/* New Workspace Dialog */}
@@ -301,7 +327,14 @@ function AppContent() {
           setShowSSHServersDialog(true)
           setShowCommandPalette(false)
         }}
+        onToggleAI={toggleAIPanel}
+        onOpenAISettings={() => {
+          setShowAISettingsDialog(true)
+          setShowCommandPalette(false)
+        }}
+        onClearAIChat={clearAIChat}
         broadcastEnabled={broadcastEnabled}
+        aiEnabled={isPanelOpen}
       />
 
       {/* SSH Servers Dialog */}
@@ -329,14 +362,59 @@ function AppContent() {
           }
         }}
       />
+
+      {/* AI Chat Panel */}
+      <AIChatPanel
+        onOpenSettings={() => setShowAISettingsDialog(true)}
+      />
+
+      {/* AI Settings Dialog */}
+      <AISettingsDialog
+        isOpen={showAISettingsDialog}
+        onClose={() => setShowAISettingsDialog(false)}
+      />
+
+      {/* Fleet Dashboard */}
+      <FleetDashboard
+        isOpen={showFleetDashboard}
+        onClose={() => setShowFleetDashboard(false)}
+      />
     </div>
+  )
+}
+
+function AppWithAI() {
+  const [focusPaneCallback, setFocusPaneCallback] = useState<((id: string) => void) | null>(null)
+  const [maximizePaneCallback, setMaximizePaneCallback] = useState<((id: string) => void) | null>(null)
+
+  // Stabilize callbacks to prevent infinite re-render loops
+  const handleRegisterFocusPane = useCallback((cb: (id: string) => void) => {
+    setFocusPaneCallback(() => cb)
+  }, [])
+
+  const handleRegisterMaximizePane = useCallback((cb: (id: string) => void) => {
+    setMaximizePaneCallback(() => cb)
+  }, [])
+
+  return (
+    <AIProvider
+      onFocusPane={(id) => focusPaneCallback?.(id)}
+      onMaximizePane={(id) => maximizePaneCallback?.(id)}
+    >
+      <AppContent
+        onRegisterFocusPane={handleRegisterFocusPane}
+        onRegisterMaximizePane={handleRegisterMaximizePane}
+      />
+    </AIProvider>
   )
 }
 
 export function App() {
   return (
     <WorkspaceProvider>
-      <AppContent />
+      <AgentProvider>
+        <AppWithAI />
+      </AgentProvider>
     </WorkspaceProvider>
   )
 }

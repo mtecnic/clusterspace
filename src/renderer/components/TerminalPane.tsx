@@ -1,8 +1,9 @@
-import React, { useState, useCallback } from 'react'
+import React, { useState, useCallback, useEffect } from 'react'
 import { PaneConfig } from '@shared/types'
 import { useTerminal } from '../hooks/useTerminal'
-import { PaneLabel } from './PaneLabel'
+import { PaneLabelWithAgent } from './PaneLabelWithAgent'
 import { PaneContextMenu } from './PaneContextMenu'
+import { useAgent } from '../context/AgentContext'
 
 interface TerminalPaneProps {
   config: PaneConfig
@@ -29,6 +30,15 @@ export function TerminalPane({
 }: TerminalPaneProps) {
   const [hasActivity, setHasActivity] = useState(false)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
+  const { initializeAgent, getAgent } = useAgent()
+
+  // Initialize agent state for this pane
+  useEffect(() => {
+    const agent = getAgent(config.id)
+    if (!agent) {
+      initializeAgent(config.id)
+    }
+  }, [config.id, getAgent, initializeAgent])
 
   const handleActivity = useCallback(() => {
     if (!isFocused) {
@@ -41,7 +51,8 @@ export function TerminalPane({
     isConnected,
     isLoading,
     hasExited,
-    restart
+    restart,
+    kill
   } = useTerminal({
     paneId: config.id,
     workspaceId,
@@ -87,9 +98,10 @@ export function TerminalPane({
         onClick={handleClick}
         onContextMenu={handleContextMenu}
       >
-        <PaneLabel
+        <PaneLabelWithAgent
+          paneId={config.id}
           label={config.label}
-          status={getStatus()}
+          terminalStatus={getStatus()}
           hasActivity={hasActivity}
           onDoubleClick={onDoubleClickLabel}
         />
@@ -114,6 +126,7 @@ export function TerminalPane({
           onClose={handleCloseContextMenu}
           onUpdateConfig={onUpdateConfig}
           onRestart={handleRestartClick}
+          onKill={kill}
           onManageSSH={onManageSSH}
         />
       )}

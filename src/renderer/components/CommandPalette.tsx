@@ -21,7 +21,11 @@ interface CommandPaletteProps {
   onResizeGrid?: () => void
   onOpenSettings?: () => void
   onManageSSH?: () => void
+  onToggleAI?: () => void
+  onOpenAISettings?: () => void
+  onClearAIChat?: () => void
   broadcastEnabled: boolean
+  aiEnabled?: boolean
 }
 
 export function CommandPalette({
@@ -36,7 +40,11 @@ export function CommandPalette({
   onResizeGrid,
   onOpenSettings,
   onManageSSH,
-  broadcastEnabled
+  onToggleAI,
+  onOpenAISettings,
+  onClearAIChat,
+  broadcastEnabled,
+  aiEnabled
 }: CommandPaletteProps) {
   const [query, setQuery] = useState('')
   const [selectedIndex, setSelectedIndex] = useState(0)
@@ -143,8 +151,46 @@ export function CommandPalette({
       })
     }
 
+    // AI commands
+    if (onToggleAI) {
+      cmds.push({
+        id: 'toggle-ai',
+        label: aiEnabled ? 'Close AI Chat' : 'Open AI Chat',
+        shortcut: 'Ctrl+Shift+A',
+        action: () => {
+          onToggleAI()
+          onClose()
+        },
+        category: 'AI'
+      })
+    }
+
+    if (onOpenAISettings) {
+      cmds.push({
+        id: 'ai-settings',
+        label: 'AI Settings',
+        action: () => {
+          onOpenAISettings()
+          onClose()
+        },
+        category: 'AI'
+      })
+    }
+
+    if (onClearAIChat) {
+      cmds.push({
+        id: 'clear-ai-chat',
+        label: 'Clear AI Chat',
+        action: () => {
+          onClearAIChat()
+          onClose()
+        },
+        category: 'AI'
+      })
+    }
+
     return cmds
-  }, [workspaces, broadcastEnabled, onNewWorkspace, onToggleBroadcast, onSwitchWorkspace, onMaximizePane, onRestartPane, onResizeGrid, onOpenSettings, onManageSSH, onClose])
+  }, [workspaces, broadcastEnabled, aiEnabled, onNewWorkspace, onToggleBroadcast, onSwitchWorkspace, onMaximizePane, onRestartPane, onResizeGrid, onOpenSettings, onManageSSH, onToggleAI, onOpenAISettings, onClearAIChat, onClose])
 
   // Filter commands based on query
   const filteredCommands = useMemo(() => {
