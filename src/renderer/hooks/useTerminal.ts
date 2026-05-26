@@ -107,7 +107,10 @@ export function useTerminal({
   // Spawn or reconnect to PTY. Optional `overrides` are forced into the
   // outbound SSH command, bypassing React closure staleness when a caller
   // (like the session picker) wants to apply a fresh value immediately.
-  const spawnPty = useCallback(async (overrides?: { tmuxSessionName?: string | null }) => {
+  // `forceFresh` skips the "reattach to existing PTY for this pane" path —
+  // used by restart() so a user-initiated restart can't accidentally land
+  // back on the same (potentially broken) PTY.
+  const spawnPty = useCallback(async (overrides?: { tmuxSessionName?: string | null; forceFresh?: boolean }) => {
     if (!terminalInstanceRef.current || !fitAddonRef.current) return
 
     setIsLoading(true)
@@ -115,7 +118,9 @@ export function useTerminal({
     setExitCode(null)
 
     // First check if there's already a PTY for this pane (e.g., backgrounded from workspace switch)
-    const existingPtyId = await window.electronAPI.getPtyForPane(paneId)
+    const existingPtyId = overrides?.forceFresh
+      ? null
+      : await window.electronAPI.getPtyForPane(paneId)
     if (existingPtyId) {
       ptyIdRef.current = existingPtyId
       setIsConnected(true)
@@ -130,6 +135,9 @@ export function useTerminal({
       } catch (e) {
         console.error('Failed to restore scrollback:', e)
       }
+      // Focus the terminal so the user can type immediately (esp. password
+      // prompts after restart).
+      try { terminalInstanceRef.current?.focus() } catch { /* ignore */ }
       return
     }
 
@@ -183,6 +191,10 @@ export function useTerminal({
     if (result.success && result.ptyId) {
       ptyIdRef.current = result.ptyId
       setIsConnected(true)
+      // Focus so the user can type into the new shell immediately — the
+      // most common case after spawn is an interactive prompt (SSH
+      // password, login banner) that needs the cursor in the terminal.
+      try { terminalInstanceRef.current.focus() } catch { /* ignore */ }
     } else {
       terminalInstanceRef.current.writeln(`\x1b[31mFailed to start terminal: ${result.error}\x1b[0m`)
     }
@@ -448,6 +460,12 @@ export function useTerminal({
 
     const unsubscribeExit = window.electronAPI.onPtyExit((ptyId, code) => {
       if (ptyId === ptyIdRef.current) {
+        // Clear the ref — the PTY is gone in main as well (PtyManager
+        // deletes the instance in onExit). Leaving the ref pointing to a
+        // dead id makes restart() try to reattach to a corpse on its next
+        // getPtyForPane call, which is the "Restart button does nothing"
+        // symptom.
+        ptyIdRef.current = null
         setIsConnected(false)
         setHasExited(true)
         setExitCode(code)
@@ -466,6 +484,8 @@ export function useTerminal({
 
   // Restart function. Optional overrides flow straight through to spawnPty
   // so the new connection isn't held hostage by stale React closures.
+  // forceFresh ensures we don't accidentally reattach to a half-dead PTY
+  // for the same paneId — restart means start fresh, every time.
   const restart = useCallback(async (overrides?: { tmuxSessionName?: string | null }) => {
     if (ptyIdRef.current) {
       window.electronAPI.killPty(ptyIdRef.current)
@@ -475,7 +495,7 @@ export function useTerminal({
       terminalInstanceRef.current.clear()
     }
     setIsConnected(false)
-    await spawnPty(overrides)
+    await spawnPty({ ...overrides, forceFresh: true })
   }, [spawnPty])
 
   // Kill function (kill without respawn)

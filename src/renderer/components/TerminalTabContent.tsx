@@ -150,7 +150,12 @@ export function TerminalTabContent({
         <div className="terminal-container" ref={terminalRef} />
 
         {hasExited && (
-          <div className="absolute bottom-4 left-1/2 transform -translate-x-1/2">
+          <div
+            className="absolute bottom-4 left-1/2 transform -translate-x-1/2"
+            // z-index keeps the button above xterm's internal canvas layers
+            // (otherwise the canvas can sit on top and eat the click).
+            style={{ zIndex: 20 }}
+          >
             <button
               className="btn btn-secondary text-sm"
               onClick={handleRestartClick}
