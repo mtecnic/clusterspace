@@ -26,6 +26,7 @@ import { sendCdpCommand } from './cdp-helpers'
 import { appendActionLog, getActionLog } from './browser-action-log'
 import { requestApproval, selectorLooksLikePassword } from './browser-approval'
 import { getRecipeStore, runRecipe, type Recipe } from './browser-recipes'
+import { registerAllTools, toolRegistry, type ToolContext, type ToolRuntimeState } from './ai-tools'
 
 // OpenAI-compatible request/response types
 interface ChatCompletionRequest {
@@ -90,8 +91,11 @@ export class AIManager {
   private configLoader: ConfigLoader
   private activeRequests: Map<string, AbortController> = new Map()
 
-  // Step protocol tracking
-  private currentStep: { number: number; title: string; action: string; successCriteria: string } | null = null
+  // Shared state for tools that need to coordinate across calls (e.g., the
+  // step protocol's declare → verify handshake). Lives on the AIManager so
+  // each provider/conversation gets its own bag; passed into the tool
+  // registry's dispatch() as part of ToolContext.
+  private toolState: ToolRuntimeState = { currentStep: null }
 
   // Completion patterns for different terminal types
   private readonly COMPLETION_PATTERNS: Record<string, RegExp[]> = {
@@ -120,6 +124,23 @@ export class AIManager {
     this.agentStore = agentStore
     this.orchestrationStore = orchestrationStore
     this.configLoader = new ConfigLoader()
+    // Populate the global tool registry on first AIManager construction.
+    // Migration is incremental — registered tools take precedence; everything
+    // not yet migrated stays in the legacy switch below.
+    registerAllTools()
+  }
+
+  /** Snapshot of services tools can use, plus the shared mutable state bag. */
+  private buildToolContext(): ToolContext {
+    return {
+      window: this.window,
+      ptyManager: this.ptyManager,
+      workspaceStore: this.workspaceStore,
+      agentStore: this.agentStore,
+      orchestrationStore: this.orchestrationStore,
+      configLoader: this.configLoader,
+      state: this.toolState
+    }
   }
 
   // Strip <think>...</think> tags from AI responses
@@ -185,7 +206,7 @@ export class AIManager {
 
   // Get tool definitions for the AI model
   getToolDefinitions(): AIToolDefinition[] {
-    return [
+    const legacyDefs: AIToolDefinition[] = [
       {
         type: 'function',
         function: {
@@ -262,40 +283,9 @@ export class AIManager {
         }
       },
       // Step Protocol Tools
-      {
-        type: 'function',
-        function: {
-          name: 'declare_step',
-          description: 'REQUIRED before any terminal action. Declare what you are about to do and how you will verify success. You MUST call this before write_to_terminal or other actions.',
-          parameters: {
-            type: 'object',
-            properties: {
-              step_number: { type: 'number', description: 'Sequential step number (1, 2, 3...)' },
-              title: { type: 'string', description: 'Brief title (e.g., "List directory contents")' },
-              action: { type: 'string', description: 'The tool call you will make' },
-              success_criteria: { type: 'string', description: 'How to know if it worked' }
-            },
-            required: ['step_number', 'title', 'action', 'success_criteria']
-          }
-        }
-      },
-      {
-        type: 'function',
-        function: {
-          name: 'verify_step',
-          description: 'REQUIRED after executing a step. Verify the results before proceeding. You MUST analyze what you observed in the output.',
-          parameters: {
-            type: 'object',
-            properties: {
-              step_number: { type: 'number', description: 'Step being verified' },
-              passed: { type: 'boolean', description: 'Did it succeed based on success_criteria?' },
-              observation: { type: 'string', description: 'What you observed in the output - be specific!' },
-              next_action: { type: 'string', description: 'What you will do next (or "done" if complete)' }
-            },
-            required: ['step_number', 'passed', 'observation', 'next_action']
-          }
-        }
-      },
+      // declare_step / verify_step now come from the tool registry — see
+      // src/main/ai-tools/step-protocol.ts. Registry definitions are
+      // appended at the bottom of this function.
       {
         type: 'function',
         function: {
@@ -1022,6 +1012,9 @@ export class AIManager {
         }
       }
     ]
+    // Append every tool registered in the tool registry (step protocol today;
+    // more categories as they migrate out of the legacy switch).
+    return [...legacyDefs, ...toolRegistry.listDefinitions()]
   }
 
   // Test connection to a provider
@@ -1430,6 +1423,17 @@ export class AIManager {
       let result: unknown
       const dispatchStart = Date.now()
 
+      // Registry-first dispatch: any tool registered in src/main/ai-tools/
+      // is handled there, no need to fall into the legacy switch. As tool
+      // categories migrate out of the switch they just disappear from below.
+      if (toolRegistry.has(toolCall.name)) {
+        const r = await toolRegistry.dispatch(toolCall.name, args as Record<string, unknown>, this.buildToolContext())
+        if (r.ok) {
+          return { toolCallId: toolCall.id, result: r.result }
+        }
+        return { toolCallId: toolCall.id, result: { success: false, error: r.error } }
+      }
+
       // Approval gate for sensitive browser operations
       const needsGate =
         toolCall.name === 'browser_set_files' ||
@@ -1574,24 +1578,9 @@ export class AIManager {
           )
           break
 
-        // === STEP PROTOCOL TOOLS ===
-        case 'declare_step':
-          result = this.declareStep(
-            args.step_number as number,
-            args.title as string,
-            args.action as string,
-            args.success_criteria as string
-          )
-          break
-
-        case 'verify_step':
-          result = this.verifyStep(
-            args.step_number as number,
-            args.passed as boolean,
-            args.observation as string,
-            args.next_action as string
-          )
-          break
+        // STEP PROTOCOL: declare_step / verify_step now live in
+        // src/main/ai-tools/step-protocol.ts and are dispatched via the
+        // registry short-circuit at the top of executeTool.
 
         // === BROWSER PANE TOOLS ===
         case 'browser_navigate':
@@ -2032,32 +2021,7 @@ export class AIManager {
     }
   }
 
-  // Step Protocol Implementation
-  private declareStep(stepNumber: number, title: string, action: string, successCriteria: string): string {
-    console.log('[AI] declareStep:', { stepNumber, title, action, successCriteria })
-    this.currentStep = { number: stepNumber, title, action, successCriteria }
-    return `✓ Step ${stepNumber} declared: "${title}"\n` +
-           `  Action: ${action}\n` +
-           `  Success criteria: ${successCriteria}\n\n` +
-           `You may now execute this step. After execution, call verify_step to confirm results.`
-  }
-
-  private verifyStep(stepNumber: number, passed: boolean, observation: string, nextAction: string): string {
-    console.log('[AI] verifyStep:', { stepNumber, passed, observation, nextAction })
-
-    if (!this.currentStep || this.currentStep.number !== stepNumber) {
-      return `⚠️ Error: Step ${stepNumber} was not declared. Use declare_step first before executing actions.`
-    }
-
-    const result = passed ? '✓ PASSED' : '✗ FAILED'
-    const response = `Step ${stepNumber} verification: ${result}\n` +
-                     `  Title: ${this.currentStep.title}\n` +
-                     `  Observation: ${observation}\n` +
-                     `  Next: ${nextAction}`
-
-    this.currentStep = null  // Clear for next step
-    return response
-  }
+  // Step Protocol implementation moved to src/main/ai-tools/step-protocol.ts.
 
   private async listPanes(): Promise<AIPaneInfo[]> {
     const settings = this.workspaceStore.getSettings()
