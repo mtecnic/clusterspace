@@ -11,9 +11,11 @@ import { CommandPalette } from './components/CommandPalette'
 import { SettingsDialog } from './components/SettingsDialog'
 import { GridResizeDialog } from './components/GridResizeDialog'
 import { SSHServersDialog } from './components/SSHServersDialog'
+import { BrowserCredentialsDialog } from './components/BrowserCredentialsDialog'
 import { AIChatPanel } from './components/AIChatPanel'
 import { AISettingsDialog } from './components/AISettingsDialog'
 import { FleetDashboard } from './components/FleetDashboard'
+import { BrowserApprovalModal } from './components/BrowserApprovalModal'
 import { GridConfig, PaneConfig } from '@shared/types'
 
 interface AppContentProps {
@@ -41,6 +43,7 @@ function AppContent({ onRegisterFocusPane, onRegisterMaximizePane }: AppContentP
   const [showSettingsDialog, setShowSettingsDialog] = useState(false)
   const [showGridResizeDialog, setShowGridResizeDialog] = useState(false)
   const [showSSHServersDialog, setShowSSHServersDialog] = useState(false)
+  const [showBrowserCredentialsDialog, setShowBrowserCredentialsDialog] = useState(false)
   const [showAISettingsDialog, setShowAISettingsDialog] = useState(false)
   const [showFleetDashboard, setShowFleetDashboard] = useState(false)
   const [focusedPaneId, setFocusedPaneId] = useState<string | null>(null)
@@ -84,6 +87,21 @@ function AppContent({ onRegisterFocusPane, onRegisterMaximizePane }: AppContentP
   const handleResizeGrid = useCallback(async (grid: GridConfig) => {
     if (!activeWorkspace) return
     await updateWorkspace(activeWorkspace.id, { grid })
+  }, [activeWorkspace, updateWorkspace])
+
+  // Swap two panes' grid positions. IDs stay stable so AI references
+  // (which use pane_id, not position) remain valid.
+  const handleSwapPanes = useCallback(async (aId: string, bId: string) => {
+    if (!activeWorkspace || aId === bId) return
+    const a = activeWorkspace.panes.find(p => p.id === aId)
+    const b = activeWorkspace.panes.find(p => p.id === bId)
+    if (!a || !b) return
+    const nextPanes = activeWorkspace.panes.map(p => {
+      if (p.id === aId) return { ...p, position: b.position }
+      if (p.id === bId) return { ...p, position: a.position }
+      return p
+    })
+    await updateWorkspace(activeWorkspace.id, { panes: nextPanes })
   }, [activeWorkspace, updateWorkspace])
 
   // Handle workspace import
@@ -241,10 +259,13 @@ function AppContent({ onRegisterFocusPane, onRegisterMaximizePane }: AppContentP
           <PaneGrid
             workspace={activeWorkspace}
             onUpdatePane={handleUpdatePane}
+            onUpdateGrid={handleResizeGrid}
+            onSwapPanes={handleSwapPanes}
             focusedPaneId={focusedPaneId}
             onPaneFocus={setFocusedPaneId}
             broadcastEnabled={broadcastEnabled}
             onManageSSH={() => setShowSSHServersDialog(true)}
+            onManageBrowserCredentials={() => setShowBrowserCredentialsDialog(true)}
           />
         ) : (
           <div className="h-full flex items-center justify-center">
@@ -327,6 +348,10 @@ function AppContent({ onRegisterFocusPane, onRegisterMaximizePane }: AppContentP
           setShowSSHServersDialog(true)
           setShowCommandPalette(false)
         }}
+        onManageBrowserCredentials={() => {
+          setShowBrowserCredentialsDialog(true)
+          setShowCommandPalette(false)
+        }}
         onToggleAI={toggleAIPanel}
         onOpenAISettings={() => {
           setShowAISettingsDialog(true)
@@ -335,6 +360,12 @@ function AppContent({ onRegisterFocusPane, onRegisterMaximizePane }: AppContentP
         onClearAIChat={clearAIChat}
         broadcastEnabled={broadcastEnabled}
         aiEnabled={isPanelOpen}
+      />
+
+      {/* Browser Saved Logins Dialog */}
+      <BrowserCredentialsDialog
+        isOpen={showBrowserCredentialsDialog}
+        onClose={() => setShowBrowserCredentialsDialog(false)}
       />
 
       {/* SSH Servers Dialog */}
@@ -414,6 +445,7 @@ export function App() {
     <WorkspaceProvider>
       <AgentProvider>
         <AppWithAI />
+        <BrowserApprovalModal />
       </AgentProvider>
     </WorkspaceProvider>
   )

@@ -9,6 +9,14 @@ interface PaneContextMenuProps {
   onRestart: () => void
   onKill: () => void
   onManageSSH?: () => void
+  // Opens the picker that lets the user attach this pane to an existing
+  // remote tmux session (only meaningful for SSH-connected panes).
+  onPickTmuxSession?: () => void
+  // Clipboard ops for terminal panes. onCopy is omitted when there's no
+  // selection (button hidden); onPaste is always available.
+  onCopy?: () => void
+  onPaste?: () => void
+  onSelectAll?: () => void
 }
 
 export function PaneContextMenu({
@@ -18,7 +26,11 @@ export function PaneContextMenu({
   onUpdateConfig,
   onRestart,
   onKill,
-  onManageSSH
+  onManageSSH,
+  onPickTmuxSession,
+  onCopy,
+  onPaste,
+  onSelectAll
 }: PaneContextMenuProps) {
   const [showEditPanel, setShowEditPanel] = useState(false)
   const [editLabel, setEditLabel] = useState(config.label)
@@ -235,12 +247,77 @@ export function PaneContextMenu({
     )
   }
 
+  const isBrowser = config.type === 'browser'
+
+  const handleConvertToBrowser = async () => {
+    let defaultUrl = 'https://www.google.com'
+    try {
+      const settings = await window.electronAPI.getSettings()
+      if (settings?.defaultBrowserUrl) defaultUrl = settings.defaultBrowserUrl
+    } catch {
+      // Fall back to hardcoded default
+    }
+    // Tear down the PTY before swapping component, so we don't leak a shell.
+    onKill()
+    onUpdateConfig({ type: 'browser', url: defaultUrl })
+    onClose()
+  }
+
+  const handleConvertToTerminal = () => {
+    onUpdateConfig({ type: 'terminal', url: undefined })
+    onClose()
+  }
+
+  if (isBrowser) {
+    return (
+      <div
+        ref={menuRef}
+        className="context-menu"
+        style={{ left: adjustedPosition.x, top: adjustedPosition.y }}
+      >
+        <div className="context-menu-item" onClick={handleConvertToTerminal}>
+          <span>Convert to Terminal</span>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div
       ref={menuRef}
       className="context-menu"
       style={{ left: adjustedPosition.x, top: adjustedPosition.y }}
     >
+      {(onCopy || onPaste || onSelectAll) && (
+        <>
+          {onCopy && (
+            <div
+              className="context-menu-item"
+              onClick={() => { onCopy(); onClose() }}
+            >
+              <span>Copy</span><span className="kbd">Ctrl+Shift+C</span>
+            </div>
+          )}
+          {onPaste && (
+            <div
+              className="context-menu-item"
+              onClick={() => { onPaste(); onClose() }}
+            >
+              <span>Paste</span><span className="kbd">Ctrl+V</span>
+            </div>
+          )}
+          {onSelectAll && (
+            <div
+              className="context-menu-item"
+              onClick={() => { onSelectAll(); onClose() }}
+            >
+              <span>Select All</span>
+            </div>
+          )}
+          <div className="context-menu-divider" />
+        </>
+      )}
+
       <div
         className="context-menu-item"
         onClick={() => setShowEditPanel(true)}
@@ -258,6 +335,19 @@ export function PaneContextMenu({
         }}
       >
         <span>{config.bypassPermissions ? 'Disable' : 'Enable'} Bypass Permissions</span>
+      </div>
+
+      <div
+        className="context-menu-item"
+        onClick={() => {
+          onUpdateConfig({ disableAppMouse: !config.disableAppMouse })
+          onClose()
+        }}
+        title={config.disableAppMouse
+          ? 'Currently dropping mouse events — xterm native selection wins. Click to let tmux/vim see the mouse again.'
+          : 'Currently forwarding mouse events to the app (tmux/vim mouse mode works). Click to drop them so drag-select doesn\'t need Shift/Alt.'}
+      >
+        <span>{config.disableAppMouse ? 'Forward Mouse to App' : 'Disable App Mouse (Native Select)'}</span>
       </div>
 
       <div
@@ -291,6 +381,30 @@ export function PaneContextMenu({
       >
         <span>Kill Terminal</span>
       </div>
+
+      <div className="context-menu-divider" />
+
+      <div className="context-menu-item" onClick={handleConvertToBrowser}>
+        <span>Convert to Browser</span>
+      </div>
+
+      {onPickTmuxSession && config.sshServerId && (
+        <>
+          <div className="context-menu-divider" />
+          <div
+            className="context-menu-item"
+            onClick={() => { onPickTmuxSession(); onClose() }}
+            title="Pick which tmux session this pane attaches to on the remote"
+          >
+            <span>Attach to tmux session...</span>
+            {config.tmuxSessionName && (
+              <span className="text-xs text-cs-text-muted ml-2 truncate max-w-[120px]">
+                {config.tmuxSessionName}
+              </span>
+            )}
+          </div>
+        </>
+      )}
 
       {sshServers.length > 0 && (
         <>

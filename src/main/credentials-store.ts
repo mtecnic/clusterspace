@@ -163,8 +163,12 @@ export class CredentialsStore {
     this.store.set('encryptedPasswords', passwords)
   }
 
-  // Build SSH command for a server (with mandatory tmux for persistent sessions)
-  buildSSHCommand(serverId: string): { command: string; args: string[] } | null {
+  // Build SSH command for a server (with mandatory tmux for persistent sessions).
+  // When paneId is provided, the tmux session is unique to that pane, so two
+  // panes connecting to the same host get independent sessions. Without paneId
+  // we fall back to the legacy server-name session (back-compat for older
+  // saved configs and the test/connect dialog).
+  buildSSHCommand(serverId: string, paneId?: string, sessionOverride?: string): { command: string; args: string[]; sessionName: string } | null {
     const server = this.getServer(serverId)
     if (!server) {
       return null
@@ -189,10 +193,15 @@ export class CredentialsStore {
     // Add user@host
     args.push(`${server.username}@${server.host}`)
 
-    // Add tmux command - attach to existing session or create new one
-    // -A flag: attach if session exists, otherwise create new
-    // Use server name as session name for consistency
-    const sessionName = server.name.replace(/[^a-zA-Z0-9]/g, '-').toLowerCase()
+    // Add tmux command. -A: attach if session exists, otherwise create new.
+    // Priority: explicit override > per-pane unique name > legacy server name.
+    // The override exists so users can reattach to sessions that pre-date the
+    // per-pane naming scheme (or share a session across panes intentionally).
+    const sessionName = sessionOverride
+      ? sessionOverride
+      : paneId
+        ? `clusterspace-pane-${paneId.slice(0, 8)}`
+        : server.name.replace(/[^a-zA-Z0-9]/g, '-').toLowerCase()
     args.push('tmux', 'new-session', '-A', '-s', sessionName)
 
     // Use full path to ssh on Windows
@@ -205,7 +214,37 @@ export class CredentialsStore {
 
     return {
       command: sshCommand,
-      args
+      args,
+      sessionName
     }
+  }
+
+  // Run a one-shot SSH command (no tmux, no PTY allocation) — used for
+  // server-side cleanup like `tmux kill-session`. Returns the SSH command
+  // shape ready to spawn.
+  //
+  // BatchMode=yes makes ssh fail fast (rather than hang) if it would need
+  // to prompt for a password or passphrase. Without it, password-auth
+  // servers would block forever on stdin we have no way to feed.
+  buildSSHOneShot(serverId: string, remoteCommand: string): { command: string; args: string[]; authMethod: 'password' | 'key' } | null {
+    const server = this.getServer(serverId)
+    if (!server) return null
+    const args: string[] = [
+      '-o', 'BatchMode=yes',
+      '-o', 'ConnectTimeout=5',
+      '-o', 'StrictHostKeyChecking=accept-new'
+    ]
+    if (server.port !== 22) args.push('-p', String(server.port))
+    if (server.authMethod === 'key' && server.privateKeyPath) {
+      args.push('-i', server.privateKeyPath)
+    }
+    args.push(`${server.username}@${server.host}`)
+    args.push(remoteCommand)
+    let sshCommand = 'ssh'
+    if (process.platform === 'win32') {
+      const systemRoot = process.env.SystemRoot || 'C:\\Windows'
+      sshCommand = `${systemRoot}\\System32\\OpenSSH\\ssh.exe`
+    }
+    return { command: sshCommand, args, authMethod: server.authMethod }
   }
 }

@@ -21,6 +21,7 @@ interface CommandPaletteProps {
   onResizeGrid?: () => void
   onOpenSettings?: () => void
   onManageSSH?: () => void
+  onManageBrowserCredentials?: () => void
   onToggleAI?: () => void
   onOpenAISettings?: () => void
   onClearAIChat?: () => void
@@ -40,6 +41,7 @@ export function CommandPalette({
   onResizeGrid,
   onOpenSettings,
   onManageSSH,
+  onManageBrowserCredentials,
   onToggleAI,
   onOpenAISettings,
   onClearAIChat,
@@ -151,6 +153,18 @@ export function CommandPalette({
       })
     }
 
+    if (onManageBrowserCredentials) {
+      cmds.push({
+        id: 'manage-browser-credentials',
+        label: 'Manage Saved Logins',
+        action: () => {
+          onManageBrowserCredentials()
+          onClose()
+        },
+        category: 'Browser'
+      })
+    }
+
     // AI commands
     if (onToggleAI) {
       cmds.push({
@@ -190,7 +204,7 @@ export function CommandPalette({
     }
 
     return cmds
-  }, [workspaces, broadcastEnabled, aiEnabled, onNewWorkspace, onToggleBroadcast, onSwitchWorkspace, onMaximizePane, onRestartPane, onResizeGrid, onOpenSettings, onManageSSH, onToggleAI, onOpenAISettings, onClearAIChat, onClose])
+  }, [workspaces, broadcastEnabled, aiEnabled, onNewWorkspace, onToggleBroadcast, onSwitchWorkspace, onMaximizePane, onRestartPane, onResizeGrid, onOpenSettings, onManageSSH, onManageBrowserCredentials, onToggleAI, onOpenAISettings, onClearAIChat, onClose])
 
   // Filter commands based on query
   const filteredCommands = useMemo(() => {

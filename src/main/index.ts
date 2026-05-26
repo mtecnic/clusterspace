@@ -1,14 +1,24 @@
-import { app, BrowserWindow, ipcMain, dialog, clipboard, nativeImage } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, clipboard, nativeImage, shell, session } from 'electron'
 import { join } from 'path'
 import { PtyManager } from './pty-manager'
 import { WorkspaceStore } from './workspace-store'
 import { CredentialsStore } from './credentials-store'
+import { BrowserCredentialsStore } from './browser-credentials-store'
 import { AIStore } from './ai-store'
 import { AIManager } from './ai-manager'
 import { AIMemoryStore, AIConversation } from './ai-memory-store'
 import { AgentStore } from './agent-store'
 import { OrchestrationStore } from './orchestration-store'
 import { ConfigLoader } from './config-loader'
+import { BrowserStore } from './browser-store'
+import {
+  registerBrowserPane,
+  unregisterBrowserPane,
+  getBrowserWebContents
+} from './browser-pane-registry'
+import { getActionLog, subscribeActionLog } from './browser-action-log'
+import { resolveApproval } from './browser-approval'
+import { RecipeStore } from './browser-recipes'
 import {
   IPC_CHANNELS,
   PtySpawnConfig,
@@ -17,8 +27,10 @@ import {
   AIMessage,
   AIToolCall,
   DEFAULT_AI_SETTINGS,
-  AgentTask
+  AgentTask,
+  DownloadInfo
 } from '../shared/types'
+import { v4 as uuidv4 } from 'uuid'
 
 // Handle Squirrel events on Windows (for auto-update)
 // This is only needed if using Squirrel installer, not NSIS
@@ -40,13 +52,31 @@ let aiMemoryStore: AIMemoryStore | null = null
 let agentStore: AgentStore | null = null
 let orchestrationStore: OrchestrationStore | null = null
 let configLoader: ConfigLoader | null = null
+let browserStore: BrowserStore | null = null
+let browserCredentialsStore: BrowserCredentialsStore | null = null
+let recipeStore: RecipeStore | null = null
+const activeDownloads = new Map<string, DownloadInfo>()
 
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged
 
+// Build a clean desktop Chrome user-agent so embedded webviews (and the main
+// window's network requests) don't leak the Electron/fleet-term substrings
+// that Cloudflare and similar services flag as bot traffic.
+function buildChromeUserAgent(): string {
+  const chromeVersion = process.versions.chrome || '126.0.0.0'
+  return `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36`
+}
+
 function createWindow() {
+  // Settings must exist before BrowserWindow so we can restore window geometry.
+  workspaceStore = new WorkspaceStore()
+  const persistedWindow = workspaceStore.getSettings().windowState
+
   mainWindow = new BrowserWindow({
-    width: 1400,
-    height: 900,
+    x: persistedWindow?.x,
+    y: persistedWindow?.y,
+    width: persistedWindow?.width ?? 1400,
+    height: persistedWindow?.height ?? 900,
     minWidth: 800,
     minHeight: 600,
     title: 'ClusterSpace',
@@ -56,19 +86,53 @@ function createWindow() {
       preload: join(__dirname, '../preload/index.js'),
       nodeIntegration: false,
       contextIsolation: true,
-      sandbox: false // Required for node-pty
+      sandbox: false, // Required for node-pty
+      webviewTag: true // Enables <webview> for browser panes
     }
   })
 
-  // Initialize managers
+  if (persistedWindow?.fullscreen) {
+    mainWindow.setFullScreen(true)
+  } else if (persistedWindow?.maximized) {
+    mainWindow.maximize()
+  }
+
+  // Persist window geometry. We capture on 'close' (not 'closed') so getBounds
+  // still returns the user-set size; if the window was maximized at close time
+  // we keep the *restored* bounds (Electron returns those automatically) so
+  // the next launch un-maximizes to a sensible size.
+  const saveWindowState = () => {
+    if (!mainWindow || mainWindow.isDestroyed() || !workspaceStore) return
+    const bounds = mainWindow.getNormalBounds()
+    workspaceStore.updateSettings({
+      windowState: {
+        x: bounds.x,
+        y: bounds.y,
+        width: bounds.width,
+        height: bounds.height,
+        maximized: mainWindow.isMaximized(),
+        fullscreen: mainWindow.isFullScreen()
+      }
+    })
+  }
+  mainWindow.on('close', saveWindowState)
+
+  // Initialize remaining managers
   ptyManager = new PtyManager(mainWindow)
-  workspaceStore = new WorkspaceStore()
   credentialsStore = new CredentialsStore()
   aiStore = new AIStore()
   aiMemoryStore = new AIMemoryStore()
   agentStore = new AgentStore()
   orchestrationStore = new OrchestrationStore()
   configLoader = new ConfigLoader()
+  browserStore = new BrowserStore()
+  browserCredentialsStore = new BrowserCredentialsStore()
+  recipeStore = new RecipeStore()
+
+  // Forward action-log entries to the renderer for live ticker display.
+  subscribeActionLog(entry => {
+    mainWindow?.webContents.send(IPC_CHANNELS.BROWSER_ACTION_LOG_APPEND, entry)
+  })
   orchestrationStore.setWindow(mainWindow)
   orchestrationStore.setAgentStore(agentStore)
   aiManager = new AIManager(mainWindow, ptyManager, workspaceStore, agentStore, orchestrationStore)
@@ -253,7 +317,8 @@ function registerIpcHandlers() {
         activeWorkspaceId: null,
         theme: 'dark',
         fontSize: 14,
-        fontFamily: 'Cascadia Code, Consolas, monospace'
+        fontFamily: 'Cascadia Code, Consolas, monospace',
+        defaultBrowserUrl: 'https://www.google.com'
       }
     } catch (error) {
       console.error('Settings get error:', error)
@@ -263,7 +328,8 @@ function registerIpcHandlers() {
         activeWorkspaceId: null,
         theme: 'dark',
         fontSize: 14,
-        fontFamily: 'Cascadia Code, Consolas, monospace'
+        fontFamily: 'Cascadia Code, Consolas, monospace',
+        defaultBrowserUrl: 'https://www.google.com'
       }
     }
   })
@@ -440,13 +506,113 @@ function registerIpcHandlers() {
     }
   })
 
-  // Get fresh SSH command (always rebuilds with latest settings like tmux)
-  ipcMain.handle(IPC_CHANNELS.SSH_GET_COMMAND, async (_event, serverId: string) => {
+  // Get fresh SSH command (always rebuilds with latest settings like tmux).
+  // paneId, when provided, gives the pane a unique tmux session — without it
+  // we keep the legacy server-name session (back-compat for test/connect dialogs).
+  ipcMain.handle(IPC_CHANNELS.SSH_GET_COMMAND, async (_event, serverId: string, paneId?: string, sessionOverride?: string) => {
     try {
-      return credentialsStore?.buildSSHCommand(serverId) || null
+      return credentialsStore?.buildSSHCommand(serverId, paneId, sessionOverride) || null
     } catch (error) {
       console.error('Failed to get SSH command:', error)
       return null
+    }
+  })
+
+  // List tmux sessions on the remote (for the session-recovery picker).
+  // Returns [{ name, attached, created }] parsed from `tmux list-sessions`.
+  ipcMain.handle('ssh:list-tmux-sessions', async (_event, serverId: string) => {
+    try {
+      if (!credentialsStore) return { success: false, error: 'credentials store not initialized', sessions: [] }
+      // Use pipe as field separator (single quotes preserve literal `\t` which
+      // tmux does NOT expand). We split on `|` instead. We also emit a sentinel
+      // prefix on each line so we can distinguish session output from any stray
+      // shell noise (e.g., MOTD, login banners).
+      const oneShot = credentialsStore.buildSSHOneShot(
+        serverId,
+        `tmux list-sessions -F 'CSPAN|#{session_name}|#{session_attached}|#{session_created}' 2>/dev/null; exit 0`
+      )
+      if (!oneShot) return { success: false, error: 'server not found', sessions: [] }
+      const { spawn } = await import('child_process')
+      return await new Promise<{ success: boolean; error?: string; sessions: Array<{ name: string; attached: boolean; created: number }>; authHint?: string }>((resolve) => {
+        const proc = spawn(oneShot.command, oneShot.args, { stdio: ['ignore', 'pipe', 'pipe'] })
+        let stdout = ''
+        let stderr = ''
+        // Belt-and-suspenders timeout in case BatchMode somehow doesn't trip.
+        const timeout = setTimeout(() => {
+          try { proc.kill('SIGKILL') } catch { /* ignore */ }
+          resolve({
+            success: false,
+            error: 'SSH connection timed out',
+            sessions: [],
+            authHint: oneShot.authMethod === 'password'
+              ? 'Listing requires non-interactive SSH (keys with no passphrase). Type the session name manually below.'
+              : undefined
+          })
+        }, 8000)
+        proc.stdout.on('data', (d) => { stdout += d.toString() })
+        proc.stderr.on('data', (d) => { stderr += d.toString() })
+        proc.on('exit', (code) => {
+          clearTimeout(timeout)
+          if (code !== 0) {
+            const err = stderr.trim() || `ssh exited ${code}`
+            const looksLikeAuth = /permission denied|publickey|password|interactive/i.test(err)
+            resolve({
+              success: false,
+              error: err,
+              sessions: [],
+              authHint: looksLikeAuth && oneShot.authMethod === 'password'
+                ? 'Password-auth servers can\'t be listed non-interactively. Type the session name manually below.'
+                : undefined
+            })
+            return
+          }
+          const sessions = stdout
+            .split('\n')
+            .map(line => line.trim())
+            .filter(line => line.startsWith('CSPAN|'))
+            .map(line => {
+              const parts = line.split('|')
+              // parts[0] is the sentinel, parts[1..] are name/attached/created
+              return {
+                name: parts[1] || '',
+                attached: parts[2] === '1',
+                created: Number(parts[3]) || 0
+              }
+            })
+            .filter(s => s.name)
+          resolve({ success: true, sessions })
+        })
+        proc.on('error', (err) => {
+          clearTimeout(timeout)
+          resolve({ success: false, error: err.message, sessions: [] })
+        })
+      })
+    } catch (error) {
+      return { success: false, error: (error as Error).message, sessions: [] }
+    }
+  })
+
+  // Destroy the remote tmux session for a pane (sends `tmux kill-session -t <name>`
+  // via a one-shot SSH connection). Returns success/failure.
+  ipcMain.handle('ssh:destroy-tmux-session', async (_event, serverId: string, sessionName: string) => {
+    try {
+      if (!credentialsStore) return { success: false, error: 'credentials store not initialized' }
+      const oneShot = credentialsStore.buildSSHOneShot(serverId, `tmux kill-session -t ${sessionName} 2>/dev/null || true`)
+      if (!oneShot) return { success: false, error: 'server not found' }
+      // Spawn the one-shot SSH command without waiting for it to attach to
+      // anything — node's child_process is sufficient here. We don't need a
+      // PTY; tmux kill-session is non-interactive.
+      const { spawn } = await import('child_process')
+      return await new Promise<{ success: boolean; error?: string }>((resolve) => {
+        const proc = spawn(oneShot.command, oneShot.args, { stdio: 'ignore' })
+        proc.on('exit', (code) => {
+          if (code === 0) resolve({ success: true })
+          else resolve({ success: false, error: `ssh exited ${code}` })
+        })
+        proc.on('error', (err) => resolve({ success: false, error: err.message }))
+      })
+    } catch (error) {
+      return { success: false, error: (error as Error).message }
     }
   })
 
@@ -979,9 +1145,414 @@ function registerIpcHandlers() {
       return null
     }
   })
+
+  // ============= BROWSER SITE-CREDENTIALS HANDLERS =============
+
+  ipcMain.handle(IPC_CHANNELS.BROWSER_CREDENTIALS_LIST, async () => {
+    try { return browserCredentialsStore?.list() ?? [] } catch { return [] }
+  })
+
+  ipcMain.handle(IPC_CHANNELS.BROWSER_CREDENTIALS_SAVE, async (_e, input: { id?: string; origin: string; username: string; password: string; notes?: string }) => {
+    try { return browserCredentialsStore?.save(input) ?? null } catch (err) {
+      console.error('[credentials] save failed:', err)
+      return null
+    }
+  })
+
+  ipcMain.handle(IPC_CHANNELS.BROWSER_CREDENTIALS_DELETE, async (_e, id: string) => {
+    try { return browserCredentialsStore?.delete(id) ?? false } catch { return false }
+  })
+
+  ipcMain.handle(IPC_CHANNELS.BROWSER_CREDENTIALS_GET_BY_ORIGIN, async (_e, origin: string) => {
+    // Returns metadata only (no passwords) so the renderer can show the user
+    // a picker without ever holding plaintext in renderer memory.
+    try {
+      const full = browserCredentialsStore?.getByOrigin(origin) ?? []
+      return full.map(({ password: _p, ...rest }) => rest)
+    } catch { return [] }
+  })
+
+  ipcMain.handle(IPC_CHANNELS.BROWSER_CREDENTIALS_REVEAL, async (_e, id: string) => {
+    // Returns plaintext password. Only called from the credentials manager
+    // dialog's "Show password" affordance, which is an explicit user action.
+    try { return browserCredentialsStore?.reveal(id) ?? null } catch { return null }
+  })
+
+  ipcMain.handle(IPC_CHANNELS.BROWSER_CREDENTIALS_FILL, async (_e, paneId: string, credentialId: string) => {
+    // Inject the credential into the target browser pane's webview.
+    // Plaintext password never crosses the renderer boundary — it's read in
+    // main, encoded as a literal in the injected script, and executed inside
+    // the webview's isolated context.
+    try {
+      const cred = browserCredentialsStore?.reveal(credentialId)
+      if (!cred) return { success: false, error: 'credential not found' }
+      const wc = getBrowserWebContents(paneId)
+      if (!wc) return { success: false, error: 'pane not connected' }
+
+      // JSON.stringify makes the values safe to embed as JS literals.
+      const userLit = JSON.stringify(cred.username)
+      const passLit = JSON.stringify(cred.password)
+      const script = `
+        (() => {
+          const setVal = (el, val) => {
+            if (!el) return false;
+            const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+            setter.call(el, val);
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+            return true;
+          };
+          // Prefer fields the user has actually focused, then fall back to
+          // heuristics. We do NOT submit forms — user reviews and submits.
+          const pwd = document.querySelector('input[type="password"]:not([disabled])');
+          let user = null;
+          if (pwd && pwd.form) {
+            user = pwd.form.querySelector('input[type="email"], input[type="text"], input[autocomplete="username"]');
+          }
+          if (!user) {
+            user = document.querySelector('input[autocomplete="username"], input[type="email"], input[name*="user" i], input[id*="user" i]');
+          }
+          const filledUser = setVal(user, ${userLit});
+          const filledPass = setVal(pwd, ${passLit});
+          return { filledUser, filledPass };
+        })()
+      `
+      const result = await wc.executeJavaScript(script, true)
+      return { success: true, ...(result as object) }
+    } catch (err) {
+      console.error('[credentials] fill failed:', err)
+      return { success: false, error: (err as Error).message }
+    }
+  })
+
+  // ============= BROWSER STORE HANDLERS =============
+
+  ipcMain.handle(IPC_CHANNELS.BROWSER_BOOKMARKS_GET, async () => {
+    try { return browserStore?.getBookmarks() ?? [] } catch { return [] }
+  })
+
+  ipcMain.handle(IPC_CHANNELS.BROWSER_BOOKMARKS_ADD, async (_e, url: string, title: string, favicon?: string) => {
+    try { return browserStore?.addBookmark(url, title, favicon) ?? null } catch { return null }
+  })
+
+  ipcMain.handle(IPC_CHANNELS.BROWSER_BOOKMARKS_REMOVE, async (_e, idOrUrl: string) => {
+    try { return browserStore?.removeBookmark(idOrUrl) ?? false } catch { return false }
+  })
+
+  ipcMain.handle(IPC_CHANNELS.BROWSER_HISTORY_GET, async (_e, limit?: number) => {
+    try { return browserStore?.getHistory(limit) ?? [] } catch { return [] }
+  })
+
+  ipcMain.handle(IPC_CHANNELS.BROWSER_HISTORY_ADD, async (_e, url: string, title: string, favicon?: string) => {
+    try { browserStore?.addHistory(url, title, favicon); return true } catch { return false }
+  })
+
+  ipcMain.handle(IPC_CHANNELS.BROWSER_HISTORY_SEARCH, async (_e, query: string, limit?: number) => {
+    try { return browserStore?.searchHistory(query, limit) ?? [] } catch { return [] }
+  })
+
+  ipcMain.handle(IPC_CHANNELS.BROWSER_HISTORY_CLEAR, async () => {
+    try { browserStore?.clearHistory(); return true } catch { return false }
+  })
+
+  ipcMain.handle(IPC_CHANNELS.BROWSER_DOWNLOADS_GET, async () => {
+    return Array.from(activeDownloads.values())
+  })
+
+  ipcMain.handle(IPC_CHANNELS.BROWSER_DOWNLOAD_OPEN, async (_e, id: string) => {
+    const dl = activeDownloads.get(id)
+    if (!dl || dl.state !== 'completed' || !dl.savePath) return false
+    const err = await shell.openPath(dl.savePath)
+    return err === ''
+  })
+
+  ipcMain.handle(IPC_CHANNELS.BROWSER_DOWNLOAD_REVEAL, async (_e, id: string) => {
+    const dl = activeDownloads.get(id)
+    if (!dl || !dl.savePath) return false
+    shell.showItemInFolder(dl.savePath)
+    return true
+  })
+
+  ipcMain.handle(IPC_CHANNELS.BROWSER_DOWNLOAD_CANCEL, async (_e, id: string) => {
+    // Best-effort: we no longer hold the DownloadItem reference, so just clear UI state.
+    const dl = activeDownloads.get(id)
+    if (dl && dl.state === 'progressing') {
+      dl.state = 'cancelled'
+    }
+    return true
+  })
+
+  // Open URL in the user's OS default browser (used by webview context menu)
+  ipcMain.handle(IPC_CHANNELS.BROWSER_OPEN_EXTERNAL, async (_e, url: string) => {
+    if (!/^https?:/i.test(url)) return false
+    await shell.openExternal(url)
+    return true
+  })
+
+  // ====== Browser <-> AI bridge ======
+
+  // BrowserPane registers its webview's webContentsId so we can drive it.
+  ipcMain.on(IPC_CHANNELS.BROWSER_PANE_REGISTER, (_e, paneId: string, webContentsId: number) => {
+    registerBrowserPane(paneId, webContentsId)
+  })
+  ipcMain.on(IPC_CHANNELS.BROWSER_PANE_UNREGISTER, (_e, paneId: string) => {
+    unregisterBrowserPane(paneId)
+  })
+
+  // AI-driven browser control. All return uniform result shapes.
+
+  ipcMain.handle(IPC_CHANNELS.AI_BROWSER_NAVIGATE, async (_e, paneId: string, url: string) => {
+    const wc = getBrowserWebContents(paneId)
+    if (!wc) return { success: false, error: `No browser pane ${paneId}` }
+    try { await wc.loadURL(url); return { success: true } }
+    catch (error) { return { success: false, error: (error as Error).message } }
+  })
+
+  ipcMain.handle(IPC_CHANNELS.AI_BROWSER_GET_CONTENT, async (_e, paneId: string) => {
+    const wc = getBrowserWebContents(paneId)
+    if (!wc) return { success: false, error: `No browser pane ${paneId}` }
+    try {
+      const text = await wc.executeJavaScript(
+        `(() => { const b = document.body; return b ? b.innerText : '' })()`,
+        true
+      )
+      return { success: true, url: wc.getURL(), title: wc.getTitle(), text }
+    } catch (error) {
+      return { success: false, error: (error as Error).message }
+    }
+  })
+
+  ipcMain.handle(IPC_CHANNELS.AI_BROWSER_SCREENSHOT, async (_e, paneId: string) => {
+    const wc = getBrowserWebContents(paneId)
+    if (!wc) return null
+    try {
+      const image = await wc.capturePage()
+      return image.toDataURL()
+    } catch { return null }
+  })
+
+  ipcMain.handle(IPC_CHANNELS.AI_BROWSER_EXECUTE_JS, async (_e, paneId: string, code: string) => {
+    const wc = getBrowserWebContents(paneId)
+    if (!wc) return { success: false, error: `No browser pane ${paneId}` }
+    try {
+      const result = await wc.executeJavaScript(code, true)
+      return { success: true, result }
+    } catch (error) {
+      return { success: false, error: (error as Error).message }
+    }
+  })
+
+  ipcMain.handle(IPC_CHANNELS.AI_BROWSER_CLICK, async (_e, paneId: string, selector: string) => {
+    const wc = getBrowserWebContents(paneId)
+    if (!wc) return { success: false, error: `No browser pane ${paneId}` }
+    const code = `(() => {
+      const el = document.querySelector(${JSON.stringify(selector)});
+      if (!el) return { found: false };
+      el.scrollIntoView({ block: 'center', behavior: 'instant' });
+      el.click();
+      return { found: true, tag: el.tagName.toLowerCase() };
+    })()`
+    try {
+      const result = await wc.executeJavaScript(code, true)
+      return { success: true, ...(result as object) }
+    } catch (error) {
+      return { success: false, error: (error as Error).message }
+    }
+  })
+
+  ipcMain.handle(IPC_CHANNELS.AI_BROWSER_TYPE, async (_e, paneId: string, selector: string, text: string, submit?: boolean) => {
+    const wc = getBrowserWebContents(paneId)
+    if (!wc) return { success: false, error: `No browser pane ${paneId}` }
+    const code = `(() => {
+      const el = document.querySelector(${JSON.stringify(selector)});
+      if (!el) return { found: false };
+      el.focus();
+      const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+      const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+      if (setter) setter.call(el, ${JSON.stringify(text)});
+      else el.value = ${JSON.stringify(text)};
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      ${submit ? `if (el.form && typeof el.form.requestSubmit === 'function') { el.form.requestSubmit(); } else if (el.form) { el.form.submit(); }` : ``}
+      return { found: true };
+    })()`
+    try {
+      const result = await wc.executeJavaScript(code, true)
+      return { success: true, ...(result as object) }
+    } catch (error) {
+      return { success: false, error: (error as Error).message }
+    }
+  })
+
+  ipcMain.handle(IPC_CHANNELS.AI_BROWSER_BACK, async (_e, paneId: string) => {
+    const wc = getBrowserWebContents(paneId); if (!wc) return false
+    if (wc.canGoBack()) wc.goBack()
+    return true
+  })
+  ipcMain.handle(IPC_CHANNELS.AI_BROWSER_FORWARD, async (_e, paneId: string) => {
+    const wc = getBrowserWebContents(paneId); if (!wc) return false
+    if (wc.canGoForward()) wc.goForward()
+    return true
+  })
+  ipcMain.handle(IPC_CHANNELS.AI_BROWSER_RELOAD, async (_e, paneId: string) => {
+    const wc = getBrowserWebContents(paneId); if (!wc) return false
+    wc.reload()
+    return true
+  })
+
+  // Action log read access
+  ipcMain.handle(IPC_CHANNELS.BROWSER_ACTION_LOG_GET, async (_e, paneId?: string, limit?: number) => {
+    return getActionLog(paneId, limit)
+  })
+
+  // Approval gate response from renderer
+  ipcMain.on(IPC_CHANNELS.BROWSER_APPROVAL_RESPONSE, (_e, id: string, approved: boolean) => {
+    resolveApproval(id, approved)
+  })
+
+  // Recipes
+  ipcMain.handle(IPC_CHANNELS.BROWSER_RECIPES_LIST, async () => recipeStore?.list() ?? [])
+  ipcMain.handle(IPC_CHANNELS.BROWSER_RECIPES_SAVE, async (_e, recipe) => recipeStore?.save(recipe) ?? null)
+  ipcMain.handle(IPC_CHANNELS.BROWSER_RECIPES_DELETE, async (_e, idOrName: string) => recipeStore?.delete(idOrName) ?? false)
 }
 
 app.whenReady().then(() => {
+  // Spoof a real Chrome UA at the session level so XHR/fetch/sub-resources
+  // are all covered, not just the top-level navigation. Apply to the
+  // browser-pane partition and the default session.
+  const ua = buildChromeUserAgent()
+  const acceptLanguages = 'en-US'
+  const browserSession = session.fromPartition('persist:browser-pane')
+  browserSession.setUserAgent(ua, acceptLanguages)
+  session.defaultSession.setUserAgent(ua, acceptLanguages)
+
+  // Permission policy for the browser pane partition. Most are auto-allowed
+  // (this is a personal browser used by one human), notifications are denied
+  // because OS-level toasts tied to the app are noisy and rarely wanted.
+  browserSession.setPermissionRequestHandler((_wc, permission, callback) => {
+    const allow = new Set([
+      'clipboard-read',
+      'clipboard-sanitized-write',
+      'fullscreen',
+      'pointerLock',
+      'media',
+      'mediaKeySystem',
+      'geolocation',
+      'midi',
+      'midiSysex',
+      'display-capture'
+    ])
+    callback(allow.has(permission))
+  })
+
+  // Download wiring: track every download and emit progress to the renderer.
+  browserSession.on('will-download', (_event, item) => {
+    const id = uuidv4()
+    const info: DownloadInfo = {
+      id,
+      url: item.getURL(),
+      filename: item.getFilename(),
+      savePath: '',
+      state: 'progressing',
+      receivedBytes: 0,
+      totalBytes: item.getTotalBytes(),
+      startedAt: Date.now()
+    }
+    activeDownloads.set(id, info)
+
+    item.on('updated', (_e, state) => {
+      info.state = state === 'progressing' ? 'progressing' : 'interrupted'
+      info.receivedBytes = item.getReceivedBytes()
+      info.totalBytes = item.getTotalBytes()
+      mainWindow?.webContents.send(IPC_CHANNELS.BROWSER_DOWNLOAD_UPDATE, { ...info })
+    })
+    item.once('done', (_e, state) => {
+      info.state =
+        state === 'completed' ? 'completed' :
+        state === 'cancelled' ? 'cancelled' : 'interrupted'
+      info.savePath = item.getSavePath()
+      info.receivedBytes = item.getReceivedBytes()
+      info.totalBytes = item.getTotalBytes() || info.receivedBytes
+      mainWindow?.webContents.send(IPC_CHANNELS.BROWSER_DOWNLOAD_UPDATE, { ...info })
+    })
+  })
+
+  // Harden any webview that gets attached: strip preload, force isolation,
+  // route popups to the user's default browser instead of opening as child windows.
+  app.on('web-contents-created', (_e, contents) => {
+    contents.on('will-attach-webview', (_evt, webPreferences, _params) => {
+      delete webPreferences.preload
+      webPreferences.nodeIntegration = false
+      webPreferences.contextIsolation = true
+    })
+    contents.setWindowOpenHandler(({ url }) => {
+      // For browser-pane webviews: route popups (target=_blank, window.open)
+      // to navigate the SAME webview, so AI automation and in-app browsing
+      // see the new page in-context. Otherwise these clicks silently bounce
+      // out to the OS browser and the AI thinks "nothing happened."
+      // The right-click "Open in default browser" item is still the escape
+      // hatch when the user explicitly wants an external window.
+      if (contents.getType() === 'webview' && /^https?:/i.test(url)) {
+        contents.loadURL(url).catch(() => {})
+        return { action: 'deny' }
+      }
+      // Host renderer popups still go to the OS browser as before.
+      if (/^https?:/i.test(url)) shell.openExternal(url)
+      return { action: 'deny' }
+    })
+
+    // Browser-pane right-click. Webviews don't have a default menu in Electron;
+    // forward the params to the renderer so it can show a contextual popup.
+    if (contents.getType() === 'webview') {
+      contents.on('context-menu', (_event, params) => {
+        mainWindow?.webContents.send(IPC_CHANNELS.BROWSER_CONTEXT_MENU, {
+          webContentsId: contents.id,
+          x: params.x,
+          y: params.y,
+          linkURL: params.linkURL || undefined,
+          srcURL: params.srcURL || undefined,
+          mediaType: params.mediaType,
+          selectionText: params.selectionText || undefined,
+          isEditable: params.isEditable,
+          hasImageContents: params.hasImageContents,
+          editFlags: {
+            canCut: params.editFlags?.canCut,
+            canCopy: params.editFlags?.canCopy,
+            canPaste: params.editFlags?.canPaste,
+            canSelectAll: params.editFlags?.canSelectAll
+          }
+        })
+      })
+    }
+
+    // Browser-pane keyboard shortcuts. The webview is a separate WebContents
+    // so keys never bubble to the host renderer — we intercept in main and
+    // forward to the matching BrowserPane via webContentsId.
+    if (contents.getType() === 'webview') {
+      contents.on('before-input-event', (event, input) => {
+        if (input.type !== 'keyDown') return
+        const ctrl = input.control || input.meta
+        let shortcut: string | null = null
+        if (ctrl && !input.shift && !input.alt && (input.key === 'l' || input.key === 'L')) shortcut = 'focusUrl'
+        else if (ctrl && !input.shift && !input.alt && (input.key === 'f' || input.key === 'F')) shortcut = 'find'
+        else if (ctrl && !input.shift && !input.alt && (input.key === 'r' || input.key === 'R')) shortcut = 'reload'
+        else if (input.key === 'F5') shortcut = 'reload'
+        else if (input.key === 'F12') shortcut = 'toggleDevTools'
+        else if (input.alt && !ctrl && input.key === 'ArrowLeft') shortcut = 'back'
+        else if (input.alt && !ctrl && input.key === 'ArrowRight') shortcut = 'forward'
+        else if (input.key === 'Escape') shortcut = 'escape'
+        else if (ctrl && !input.shift && !input.alt && (input.key === 'w' || input.key === 'W')) shortcut = 'closePane'
+        if (shortcut) {
+          event.preventDefault()
+          mainWindow?.webContents.send(IPC_CHANNELS.BROWSER_SHORTCUT, {
+            webContentsId: contents.id,
+            shortcut
+          })
+        }
+      })
+    }
+  })
+
   createWindow()
 
   app.on('activate', () => {

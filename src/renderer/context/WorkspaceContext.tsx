@@ -111,13 +111,18 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const switchWorkspace = useCallback(async (id: string) => {
     const workspace = workspaces.find(w => w.id === id)
     if (workspace && workspace.id !== activeWorkspace?.id) {
-      // Background the current workspace's PTYs instead of killing them
-      // This preserves Claude sessions and other running processes
+      // Background the current workspace's PTYs. PTYs already survive React
+      // unmounts (the useTerminal cleanup doesn't kill them anymore), so this
+      // call's job is to suppress the renderer-bound data stream while the
+      // workspace is off-screen — output accumulates in PtyManager's
+      // scrollback buffer and gets replayed on switch-back via getScrollback.
       if (activeWorkspace) {
         window.electronAPI.backgroundWorkspace(activeWorkspace.id)
       }
 
-      // Foreground the new workspace's PTYs (if any were backgrounded)
+      // Foreground the new workspace's PTYs so their data starts streaming
+      // to the renderer again. spawnPty will then call getPtyForPane, find
+      // the existing PTY, and reattach to it (with scrollback restored).
       window.electronAPI.foregroundWorkspace(workspace.id)
 
       setActiveWorkspace(workspace)

@@ -109,15 +109,18 @@ html, body, #root {
 
 /* Pane label */
 .pane-label {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
+  /* In-flow (not absolute) so siblings like .terminal-tab-strip can sit
+     directly below without being occluded. The label used to overlay the
+     terminal as a translucent gloss, but that was hijacking clicks on
+     anything beneath it — including the new tab strip / + button. */
+  position: relative;
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 4px 8px;
-  background: linear-gradient(to bottom, rgba(22, 27, 34, 0.95), rgba(22, 27, 34, 0.8));
+  background-color: rgba(22, 27, 34, 0.95);
+  border-bottom: 1px solid var(--cs-border);
   font-size: 12px;
   font-weight: 500;
   z-index: 10;
@@ -157,12 +160,606 @@ html, body, #root {
 
 /* Terminal container */
 .terminal-container {
+  /* Flex child of .terminal-pane (which is flex-column with pane-label and
+     optional terminal-tab-strip above). flex:1 fills the remaining vertical
+     space without needing a hardcoded top offset. min-height:0 lets the
+     flex item shrink below its content's intrinsic size, which xterm needs
+     when the pane is small. */
+  flex: 1 1 auto;
+  min-height: 0;
+  position: relative;
+  overflow: hidden;
+}
+
+/* ====== Browser pane (single-row chrome) ====== */
+.browser-pane {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  width: 100%;
+  background-color: var(--cs-bg);
+  border: 1px solid var(--cs-border);
+  border-radius: 4px;
+  overflow: hidden;
+  transition: border-color 0.15s ease;
+}
+
+.browser-pane:hover { border-color: var(--cs-text-muted); }
+.browser-pane.focused {
+  border-color: var(--cs-accent);
+  box-shadow: 0 0 0 1px var(--cs-accent);
+}
+.browser-pane.maximized {
   position: absolute;
-  top: 28px; /* Space for label */
+  top: 0; left: 0; right: 0; bottom: 0;
+  z-index: 100;
+  border-radius: 0;
+}
+
+.browser-pane webview {
+  flex: 1 1 auto;
+  width: 100%;
+  background-color: white;
+  display: flex;
+}
+
+.browser-title-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  height: 22px;
+  background: linear-gradient(to bottom, rgba(22, 27, 34, 0.95), rgba(22, 27, 34, 0.8));
+  border-bottom: 1px solid var(--cs-border);
+  font-size: 11px;
+  color: var(--cs-text-muted);
+  user-select: none;
+  overflow: hidden;
+}
+
+.browser-title-bar[draggable="true"] {
+  cursor: grab;
+}
+
+.browser-title-bar[draggable="true"]:active {
+  cursor: grabbing;
+}
+
+.browser-title-favicon {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+  object-fit: contain;
+}
+
+.browser-title-text {
+  flex: 1 1 auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Terminal pane tab strip (each tab = a tmux session on the remote host). */
+.terminal-tab-strip {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: stretch;
+  gap: 3px;
+  padding: 4px 6px 0 6px;
+  background-color: #0a0d12;
+  border-bottom: 1px solid var(--cs-accent);
+  overflow-x: auto;
+  scrollbar-width: thin;
+  /* Explicit defaults — defensive against parent drag styling bleeding in. */
+  cursor: default;
+  -webkit-user-drag: none;
+  z-index: 5;
+}
+
+.terminal-tab-strip::-webkit-scrollbar { height: 4px; }
+
+.terminal-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 90px;
+  max-width: 200px;
+  padding: 5px 8px 5px 12px;
+  background-color: #161b22;
+  border: 1px solid var(--cs-border);
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
+  font-size: 12px;
+  font-family: 'Cascadia Code', Consolas, monospace;
+  color: var(--cs-text-muted);
+  cursor: pointer;
+  user-select: none;
+  flex-shrink: 0;
+  transition: background-color 0.08s ease, color 0.08s ease;
+  /* Cancel any parent drag affordances. */
+  -webkit-user-drag: none;
+}
+
+.terminal-tab:hover {
+  background-color: #1f2630;
+  color: var(--cs-text);
+}
+
+.terminal-tab.active {
+  background-color: var(--cs-bg);
+  border-color: var(--cs-accent);
+  color: var(--cs-text);
+  /* Subtle accent bar across the top of the active tab for clarity. */
+  box-shadow: inset 0 2px 0 0 var(--cs-accent);
+  font-weight: 500;
+}
+
+.terminal-tab-label {
+  flex: 1 1 auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.terminal-tab-close {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-size: 14px;
+  line-height: 1;
+  border-radius: 3px;
+  cursor: pointer;
+  opacity: 0.55;
+}
+
+.terminal-tab-close:hover {
+  background-color: rgba(255, 90, 90, 0.25);
+  color: #ff7070;
+  opacity: 1;
+}
+
+.terminal-tab-new {
+  flex-shrink: 0;
+  align-self: center;
+  width: 28px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px dashed var(--cs-border);
+  background: transparent;
+  color: var(--cs-text-muted);
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1;
+  border-radius: 4px;
+  cursor: pointer;
+  margin-left: 4px;
+  transition: all 0.08s ease;
+  -webkit-user-drag: none;
+}
+
+.terminal-tab-new:hover {
+  background-color: var(--cs-accent);
+  border-color: var(--cs-accent);
+  border-style: solid;
+  color: white;
+}
+
+.browser-tab-strip {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  padding: 3px 4px 0 4px;
+  background-color: var(--cs-bg-elev);
+  border-bottom: 1px solid var(--cs-border);
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.browser-tab-strip::-webkit-scrollbar {
+  height: 4px;
+}
+
+.browser-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 80px;
+  max-width: 180px;
+  padding: 4px 6px 4px 8px;
+  background-color: rgba(255, 255, 255, 0.03);
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
+  font-size: 11px;
+  color: var(--cs-text-muted);
+  cursor: pointer;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.browser-tab:hover {
+  background-color: rgba(255, 255, 255, 0.06);
+  color: var(--cs-text);
+}
+
+.browser-tab.active {
+  background-color: var(--cs-bg);
+  border-color: var(--cs-border);
+  color: var(--cs-text);
+}
+
+.browser-tab-favicon {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+  object-fit: contain;
+}
+
+.browser-tab-title {
+  flex: 1 1 auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.browser-tab-close {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-size: 14px;
+  line-height: 1;
+  border-radius: 3px;
+  cursor: pointer;
+  opacity: 0.6;
+}
+
+.browser-tab-close:hover {
+  background-color: rgba(255, 255, 255, 0.12);
+  opacity: 1;
+}
+
+.browser-tab-new {
+  flex-shrink: 0;
+  align-self: center;
+  width: 24px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: var(--cs-text-muted);
+  font-size: 16px;
+  line-height: 1;
+  border-radius: 4px;
+  cursor: pointer;
+  margin-left: 2px;
+}
+
+.browser-tab-new:hover {
+  background-color: rgba(255, 255, 255, 0.08);
+  color: var(--cs-text);
+}
+
+.browser-chrome {
+  position: relative;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px 4px;
+  height: 32px;
+  background-color: var(--cs-surface);
+  border-bottom: 1px solid var(--cs-border);
+  user-select: none;
+}
+
+.chrome-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: var(--cs-text);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background-color 0.1s ease;
+  flex: 0 0 auto;
+}
+.chrome-btn:hover:not(:disabled) { background-color: rgba(255, 255, 255, 0.08); }
+.chrome-btn:disabled { opacity: 0.3; cursor: default; }
+.chrome-btn.small { width: 22px; height: 22px; font-size: 12px; }
+
+.favicon-btn {
+  width: 26px;
+  height: 26px;
+  padding: 4px;
+}
+.favicon-img {
+  width: 16px; height: 16px;
+  display: block;
+  border-radius: 2px;
+}
+.globe-icon { font-size: 13px; opacity: 0.7; }
+
+.spinner {
+  width: 14px; height: 14px;
+  border: 2px solid var(--cs-border);
+  border-top-color: var(--cs-accent);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.addr-bar {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  background-color: var(--cs-bg);
+  border: 1px solid var(--cs-border);
+  border-radius: 14px;
+  padding: 0 4px 0 10px;
+  height: 26px;
+  margin: 0 4px;
+}
+.addr-bar:focus-within { border-color: var(--cs-accent); }
+
+.addr-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--cs-text);
+  font-size: 12px;
+  padding: 0 4px;
+}
+.addr-input::placeholder { color: var(--cs-text-muted); }
+
+.addr-icon {
+  background: transparent;
+  border: none;
+  color: var(--cs-text-muted);
+  cursor: pointer;
+  padding: 0 4px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  border-radius: 4px;
+  font-size: 13px;
+  flex: 0 0 auto;
+}
+.addr-icon:hover { color: var(--cs-text); background-color: rgba(255, 255, 255, 0.06); }
+.addr-icon.star.lit { color: var(--cs-warning); }
+.addr-icon.download-chip {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--cs-accent);
+  padding: 0 6px;
+}
+
+.chrome-progress {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  height: 2px;
+  width: 35%;
+  background-color: var(--cs-accent);
+  animation: chrome-progress-slide 1.2s ease-in-out infinite;
+}
+@keyframes chrome-progress-slide {
+  0% { left: -35%; }
+  100% { left: 100%; }
+}
+
+/* Floating popovers shared style */
+.browser-popover {
+  position: absolute;
+  background-color: var(--cs-surface);
+  border: 1px solid var(--cs-border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  z-index: 50;
+}
+
+/* Find-in-page (top-right) */
+.find-bar {
+  top: 38px;
+  right: 8px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+}
+.find-input {
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--cs-text);
+  font-size: 12px;
+  padding: 4px 6px;
+  width: 180px;
+}
+.find-count {
+  font-size: 11px;
+  color: var(--cs-text-muted);
+  min-width: 36px;
+  text-align: center;
+}
+
+/* Address-bar autocomplete (anchored to the address bar via .addr-bar position: relative) */
+.autocomplete {
+  top: calc(100% + 4px);
   left: 0;
   right: 0;
-  bottom: 0;
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 4px;
+}
+.autocomplete-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.autocomplete-item.selected,
+.autocomplete-item:hover { background-color: rgba(255, 255, 255, 0.08); }
+.ac-favicon { width: 14px; height: 14px; flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; }
+img.ac-favicon { object-fit: contain; }
+.ac-title {
+  flex: 1 1 auto;
+  color: var(--cs-text);
+  white-space: nowrap;
   overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: left;
+}
+.ac-url {
+  color: var(--cs-text-muted);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 40%;
+}
+
+/* Bookmarks dropdown */
+.bookmarks-dropdown {
+  top: 34px;
+  right: 36px;
+  width: 360px;
+  max-height: 360px;
+  overflow-y: auto;
+  padding: 4px;
+}
+.bookmarks-empty {
+  padding: 16px 12px;
+  color: var(--cs-text-muted);
+  font-size: 12px;
+  text-align: center;
+}
+.bookmark-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: 4px;
+}
+.bookmark-item:hover { background-color: rgba(255, 255, 255, 0.06); }
+.bookmark-link {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font-size: 12px;
+  min-width: 0;
+}
+.bookmark-remove {
+  background: transparent;
+  border: none;
+  color: var(--cs-text-muted);
+  cursor: pointer;
+  padding: 4px 8px;
+  font-size: 11px;
+  border-radius: 4px;
+}
+.bookmark-remove:hover { color: var(--cs-error); background-color: rgba(255, 255, 255, 0.06); }
+
+/* Downloads dropdown */
+.downloads-dropdown {
+  top: 34px;
+  right: 60px;
+  width: 320px;
+  max-height: 360px;
+  overflow-y: auto;
+  padding: 6px;
+}
+.download-item {
+  padding: 6px 8px;
+  border-radius: 4px;
+  margin-bottom: 4px;
+}
+.download-item:hover { background-color: rgba(255, 255, 255, 0.04); }
+.download-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+}
+.download-progress {
+  height: 3px;
+  background-color: var(--cs-border);
+  border-radius: 2px;
+  margin: 4px 0;
+  overflow: hidden;
+}
+.download-progress > div {
+  height: 100%;
+  background-color: var(--cs-accent);
+  transition: width 0.2s ease;
+}
+.download-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+}
+
+/* Overflow menu */
+.overflow-menu {
+  top: 34px;
+  right: 4px;
+  min-width: 200px;
+  padding: 4px;
+}
+.overflow-menu .context-menu-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.overflow-menu .context-menu-item:hover { background-color: rgba(255, 255, 255, 0.08); }
+.overflow-menu .kbd {
+  font-size: 10px;
+  color: var(--cs-text-muted);
+  font-family: monospace;
+  padding: 1px 5px;
+  border: 1px solid var(--cs-border);
+  border-radius: 3px;
 }
 
 /* Tab bar styles */
@@ -319,6 +916,10 @@ html, body, #root {
   padding: 24px;
   min-width: 400px;
   max-width: 90vw;
+  /* Cap height to viewport and scroll the body when content overflows.
+     The padding stays consistent on all sides; scrollbar lives inside. */
+  max-height: 85vh;
+  overflow-y: auto;
   box-shadow: 0 16px 48px rgba(0, 0, 0, 0.4);
 }
 
@@ -581,9 +1182,37 @@ html, body, #root {
 
 /* Drag and drop */
 .dragging {
-  opacity: 0.5;
+  opacity: 0.4;
 }
 
 .drag-over {
   border: 2px dashed var(--cs-accent) !important;
+}
+
+/* Pane swap drop target — Carolina blue (#4B9CD3) */
+.pane-cell {
+  position: relative;
+}
+
+.pane-cell.pane-drop-target::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-color: rgba(75, 156, 211, 0.28);
+  border: 2px solid #4B9CD3;
+  box-shadow: inset 0 0 0 1px rgba(75, 156, 211, 0.6);
+  z-index: 40;
+}
+
+.pane-cell.pane-drag-source {
+  opacity: 0.45;
+}
+
+.pane-label[draggable="true"] {
+  cursor: grab;
+}
+
+.pane-label[draggable="true"]:active {
+  cursor: grabbing;
 }

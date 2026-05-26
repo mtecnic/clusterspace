@@ -2,12 +2,53 @@
 export interface GridConfig {
   rows: number
   cols: number
+  // Optional fractional weights for each row/col. Length must equal rows/cols.
+  // Absent => equal sizing (legacy behavior). Removing the field reverts to equal sizing.
+  rowSizes?: number[]
+  colSizes?: number[]
 }
 
 // Position in grid
 export interface GridPosition {
   row: number
   col: number
+}
+
+// Pane type discriminator
+export type PaneType = 'terminal' | 'browser'
+
+// Stored login credential for a website. The password is never sent over
+// IPC — only when an explicit "fill" or "reveal" call is made. The list
+// endpoint returns BrowserCredentialMeta (no password).
+export interface BrowserCredential {
+  id: string
+  origin: string       // e.g. "https://github.com"
+  username: string
+  password: string     // plaintext at the API boundary; safeStorage-encrypted at rest
+  notes?: string
+  createdAt: number
+  updatedAt: number
+}
+
+export type BrowserCredentialMeta = Omit<BrowserCredential, 'password'>
+
+// A tab in a terminal pane. Each tab references a tmux session name on the
+// remote host — switching tabs = `tmux switch-client -t <name>`. The label
+// is the user-visible name (defaults to the session name).
+export interface TerminalTab {
+  id: string           // local UUID for React keys + activeTerminalTabId reference
+  sessionName: string  // tmux session name on the host
+  label?: string       // optional human label; falls back to sessionName
+}
+
+// Browser tab inside a browser pane. `title` and `favicon` are persisted so
+// the tab strip can render meaningful labels after a restart, before each
+// tab's webview re-fetches them.
+export interface BrowserTab {
+  id: string
+  url: string
+  title?: string
+  favicon?: string
 }
 
 // Pane configuration
@@ -21,6 +62,27 @@ export interface PaneConfig {
   bypassPermissions: boolean
   includeInBroadcast: boolean
   sshServerId?: string  // Track SSH server for auto password entry
+  // When true, mouse-encoded escape sequences are NOT forwarded to the PTY.
+  // The app (tmux/vim) won't receive mouse events; xterm's native drag-select
+  // works without needing Shift/Alt modifiers. Default false = apps capture
+  // mouse normally (so tmux mouse pane-resize, click-to-focus etc. work).
+  disableAppMouse?: boolean
+  // Override the tmux session name this pane attaches to. When absent we
+  // default to a per-pane unique name; setting this lets a pane reattach to
+  // any session that exists on the host (e.g., recovering an older session
+  // that was previously named after the server).
+  // NOTE: when terminalTabs has entries, the *active* tab's session name
+  // wins over this field on spawn (the tabs become the source of truth).
+  tmuxSessionName?: string
+  // Multiple tmux sessions exposed as tabs in the pane chrome. Absent =
+  // single-session legacy mode. activeTerminalTabId picks which tab is
+  // active; on reconnect we attach to that tab's session.
+  terminalTabs?: TerminalTab[]
+  activeTerminalTabId?: string
+  type?: PaneType       // absent => 'terminal' (back-compat for older configs)
+  url?: string          // Only meaningful when type === 'browser' && !tabs
+  tabs?: BrowserTab[]   // Browser tabs; if absent, `url` defines a single implicit tab
+  activeTabId?: string  // Which tab in `tabs` is currently visible
 }
 
 // Workspace configuration
@@ -246,6 +308,9 @@ export interface AIPaneInfo {
   command: string
   isConnected: boolean
   workspaceId: string
+  type?: PaneType        // 'terminal' | 'browser' — absent => 'terminal'
+  url?: string           // Current URL when type === 'browser'
+  position?: GridPosition // {row, col} — layout slot. Changes when user swaps panes.
 }
 
 // AI Provider Discovery Result
@@ -266,6 +331,18 @@ export interface AppSettings {
   fontSize: number
   fontFamily: string
   ai: AISettings
+  defaultBrowserUrl: string
+  windowState?: WindowState
+}
+
+// Persisted main-window geometry so launches restore the user's last size/position.
+export interface WindowState {
+  x?: number
+  y?: number
+  width: number
+  height: number
+  maximized: boolean
+  fullscreen: boolean
 }
 
 // PTY process info
@@ -389,7 +466,138 @@ export const IPC_CHANNELS = {
   COORDINATION_WAIT_FOR: 'coordination:wait:for',
   COORDINATION_NOTIFY_COMPLETE: 'coordination:notify:complete',
   COORDINATION_SHARE_CONTEXT: 'coordination:share:context',
+
+  // Browser site-credentials (saved logins) channels
+  BROWSER_CREDENTIALS_LIST: 'browser:credentials:list',
+  BROWSER_CREDENTIALS_SAVE: 'browser:credentials:save',
+  BROWSER_CREDENTIALS_DELETE: 'browser:credentials:delete',
+  BROWSER_CREDENTIALS_GET_BY_ORIGIN: 'browser:credentials:get-by-origin',
+  BROWSER_CREDENTIALS_REVEAL: 'browser:credentials:reveal',
+  BROWSER_CREDENTIALS_FILL: 'browser:credentials:fill',
+
+  // Browser pane channels
+  BROWSER_BOOKMARKS_GET: 'browser:bookmarks:get',
+  BROWSER_BOOKMARKS_ADD: 'browser:bookmarks:add',
+  BROWSER_BOOKMARKS_REMOVE: 'browser:bookmarks:remove',
+  BROWSER_HISTORY_GET: 'browser:history:get',
+  BROWSER_HISTORY_ADD: 'browser:history:add',
+  BROWSER_HISTORY_SEARCH: 'browser:history:search',
+  BROWSER_HISTORY_CLEAR: 'browser:history:clear',
+  BROWSER_DOWNLOADS_GET: 'browser:downloads:get',
+  BROWSER_DOWNLOAD_OPEN: 'browser:download:open',
+  BROWSER_DOWNLOAD_REVEAL: 'browser:download:reveal',
+  BROWSER_DOWNLOAD_CANCEL: 'browser:download:cancel',
+  BROWSER_DOWNLOAD_UPDATE: 'browser:download:update',
+  BROWSER_SHORTCUT: 'browser:shortcut',
+  BROWSER_CONTEXT_MENU: 'browser:context-menu',
+  BROWSER_OPEN_EXTERNAL: 'browser:open-external',
+
+  // Browser automation observability + safety
+  BROWSER_ACTION_LOG_GET: 'browser:action-log:get',
+  BROWSER_ACTION_LOG_APPEND: 'browser:action-log:append',
+  BROWSER_APPROVAL_REQUEST: 'browser:approval:request',
+  BROWSER_APPROVAL_RESPONSE: 'browser:approval:response',
+  BROWSER_RECIPES_LIST: 'browser:recipes:list',
+  BROWSER_RECIPES_SAVE: 'browser:recipes:save',
+  BROWSER_RECIPES_DELETE: 'browser:recipes:delete',
+
+  // Browser <-> AI bridge: BrowserPane registers its webContentsId so main
+  // (and the AI tool dispatcher) can drive the webview directly.
+  BROWSER_PANE_REGISTER: 'browser:pane:register',
+  BROWSER_PANE_UNREGISTER: 'browser:pane:unregister',
+
+  // AI-callable browser-control verbs
+  AI_BROWSER_NAVIGATE: 'ai:browser:navigate',
+  AI_BROWSER_GET_CONTENT: 'ai:browser:get-content',
+  AI_BROWSER_SCREENSHOT: 'ai:browser:screenshot',
+  AI_BROWSER_EXECUTE_JS: 'ai:browser:execute-js',
+  AI_BROWSER_CLICK: 'ai:browser:click',
+  AI_BROWSER_TYPE: 'ai:browser:type',
+  AI_BROWSER_BACK: 'ai:browser:back',
+  AI_BROWSER_FORWARD: 'ai:browser:forward',
+  AI_BROWSER_RELOAD: 'ai:browser:reload',
 } as const
+
+// AI tool result shapes for browser control
+export interface BrowserContentResult {
+  success: boolean
+  url?: string
+  title?: string
+  text?: string
+  error?: string
+}
+
+export interface BrowserActionResult {
+  success: boolean
+  found?: boolean
+  result?: unknown
+  error?: string
+}
+
+// Shortcut messages forwarded from main when a webview swallows a hotkey
+export type BrowserShortcut =
+  | 'focusUrl'
+  | 'find'
+  | 'reload'
+  | 'toggleDevTools'
+  | 'back'
+  | 'forward'
+  | 'escape'
+  | 'closePane'
+
+export interface BrowserShortcutMessage {
+  webContentsId: number
+  shortcut: BrowserShortcut
+}
+
+// Subset of Electron's context-menu params we forward to the renderer
+export interface BrowserContextMenuParams {
+  webContentsId: number
+  x: number
+  y: number
+  linkURL?: string
+  srcURL?: string
+  mediaType?: 'none' | 'image' | 'audio' | 'video' | 'canvas' | 'file' | 'plugin'
+  selectionText?: string
+  isEditable?: boolean
+  hasImageContents?: boolean
+  editFlags?: {
+    canCut?: boolean
+    canCopy?: boolean
+    canPaste?: boolean
+    canSelectAll?: boolean
+  }
+}
+
+// Browser pane bookmark
+export interface Bookmark {
+  id: string
+  url: string
+  title: string
+  favicon?: string
+  createdAt: number
+}
+
+// Browser pane history entry
+export interface HistoryEntry {
+  url: string
+  title: string
+  favicon?: string
+  visitedAt: number
+}
+
+// Active download tracked by main and rendered as a chip
+export interface DownloadInfo {
+  id: string
+  url: string
+  filename: string
+  savePath: string
+  state: 'progressing' | 'completed' | 'cancelled' | 'interrupted'
+  receivedBytes: number
+  totalBytes: number
+  startedAt: number
+  paneId?: string
+}
 
 // SSH Server configuration
 export interface SSHServer {
@@ -492,11 +700,61 @@ export const DEFAULT_AI_SYSTEM_PROMPT = `You are an AI orchestrator managing a f
 - read_terminal_output: Read recent output from a terminal
 - poll_terminal_status: Check if a terminal is busy or idle (lightweight, no writing)
 - wait_for_output: Wait for output with long timeout and pattern matching
-- list_panes: See all available terminal panes
+- list_panes: See all available panes; each has a "type" of "terminal" or "browser"
 - capture_screenshot: Take a screenshot for visual analysis
 - focus_pane, maximize_pane: Control window layout
 - create_workspace: Create new workspace layouts
 - restart_terminal: Restart a terminal pane
+
+## Browser Control Tools (for panes where type === "browser")
+
+Core (Tier 1-2):
+- browser_navigate: Load a URL
+- browser_get_content: Get visible text + url + title
+- browser_screenshot / browser_screenshot_full_page / browser_screenshot_annotated: Visual capture (annotated overlays numbered red boxes on selectors for "click box N" decisions)
+- browser_get_axtree: Page accessibility tree — PREFER THIS over HTML for understanding structure. Compact, semantic, stable across redesigns.
+- browser_click / browser_smart_click: Click an element. smart_click tries selector → aria-label → role+text → visible text fallbacks.
+- browser_click_at(x,y): Coordinate click for canvas / shadow DOM / vision-driven flows.
+- browser_type: Fill input/textarea (optionally submits form)
+- browser_keypress: Send Enter/Tab/Escape/Backspace/ArrowKeys with optional modifiers
+- browser_select_option, browser_check: <select> and checkbox/radio
+- browser_set_files: <input type=file> uploads (gated — user is prompted)
+- browser_query, browser_query_all: Read element properties without screenshotting
+- browser_scroll: by pixels, to top/bottom, or scroll element into view
+- browser_hover, browser_drag: Mouse interactions
+- browser_wait_for_selector, browser_wait_for_navigation, browser_wait_for_text: Sync barriers — USE THESE before clicking elements that may not have rendered yet
+- browser_back, browser_forward, browser_reload: History
+- browser_execute_js: Arbitrary JS escape hatch
+
+Automation (Tier 3):
+- browser_run_recipe: Execute a saved or inline recipe (sequence of tool calls with retries)
+- browser_get_action_log: Read recent browser tool-call log for self-debugging
+
+Power (Tier 4):
+- browser_get_cookies, browser_set_cookie: Cookie management
+- browser_save_pdf, browser_save_html: Archive a page
+
+## Pane setup tools
+- convert_pane_to_browser(pane_id, url?): Turn a terminal pane into a browser pane. **If the user asks to browse, open a URL, or interact with a website, first list_panes — if NO pane has type==="browser", pick any terminal pane (preferably an idle one) and convert it. Don't tell the user "there's no browser pane" — just convert one.**
+- convert_pane_to_terminal(pane_id): Inverse, for cleanup.
+
+## Web automation loop pattern (the "automate_web_task" flow)
+
+**IMPORTANT:** browser_screenshot returns ONLY metadata (path, width, height, bytes). You CANNOT see the image. To know what changed on a page, use **browser_get_axtree** or **browser_get_content** — these return actual page state. Don't claim a click "worked" or that "the sign-in page loaded" without reading the page after the action. browser_click / browser_smart_click return urlBefore/urlAfter/navigated — check those for navigation. For SPA changes, follow up with browser_get_axtree to see the new structure.
+
+When given a multi-step web task (login, search, fill form, scrape):
+1. list_panes → find a browser pane (type === "browser"). If none exists, convert_pane_to_browser on an idle terminal pane.
+2. browser_navigate to the start URL
+3. browser_wait_for_selector or browser_wait_for_navigation to confirm load
+4. Read the page: browser_get_axtree (best) or browser_screenshot_annotated for vision
+5. Decide the next action based on what you observe
+6. Execute (smart_click, type, keypress, etc.) — always wait for an indicator of success before moving on
+7. Verify with another wait + read; on failure, screenshot and either retry or report
+8. Repeat until done; when typing into password fields or uploading files, expect the user to be prompted for approval — handle the deny case gracefully
+
+For repeated flows, build a recipe (browser_run_recipe with steps_json) so the
+same sequence can be replayed reliably. Always check browser_get_action_log
+after a failure to see exactly what went wrong.
 
 ## Agent Orchestration Tools
 - get_fleet_status: Get status of all agents and current goal

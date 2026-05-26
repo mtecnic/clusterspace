@@ -14,7 +14,8 @@ const defaultSettings: AppSettings = {
   theme: 'dark',
   fontSize: 14,
   fontFamily: 'Cascadia Code, Consolas, monospace',
-  ai: DEFAULT_AI_SETTINGS
+  ai: DEFAULT_AI_SETTINGS,
+  defaultBrowserUrl: 'https://www.google.com'
 }
 
 export class WorkspaceStore {
@@ -53,7 +54,8 @@ export class WorkspaceStore {
           args: [],
           position: { row, col },
           bypassPermissions: false,
-          includeInBroadcast: true
+          includeInBroadcast: true,
+          type: 'terminal'
         })
         paneIndex++
       }
@@ -63,7 +65,12 @@ export class WorkspaceStore {
   }
 
   getAll(): WorkspaceConfig[] {
-    return this.store.get('workspaces', [])
+    const workspaces = this.store.get('workspaces', [])
+    // Default missing pane.type to 'terminal' for back-compat with older configs
+    return workspaces.map(w => ({
+      ...w,
+      panes: w.panes.map(p => ({ ...p, type: p.type ?? 'terminal' as const }))
+    }))
   }
 
   get(id: string): WorkspaceConfig | null {
@@ -107,6 +114,9 @@ export class WorkspaceStore {
       updates.grid.rows !== workspaces[index].grid.rows ||
       updates.grid.cols !== workspaces[index].grid.cols
     )) {
+      // Drop stale size weights when the grid shape changes; renderer falls back
+      // to equal sizing when these are absent.
+      updates.grid = { ...updates.grid, rowSizes: undefined, colSizes: undefined }
       const oldPanes = workspaces[index].panes
       const newPanes = this.generatePanes(updates.grid)
 
@@ -123,6 +133,8 @@ export class WorkspaceStore {
           newPane.bypassPermissions = oldPane.bypassPermissions
           newPane.includeInBroadcast = oldPane.includeInBroadcast
           newPane.sshServerId = oldPane.sshServerId  // Preserve SSH server connection
+          newPane.type = oldPane.type ?? 'terminal'   // Preserve pane type (terminal/browser)
+          newPane.url = oldPane.url                    // Preserve browser URL
         }
       }
 

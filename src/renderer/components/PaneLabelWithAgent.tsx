@@ -8,6 +8,10 @@ interface PaneLabelWithAgentProps {
   terminalStatus: 'running' | 'stopped' | 'loading'
   hasActivity?: boolean
   onDoubleClick?: () => void
+  // When provided, makes the label the drag handle for swapping panes.
+  draggable?: boolean
+  onDragStart?: (e: React.DragEvent<HTMLDivElement>) => void
+  onDragEnd?: (e: React.DragEvent<HTMLDivElement>) => void
 }
 
 const statusColors: Record<AgentStatus, string> = {
@@ -31,13 +35,22 @@ export function PaneLabelWithAgent({
   label,
   terminalStatus,
   hasActivity,
-  onDoubleClick
+  onDoubleClick,
+  draggable,
+  onDragStart,
+  onDragEnd
 }: PaneLabelWithAgentProps) {
   const { getAgent } = useAgent()
   const agent = getAgent(paneId)
 
   return (
-    <div className="pane-label" onDoubleClick={onDoubleClick}>
+    <div
+      className="pane-label"
+      onDoubleClick={onDoubleClick}
+      draggable={draggable}
+      onDragStart={onDragStart}
+      onDragEnd={onDragEnd}
+    >
       <div className="pane-label-text">
         {/* Terminal status dot */}
         <span className={`status-dot ${terminalStatus}`} />

@@ -21,7 +21,14 @@ import {
   OrchestrationEvent,
   Persona,
   TaskTemplate,
-  Skill
+  Skill,
+  Bookmark,
+  HistoryEntry,
+  DownloadInfo,
+  BrowserShortcutMessage,
+  BrowserContextMenuParams,
+  BrowserCredential,
+  BrowserCredentialMeta
 } from '../shared/types'
 
 // Type for the exposed API
@@ -84,7 +91,9 @@ export interface ElectronAPI {
   deleteSSHServer: (id: string) => Promise<boolean>
   testSSHServer: (id: string) => Promise<{ success: boolean; command?: string; args?: string[]; password?: string; error?: string }>
   getSSHPassword: (serverId: string) => Promise<string | null>
-  getSSHCommand: (serverId: string) => Promise<{ command: string; args: string[] } | null>
+  getSSHCommand: (serverId: string, paneId?: string, sessionOverride?: string) => Promise<{ command: string; args: string[]; sessionName: string } | null>
+  destroyRemoteTmuxSession: (serverId: string, sessionName: string) => Promise<{ success: boolean; error?: string }>
+  listRemoteTmuxSessions: (serverId: string) => Promise<{ success: boolean; error?: string; sessions: Array<{ name: string; attached: boolean; created: number }>; authHint?: string }>
 
   // AI Settings operations
   getAISettings: () => Promise<AISettings>
@@ -169,6 +178,56 @@ export interface ElectronAPI {
   listSkills: () => Promise<Skill[]>
   loadSkill: (id: string) => Promise<Skill | null>
   getConfigDir: () => Promise<string | null>
+
+  // Browser pane: bookmarks, history, downloads
+  getBookmarks: () => Promise<Bookmark[]>
+  addBookmark: (url: string, title: string, favicon?: string) => Promise<Bookmark | null>
+  removeBookmark: (idOrUrl: string) => Promise<boolean>
+  getBrowserHistory: (limit?: number) => Promise<HistoryEntry[]>
+  addBrowserHistory: (url: string, title: string, favicon?: string) => Promise<boolean>
+  searchBrowserHistory: (query: string, limit?: number) => Promise<HistoryEntry[]>
+  clearBrowserHistory: () => Promise<boolean>
+  getDownloads: () => Promise<DownloadInfo[]>
+  openDownload: (id: string) => Promise<boolean>
+  revealDownload: (id: string) => Promise<boolean>
+  cancelDownload: (id: string) => Promise<boolean>
+  onDownloadUpdate: (callback: (info: DownloadInfo) => void) => () => void
+  onBrowserShortcut: (callback: (msg: BrowserShortcutMessage) => void) => () => void
+  onBrowserContextMenu: (callback: (params: BrowserContextMenuParams) => void) => () => void
+  openExternal: (url: string) => Promise<boolean>
+
+  // Browser pane: saved logins (encrypted via OS keychain)
+  listBrowserCredentials: () => Promise<BrowserCredentialMeta[]>
+  saveBrowserCredential: (input: { id?: string; origin: string; username: string; password: string; notes?: string }) => Promise<BrowserCredentialMeta | null>
+  deleteBrowserCredential: (id: string) => Promise<boolean>
+  getBrowserCredentialsByOrigin: (origin: string) => Promise<BrowserCredentialMeta[]>
+  revealBrowserCredential: (id: string) => Promise<BrowserCredential | null>
+  fillBrowserCredential: (paneId: string, credentialId: string) => Promise<{ success: boolean; filledUser?: boolean; filledPass?: boolean; error?: string }>
+
+  // BrowserPane registration (so main/AI can address the webview by paneId)
+  registerBrowserPane: (paneId: string, webContentsId: number) => void
+  unregisterBrowserPane: (paneId: string) => void
+
+  // AI-driven browser control (called by AIManager from main, but also exposed
+  // here so renderer-side code can introspect / debug if needed)
+  aiBrowserNavigate: (paneId: string, url: string) => Promise<{ success: boolean; error?: string }>
+  aiBrowserGetContent: (paneId: string) => Promise<{ success: boolean; url?: string; title?: string; text?: string; error?: string }>
+  aiBrowserScreenshot: (paneId: string) => Promise<string | null>
+  aiBrowserExecuteJs: (paneId: string, code: string) => Promise<{ success: boolean; result?: unknown; error?: string }>
+  aiBrowserClick: (paneId: string, selector: string) => Promise<{ success: boolean; found?: boolean; error?: string }>
+  aiBrowserType: (paneId: string, selector: string, text: string, submit?: boolean) => Promise<{ success: boolean; found?: boolean; error?: string }>
+  aiBrowserBack: (paneId: string) => Promise<boolean>
+  aiBrowserForward: (paneId: string) => Promise<boolean>
+  aiBrowserReload: (paneId: string) => Promise<boolean>
+
+  // Tier 3: action log + approval gates + recipes
+  getBrowserActionLog: (paneId?: string, limit?: number) => Promise<Array<{ id: number; paneId: string; tool: string; args: Record<string, unknown>; ok: boolean; durationMs: number; error?: string; timestamp: number }>>
+  onBrowserActionLog: (callback: (entry: { id: number; paneId: string; tool: string; args: Record<string, unknown>; ok: boolean; durationMs: number; error?: string; timestamp: number }) => void) => () => void
+  onBrowserApprovalRequest: (callback: (req: { id: string; paneId: string; tool: string; description: string; reason: string }) => void) => () => void
+  respondBrowserApproval: (id: string, approved: boolean) => void
+  listBrowserRecipes: () => Promise<Array<{ id?: string; name: string; description?: string; steps: Array<{ tool: string; args: Record<string, unknown>; retry?: number; on_fail?: string }> }>>
+  saveBrowserRecipe: (recipe: { name: string; description?: string; steps: Array<{ tool: string; args: Record<string, unknown>; retry?: number; on_fail?: string }> }) => Promise<unknown>
+  deleteBrowserRecipe: (idOrName: string) => Promise<boolean>
 }
 
 const electronAPI: ElectronAPI = {
@@ -341,8 +400,16 @@ const electronAPI: ElectronAPI = {
     return ipcRenderer.invoke(IPC_CHANNELS.SSH_GET_PASSWORD, serverId)
   },
 
-  getSSHCommand: (serverId: string) => {
-    return ipcRenderer.invoke(IPC_CHANNELS.SSH_GET_COMMAND, serverId)
+  getSSHCommand: (serverId: string, paneId?: string, sessionOverride?: string) => {
+    return ipcRenderer.invoke(IPC_CHANNELS.SSH_GET_COMMAND, serverId, paneId, sessionOverride)
+  },
+
+  destroyRemoteTmuxSession: (serverId: string, sessionName: string) => {
+    return ipcRenderer.invoke('ssh:destroy-tmux-session', serverId, sessionName)
+  },
+
+  listRemoteTmuxSessions: (serverId: string) => {
+    return ipcRenderer.invoke('ssh:list-tmux-sessions', serverId)
   },
 
   // AI Settings operations
@@ -616,7 +683,72 @@ const electronAPI: ElectronAPI = {
 
   getConfigDir: () => {
     return ipcRenderer.invoke('config:getUserConfigDir')
-  }
+  },
+
+  // Browser pane: bookmarks, history, downloads
+  getBookmarks: () => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_BOOKMARKS_GET),
+  addBookmark: (url, title, favicon) => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_BOOKMARKS_ADD, url, title, favicon),
+  removeBookmark: (idOrUrl) => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_BOOKMARKS_REMOVE, idOrUrl),
+  getBrowserHistory: (limit) => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_HISTORY_GET, limit),
+  addBrowserHistory: (url, title, favicon) => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_HISTORY_ADD, url, title, favicon),
+  searchBrowserHistory: (query, limit) => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_HISTORY_SEARCH, query, limit),
+  clearBrowserHistory: () => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_HISTORY_CLEAR),
+  getDownloads: () => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_DOWNLOADS_GET),
+  openDownload: (id) => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_DOWNLOAD_OPEN, id),
+  revealDownload: (id) => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_DOWNLOAD_REVEAL, id),
+  cancelDownload: (id) => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_DOWNLOAD_CANCEL, id),
+  onDownloadUpdate: (callback) => {
+    const handler = (_event: IpcRendererEvent, info: DownloadInfo) => callback(info)
+    ipcRenderer.on(IPC_CHANNELS.BROWSER_DOWNLOAD_UPDATE, handler)
+    return () => { ipcRenderer.removeListener(IPC_CHANNELS.BROWSER_DOWNLOAD_UPDATE, handler) }
+  },
+  onBrowserShortcut: (callback) => {
+    const handler = (_event: IpcRendererEvent, msg: BrowserShortcutMessage) => callback(msg)
+    ipcRenderer.on(IPC_CHANNELS.BROWSER_SHORTCUT, handler)
+    return () => { ipcRenderer.removeListener(IPC_CHANNELS.BROWSER_SHORTCUT, handler) }
+  },
+  onBrowserContextMenu: (callback) => {
+    const handler = (_event: IpcRendererEvent, params: BrowserContextMenuParams) => callback(params)
+    ipcRenderer.on(IPC_CHANNELS.BROWSER_CONTEXT_MENU, handler)
+    return () => { ipcRenderer.removeListener(IPC_CHANNELS.BROWSER_CONTEXT_MENU, handler) }
+  },
+  openExternal: (url: string) => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_OPEN_EXTERNAL, url),
+
+  listBrowserCredentials: () => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_CREDENTIALS_LIST),
+  saveBrowserCredential: (input) => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_CREDENTIALS_SAVE, input),
+  deleteBrowserCredential: (id) => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_CREDENTIALS_DELETE, id),
+  getBrowserCredentialsByOrigin: (origin) => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_CREDENTIALS_GET_BY_ORIGIN, origin),
+  revealBrowserCredential: (id) => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_CREDENTIALS_REVEAL, id),
+  fillBrowserCredential: (paneId, credentialId) => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_CREDENTIALS_FILL, paneId, credentialId),
+
+  registerBrowserPane: (paneId, webContentsId) => ipcRenderer.send(IPC_CHANNELS.BROWSER_PANE_REGISTER, paneId, webContentsId),
+  unregisterBrowserPane: (paneId) => ipcRenderer.send(IPC_CHANNELS.BROWSER_PANE_UNREGISTER, paneId),
+
+  aiBrowserNavigate: (paneId, url) => ipcRenderer.invoke(IPC_CHANNELS.AI_BROWSER_NAVIGATE, paneId, url),
+  aiBrowserGetContent: (paneId) => ipcRenderer.invoke(IPC_CHANNELS.AI_BROWSER_GET_CONTENT, paneId),
+  aiBrowserScreenshot: (paneId) => ipcRenderer.invoke(IPC_CHANNELS.AI_BROWSER_SCREENSHOT, paneId),
+  aiBrowserExecuteJs: (paneId, code) => ipcRenderer.invoke(IPC_CHANNELS.AI_BROWSER_EXECUTE_JS, paneId, code),
+  aiBrowserClick: (paneId, selector) => ipcRenderer.invoke(IPC_CHANNELS.AI_BROWSER_CLICK, paneId, selector),
+  aiBrowserType: (paneId, selector, text, submit) => ipcRenderer.invoke(IPC_CHANNELS.AI_BROWSER_TYPE, paneId, selector, text, submit),
+  aiBrowserBack: (paneId) => ipcRenderer.invoke(IPC_CHANNELS.AI_BROWSER_BACK, paneId),
+  aiBrowserForward: (paneId) => ipcRenderer.invoke(IPC_CHANNELS.AI_BROWSER_FORWARD, paneId),
+  aiBrowserReload: (paneId) => ipcRenderer.invoke(IPC_CHANNELS.AI_BROWSER_RELOAD, paneId),
+
+  getBrowserActionLog: (paneId, limit) => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_ACTION_LOG_GET, paneId, limit),
+  onBrowserActionLog: (callback) => {
+    const handler = (_event: IpcRendererEvent, entry: Parameters<typeof callback>[0]) => callback(entry)
+    ipcRenderer.on(IPC_CHANNELS.BROWSER_ACTION_LOG_APPEND, handler)
+    return () => { ipcRenderer.removeListener(IPC_CHANNELS.BROWSER_ACTION_LOG_APPEND, handler) }
+  },
+  onBrowserApprovalRequest: (callback) => {
+    const handler = (_event: IpcRendererEvent, req: Parameters<typeof callback>[0]) => callback(req)
+    ipcRenderer.on(IPC_CHANNELS.BROWSER_APPROVAL_REQUEST, handler)
+    return () => { ipcRenderer.removeListener(IPC_CHANNELS.BROWSER_APPROVAL_REQUEST, handler) }
+  },
+  respondBrowserApproval: (id, approved) => ipcRenderer.send(IPC_CHANNELS.BROWSER_APPROVAL_RESPONSE, id, approved),
+  listBrowserRecipes: () => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_RECIPES_LIST),
+  saveBrowserRecipe: (recipe) => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_RECIPES_SAVE, recipe),
+  deleteBrowserRecipe: (idOrName) => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_RECIPES_DELETE, idOrName)
 }
 
 contextBridge.exposeInMainWorld('electronAPI', electronAPI)
