@@ -45,6 +45,8 @@ export function TerminalPane({
   const [newTabPrompt, setNewTabPrompt] = useState<{ defaultName: string } | null>(null)
   const [newTabNameInput, setNewTabNameInput] = useState('')
   const { initializeAgent, getAgent } = useAgent()
+  const agent = getAgent(config.id)
+  const aiWorking = agent?.status === 'working'
 
   // Initialize agent state for this pane
   useEffect(() => {
@@ -167,7 +169,7 @@ export function TerminalPane({
 
   return (
     <div
-      className={`terminal-pane ${isFocused ? 'focused' : ''} ${isMaximized ? 'maximized' : ''}`}
+      className={`terminal-pane ${isFocused ? 'focused' : ''} ${isMaximized ? 'maximized' : ''} ${aiWorking ? 'ai-working' : ''}`}
     >
       <PaneLabelWithAgent
         paneId={config.id}

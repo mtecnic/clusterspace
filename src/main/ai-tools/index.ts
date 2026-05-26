@@ -7,6 +7,8 @@
  * `register<Whatever>Tools()` function, and call it from registerAllTools().
  */
 import { registerStepProtocolTools } from './step-protocol'
+import { registerPaneTools } from './pane'
+import { registerOrchestrationTools } from './orchestration'
 
 export { toolRegistry } from './registry'
 export type { ToolContext, ToolDef, ToolRuntimeState } from './registry'
@@ -17,9 +19,9 @@ export function registerAllTools(): void {
   if (registered) return
   registered = true
   registerStepProtocolTools()
-  // Subsequent batches will register here as they're migrated:
-  //   registerTerminalTools()
-  //   registerPaneTools()
-  //   registerOrchestrationTools()
-  //   registerBrowserTools()
+  registerPaneTools()
+  registerOrchestrationTools()
+  // Still in the legacy switch (next batches):
+  //   registerTerminalTools()    -- write/read/wait/poll
+  //   registerBrowserTools()     -- 38 of them
 }

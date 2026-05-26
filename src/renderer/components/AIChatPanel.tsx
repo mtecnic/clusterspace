@@ -380,23 +380,208 @@ function stripThinkTags(content: string): string {
     .trim()
 }
 
+// === Minimal markdown renderer ===
+// Handles the common cases that show up in assistant output: fenced code,
+// inline code, bold, italic, links, bullets, headings, blank-line paragraphs.
+// Deliberately tiny (no DOMPurify, no remark) — the chat content is from
+// our own LLM stream and rendered into a controlled bubble; the limited
+// surface keeps the bundle small and the failure modes obvious.
+function renderMarkdown(text: string): React.ReactNode[] {
+  if (!text) return []
+  const out: React.ReactNode[] = []
+  let key = 0
+  // Split off fenced code blocks first — they swallow everything inside.
+  const parts = text.split(/(```[\s\S]*?```)/g)
+  for (const part of parts) {
+    if (part.startsWith('```')) {
+      const inner = part.slice(3, -3).replace(/^[^\n]*\n/, '')  // strip optional lang
+      out.push(
+        <pre key={`md-${key++}`} className="mt-2 mb-2 p-2 rounded bg-black/40 border border-white/10 overflow-x-auto text-[11px] leading-relaxed font-mono whitespace-pre">
+          {inner}
+        </pre>
+      )
+    } else {
+      // Line-level: headings + bullets + blank-line paragraphs
+      const lines = part.split('\n')
+      let buf: string[] = []
+      const flush = () => {
+        if (buf.length === 0) return
+        const para = buf.join('\n')
+        out.push(<span key={`md-${key++}`}>{renderInline(para)}</span>)
+        buf = []
+      }
+      for (const line of lines) {
+        const heading = /^(#{1,3})\s+(.*)$/.exec(line)
+        const bullet = /^[\s]*[-*]\s+(.*)$/.exec(line)
+        if (heading) {
+          flush()
+          const level = heading[1].length
+          const cls = level === 1 ? 'text-base font-semibold mt-2' : level === 2 ? 'text-sm font-semibold mt-2' : 'text-sm font-medium mt-1'
+          out.push(<div key={`md-${key++}`} className={cls}>{renderInline(heading[2])}</div>)
+        } else if (bullet) {
+          flush()
+          out.push(
+            <div key={`md-${key++}`} className="flex gap-2 ml-1">
+              <span className="text-cs-accent flex-shrink-0">•</span>
+              <span className="flex-1">{renderInline(bullet[1])}</span>
+            </div>
+          )
+        } else {
+          buf.push(line)
+        }
+      }
+      flush()
+    }
+  }
+  return out
+}
+
+// Inline: `code`, **bold**, *italic*, [text](url)
+function renderInline(text: string): React.ReactNode {
+  // Tokenize by precedence: code → links → bold → italic → text
+  const tokens: React.ReactNode[] = []
+  let i = 0
+  let key = 0
+  const push = (n: React.ReactNode) => tokens.push(<React.Fragment key={`in-${key++}`}>{n}</React.Fragment>)
+  while (i < text.length) {
+    const rest = text.slice(i)
+    // Inline code: `...`
+    let m = /^`([^`]+)`/.exec(rest)
+    if (m) {
+      push(<code className="px-1 py-0.5 rounded bg-black/35 text-cs-accent text-[11px] font-mono">{m[1]}</code>)
+      i += m[0].length
+      continue
+    }
+    // Link: [text](url)
+    m = /^\[([^\]]+)\]\(([^)]+)\)/.exec(rest)
+    if (m) {
+      push(<a href={m[2]} target="_blank" rel="noopener noreferrer" className="text-cs-accent underline hover:opacity-80">{m[1]}</a>)
+      i += m[0].length
+      continue
+    }
+    // Bold: **text**
+    m = /^\*\*([^*]+)\*\*/.exec(rest)
+    if (m) {
+      push(<strong>{m[1]}</strong>)
+      i += m[0].length
+      continue
+    }
+    // Italic: *text* (not **)
+    m = /^\*([^*]+)\*/.exec(rest)
+    if (m) {
+      push(<em>{m[1]}</em>)
+      i += m[0].length
+      continue
+    }
+    // Plain char — collect until the next special token starts
+    const nextSpecial = rest.search(/[`\[*]/)
+    const span = nextSpecial < 0 ? rest : rest.slice(0, Math.max(1, nextSpecial))
+    push(span)
+    i += span.length
+  }
+  return tokens
+}
+
+// === Tool category styling ===
+// Each category gets a color + icon so the model's actions are skimmable
+// at a glance instead of looking like wall-of-text.
+function toolStyle(name: string): { icon: string; color: string; label: string } {
+  if (name.startsWith('browser_')) return { icon: '◐', color: '#7aa2f7', label: 'browser' }
+  if (name === 'write_to_terminal' || name === 'read_terminal_output' || name === 'poll_terminal_status' || name === 'wait_for_output' || name === 'restart_terminal') {
+    return { icon: '▶', color: '#9ece6a', label: 'terminal' }
+  }
+  if (name === 'list_panes' || name === 'focus_pane' || name === 'maximize_pane' || name === 'create_workspace' || name === 'capture_screenshot') {
+    return { icon: '◫', color: '#bb9af7', label: 'pane' }
+  }
+  if (name === 'declare_step' || name === 'verify_step') {
+    return { icon: '✓', color: '#e0af68', label: 'step' }
+  }
+  if (name.startsWith('set_agent') || name === 'assign_task' || name === 'complete_task' || name === 'fail_task' || name === 'wait_for_agent' || name === 'share_context' || name === 'create_goal' || name === 'get_fleet_status') {
+    return { icon: '◆', color: '#f7768e', label: 'orchestrate' }
+  }
+  return { icon: '·', color: '#a9b1d6', label: 'tool' }
+}
+
+function previewArgs(name: string, args: Record<string, unknown>): string {
+  // Tool-specific compact summaries; falls back to first arg's value.
+  switch (name) {
+    case 'write_to_terminal': return `${args.pane_id} ◀ ${truncate(String(args.text ?? ''), 40)}`
+    case 'read_terminal_output': return `${args.pane_id}`
+    case 'browser_navigate': return String(args.url ?? '')
+    case 'browser_click': return `${args.pane_id} ▸ ${truncate(String(args.selector ?? args.text ?? ''), 30)}`
+    case 'browser_type': return `${args.pane_id} ◀ ${truncate(String(args.text ?? ''), 30)}`
+    case 'declare_step': return `#${args.step_number} ${truncate(String(args.title ?? ''), 40)}`
+    case 'verify_step': return `#${args.step_number} ${args.passed ? '✓' : '✗'} ${truncate(String(args.observation ?? ''), 30)}`
+    case 'assign_task': return `${args.pane_id} ◀ ${truncate(String(args.description ?? ''), 35)}`
+    case 'set_agent_role': return `${args.pane_id} → ${args.role}`
+    case 'create_goal': return truncate(String(args.description ?? ''), 50)
+    case 'capture_screenshot': return args.pane_id ? String(args.pane_id) : 'workspace'
+    case 'create_workspace': return `${args.name} (${args.rows}×${args.cols})`
+    default: {
+      const firstVal = Object.values(args)[0]
+      if (firstVal === undefined) return ''
+      return truncate(typeof firstVal === 'string' ? firstVal : JSON.stringify(firstVal), 50)
+    }
+  }
+}
+
+function truncate(s: string, n: number): string {
+  if (s.length <= n) return s
+  return s.slice(0, n - 1) + '…'
+}
+
+// Tool call card — replaces the previous one-liner with a categorized,
+// color-coded badge. Renders inside the assistant message bubble.
+function ToolCallCard({ toolCall }: { toolCall: AIToolCall }) {
+  const style = toolStyle(toolCall.name)
+  return (
+    <div
+      className="flex items-center gap-2 px-2 py-1 rounded text-[11px] bg-black/25 border border-white/10"
+      title={`${toolCall.name}(${JSON.stringify(toolCall.arguments).slice(0, 200)})`}
+    >
+      <span className="font-mono text-[13px] leading-none" style={{ color: style.color }}>{style.icon}</span>
+      <span className="font-mono opacity-70 uppercase text-[9px] tracking-wider" style={{ color: style.color }}>{style.label}</span>
+      <span className="font-mono text-cs-text-secondary truncate flex-1">{toolCall.name}</span>
+      <span className="text-cs-text-secondary truncate max-w-[180px]">{previewArgs(toolCall.name, toolCall.arguments)}</span>
+    </div>
+  )
+}
+
+// Tool result chip — small, centered, color-tinted by the tool category.
+function ToolResultChip({ toolName, content }: { toolName: string; content: string }) {
+  const style = toolStyle(toolName)
+  const preview = truncate(content.replace(/\s+/g, ' '), 60)
+  return (
+    <div className="flex justify-center">
+      <div
+        className="flex items-center gap-2 px-2.5 py-1 rounded-full text-[10px] border"
+        style={{ borderColor: `${style.color}40`, color: style.color }}
+        title={content.slice(0, 500)}
+      >
+        <span className="font-mono">{style.icon}</span>
+        <span className="opacity-90">{toolName}</span>
+        {preview && <span className="opacity-60 max-w-[280px] truncate">→ {preview}</span>}
+      </div>
+    </div>
+  )
+}
+
 // Message bubble component
 function MessageBubble({ message }: { message: AIMessage }) {
   const isUser = message.role === 'user'
   const isTool = message.role === 'tool'
 
   if (isTool) {
-    return (
-      <div className="flex justify-center">
-        <div className="bg-cs-bg px-3 py-1.5 rounded-full text-xs text-cs-text-secondary">
-          Tool result received
-        </div>
-      </div>
-    )
+    // Try to identify which tool this result is for (toolCallId resolves
+    // back to the original toolCall; renderer doesn't have that map handy,
+    // so we just label by content sniff if obvious, otherwise generic).
+    return <ToolResultChip toolName={(message as { toolName?: string }).toolName || 'tool'} content={message.content || ''} />
   }
 
+  const cleaned = stripThinkTags(message.content)
+
   return (
-    <div className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
+    <div className={`flex ${isUser ? 'justify-end' : 'justify-start'} animate-fade-in`}>
       <div
         className={`
           max-w-[85%] rounded-lg px-3 py-2
@@ -406,16 +591,22 @@ function MessageBubble({ message }: { message: AIMessage }) {
           }
         `}
       >
-        {/* Message content */}
-        <div className="text-sm whitespace-pre-wrap">{stripThinkTags(message.content) || (
-          <span className="opacity-50 animate-pulse">...</span>
-        )}</div>
+        {/* Message content — markdown for assistant, plain for user */}
+        <div className="text-sm space-y-1">
+          {cleaned ? (
+            isUser
+              ? <div className="whitespace-pre-wrap">{cleaned}</div>
+              : <div>{renderMarkdown(cleaned)}</div>
+          ) : (
+            <span className="opacity-50 animate-pulse">...</span>
+          )}
+        </div>
 
-        {/* Tool calls */}
+        {/* Tool call cards */}
         {message.toolCalls && message.toolCalls.length > 0 && (
-          <div className="mt-2 pt-2 border-t border-white/20 space-y-1">
+          <div className="mt-2 pt-2 border-t border-white/15 space-y-1">
             {message.toolCalls.map((tc) => (
-              <ToolCallDisplay key={tc.id} toolCall={tc} />
+              <ToolCallCard key={tc.id} toolCall={tc} />
             ))}
           </div>
         )}
@@ -434,63 +625,6 @@ function MessageBubble({ message }: { message: AIMessage }) {
           </div>
         )}
       </div>
-    </div>
-  )
-}
-
-// Tool call display
-function ToolCallDisplay({ toolCall }: { toolCall: AIToolCall }) {
-  const getToolIcon = (name: string) => {
-    switch (name) {
-      case 'write_to_terminal':
-        return '>'
-      case 'read_terminal_output':
-        return '<'
-      case 'list_panes':
-        return '[]'
-      case 'capture_screenshot':
-        return '[]'
-      case 'focus_pane':
-        return '^'
-      case 'maximize_pane':
-        return '[]'
-      case 'create_workspace':
-        return '+'
-      case 'restart_terminal':
-        return '!'
-      default:
-        return '*'
-    }
-  }
-
-  const getToolDescription = (tc: AIToolCall) => {
-    const args = tc.arguments
-    switch (tc.name) {
-      case 'write_to_terminal':
-        return `Writing to ${args.pane_id}: "${String(args.text).substring(0, 30)}..."`
-      case 'read_terminal_output':
-        return `Reading from ${args.pane_id}`
-      case 'list_panes':
-        return 'Listing panes'
-      case 'capture_screenshot':
-        return args.pane_id ? `Screenshot of ${args.pane_id}` : 'Screenshot of workspace'
-      case 'focus_pane':
-        return `Focusing ${args.pane_id}`
-      case 'maximize_pane':
-        return `Maximizing ${args.pane_id}`
-      case 'create_workspace':
-        return `Creating workspace "${args.name}"`
-      case 'restart_terminal':
-        return `Restarting ${args.pane_id}`
-      default:
-        return tc.name
-    }
-  }
-
-  return (
-    <div className="flex items-center gap-2 text-xs opacity-75">
-      <span className="font-mono">{getToolIcon(toolCall.name)}</span>
-      <span>{getToolDescription(toolCall)}</span>
     </div>
   )
 }

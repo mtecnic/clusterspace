@@ -1143,6 +1143,32 @@ img.ac-favicon { object-fit: contain; }
   background-color: var(--cs-border);
 }
 
+/* Chat message fade-in — soft enough not to feel laggy, distinct enough
+   to telegraph "a new message just arrived" */
+@keyframes ai-message-fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.animate-fade-in {
+  animation: ai-message-fade-in 0.18s ease-out both;
+}
+
+/* "AI is working in this pane" — a subtle accent pulse on the pane border
+   while the per-pane agent state is `working`. Hooked up by adding the
+   class to the .terminal-pane / .browser-pane wrapper. */
+@keyframes ai-pane-glow {
+  0%   { box-shadow: 0 0 0 1px var(--cs-accent), 0 0 12px -2px rgba(88, 166, 255, 0.4); }
+  50%  { box-shadow: 0 0 0 1px var(--cs-accent), 0 0 18px 0px rgba(88, 166, 255, 0.6); }
+  100% { box-shadow: 0 0 0 1px var(--cs-accent), 0 0 12px -2px rgba(88, 166, 255, 0.4); }
+}
+
+.terminal-pane.ai-working,
+.browser-pane.ai-working {
+  animation: ai-pane-glow 2s ease-in-out infinite;
+  border-color: var(--cs-accent);
+}
+
 /* Activity badge */
 .activity-badge {
   width: 8px;
