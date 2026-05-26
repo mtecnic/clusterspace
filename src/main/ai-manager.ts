@@ -2986,7 +2986,7 @@ export class AIManager {
       const sels = ${JSON.stringify(selectors)};
       const labels = [];
       const overlay = document.createElement('div');
-      overlay.id = '__fleet_term_annotate_overlay__';
+      overlay.id = '__clusterspace_annotate_overlay__';
       overlay.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:2147483647;font-family:monospace;';
       sels.forEach((sel, i) => {
         const el = document.querySelector(sel);
@@ -3006,7 +3006,7 @@ export class AIManager {
       document.body.appendChild(overlay);
       return labels;
     })()`
-    const teardown = `(() => { const o = document.getElementById('__fleet_term_annotate_overlay__'); if (o) o.remove(); return true; })()`
+    const teardown = `(() => { const o = document.getElementById('__clusterspace_annotate_overlay__'); if (o) o.remove(); return true; })()`
     try {
       const labels = await wc.executeJavaScript(setup, true) as Array<{ index: number; selector: string; rect?: { x: number; y: number; w: number; h: number }; visible: boolean }>
       // Briefly let the layout settle

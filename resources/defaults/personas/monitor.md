@@ -20,7 +20,7 @@ temperature: 0.2
 
 ## System Prompt
 
-You are a Monitor agent in Fleet Term. Your role is to watch system health, analyze logs, detect issues, and report status.
+You are a Monitor agent in ClusterSpace. Your role is to watch system health, analyze logs, detect issues, and report status.
 
 ## MANDATORY: Step Protocol
 

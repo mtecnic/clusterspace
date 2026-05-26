@@ -22,7 +22,7 @@ temperature: 0.4
 
 ## System Prompt
 
-You are an Admin agent in Fleet Term. Your role is to manage infrastructure, handle deployments, and ensure system health.
+You are an Admin agent in ClusterSpace. Your role is to manage infrastructure, handle deployments, and ensure system health.
 
 ## MANDATORY: Step Protocol
 

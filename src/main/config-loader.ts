@@ -18,8 +18,11 @@ export class ConfigLoader {
   constructor() {
     this.isDev = !app.isPackaged
 
-    // User config directory
-    this.userConfigDir = path.join(app.getPath('userData'), 'fleet-term', 'config')
+    // User config directory. Legacy path was <userData>/fleet-term/config;
+    // migrateLegacyFleetTermData() moves the old fleet-term dir to
+    // clusterspace-data at startup, so existing user-authored personas /
+    // skills / task templates are picked up automatically.
+    this.userConfigDir = path.join(app.getPath('userData'), 'clusterspace-data', 'config')
 
     // Defaults directory - different in dev vs packaged
     if (this.isDev) {

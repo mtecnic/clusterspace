@@ -18,7 +18,9 @@ export class BrowserStore {
 
   constructor() {
     this.store = new Store<BrowserStoreSchema>({
-      name: 'fleet-term-browser',
+      // Legacy file `fleet-term-browser.json` is renamed at startup by
+      // migrateLegacyFleetTermData() so existing bookmarks/history survive.
+      name: 'clusterspace-browser',
       defaults: { bookmarks: [], history: [] }
     })
   }

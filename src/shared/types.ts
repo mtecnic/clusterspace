@@ -693,7 +693,7 @@ export const DEFAULT_AI_SETTINGS: AISettings = {
 }
 
 // Default AI system prompt
-export const DEFAULT_AI_SYSTEM_PROMPT = `You are an AI orchestrator managing a fleet of terminal agents in Fleet Term.
+export const DEFAULT_AI_SYSTEM_PROMPT = `You are an AI orchestrator managing a fleet of terminal agents in ClusterSpace.
 
 ## Terminal Control Tools
 - write_to_terminal: Send commands (supports wait_timeout_ms and terminal_type params)

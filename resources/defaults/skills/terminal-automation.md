@@ -9,7 +9,7 @@ prerequisites:
 
 ## Overview
 
-Terminal automation in Fleet Term involves sending commands, reading output, and coordinating actions across multiple terminal panes.
+Terminal automation in ClusterSpace involves sending commands, reading output, and coordinating actions across multiple terminal panes.
 
 ## Core Tools
 

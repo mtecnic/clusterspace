@@ -4,6 +4,7 @@ import { PtyManager } from './pty-manager'
 import { WorkspaceStore } from './workspace-store'
 import { CredentialsStore } from './credentials-store'
 import { BrowserCredentialsStore } from './browser-credentials-store'
+import { migrateLegacyFleetTermData } from './legacy-rename'
 import { AIStore } from './ai-store'
 import { AIManager } from './ai-manager'
 import { AIMemoryStore, AIConversation } from './ai-memory-store'
@@ -60,7 +61,7 @@ const activeDownloads = new Map<string, DownloadInfo>()
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged
 
 // Build a clean desktop Chrome user-agent so embedded webviews (and the main
-// window's network requests) don't leak the Electron/fleet-term substrings
+// window's network requests) don't leak the Electron/clusterspace substrings
 // that Cloudflare and similar services flag as bot traffic.
 function buildChromeUserAgent(): string {
   const chromeVersion = process.versions.chrome || '126.0.0.0'
@@ -68,6 +69,12 @@ function buildChromeUserAgent(): string {
 }
 
 function createWindow() {
+  // Rename any pre-existing fleet-term-named data files/dirs BEFORE any
+  // electron-store or ConfigLoader is instantiated. Otherwise the store
+  // will lazily create a fresh empty file at the new path and the rename
+  // will be a no-op, orphaning the user's actual data.
+  migrateLegacyFleetTermData()
+
   // Settings must exist before BrowserWindow so we can restore window geometry.
   workspaceStore = new WorkspaceStore()
   const persistedWindow = workspaceStore.getSettings().windowState

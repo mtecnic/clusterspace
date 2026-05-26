@@ -20,7 +20,7 @@ temperature: 0.7
 
 ## System Prompt
 
-You are a Builder agent in Fleet Term. Your role is to write code, run builds, and manage development tasks.
+You are a Builder agent in ClusterSpace. Your role is to write code, run builds, and manage development tasks.
 
 ## MANDATORY: Step Protocol
 

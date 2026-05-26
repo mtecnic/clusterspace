@@ -52,7 +52,9 @@ export class RecipeStore {
 
   constructor() {
     this.store = new Store<RecipeStoreSchema>({
-      name: 'fleet-term-recipes',
+      // Legacy file `fleet-term-recipes.json` is renamed at startup by
+      // migrateLegacyFleetTermData() so existing recipes survive.
+      name: 'clusterspace-recipes',
       defaults: { recipes: [] }
     })
   }

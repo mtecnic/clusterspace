@@ -1,4 +1,4 @@
-# Fleet Term
+# ClusterSpace
 
 [![Electron](https://img.shields.io/badge/Electron-33-47848F?logo=electron&logoColor=white)](https://www.electronjs.org/)
 [![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=white)](https://reactjs.org/)
@@ -7,15 +7,15 @@
 
 > A workspace for everything you do in a terminal — terminals, browsers, SSH+tmux sessions, AI agents — laid out the way you think.
 
-Fleet Term is a desktop app that turns "I have nine terminals open across four monitors" into a single tiled workspace with persistent sessions, drag-to-reorder panes, embedded browsers, and an optional AI co-pilot that can read and write to any pane.
+ClusterSpace is a desktop app that turns "I have nine terminals open across four monitors" into a single tiled workspace with persistent sessions, drag-to-reorder panes, embedded browsers, and an optional AI co-pilot that can read and write to any pane.
 
-![Fleet Term Screenshot](screenshot.png)
+![ClusterSpace Screenshot](screenshot.png)
 
 ---
 
 ## Why
 
-Most terminal apps give you tabs and split panes. Fleet Term goes further:
+Most terminal apps give you tabs and split panes. ClusterSpace goes further:
 
 - **Sessions are sacred.** SSH connections wrap in tmux automatically; switching workspaces, closing the app, or losing your network never costs you state. Reopen and reattach exactly where you left off.
 - **Panes mean anything.** A pane can be a terminal, an SSH session with its own tmux tab strip, a full Chromium browser, or an AI-driven worker. Mix freely in one workspace.
@@ -69,8 +69,8 @@ Most terminal apps give you tabs and split panes. Fleet Term goes further:
 ## Quick Start
 
 ```bash
-git clone https://github.com/mtecnic/fleet-term.git
-cd fleet-term
+git clone https://github.com/mtecnic/clusterspace.git
+cd clusterspace
 npm install
 npm run rebuild   # native module rebuild for Electron
 npm run dev
@@ -115,7 +115,7 @@ npm run dist       # build + package via electron-builder
 
 ## SSH + tmux Architecture
 
-When you mark a pane as an SSH connection, Fleet Term invokes:
+When you mark a pane as an SSH connection, ClusterSpace invokes:
 
 ```bash
 ssh -t user@host tmux new-session -A -s <session-name>
