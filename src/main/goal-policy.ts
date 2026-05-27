@@ -134,6 +134,8 @@ const BUILTIN_PERMISSIONS: Record<string, ToolPermissions> = {
   browser_screenshot_annotated: { risk: 'read_only' },
   browser_get_action_log: { risk: 'read_only' },
   browser_get_cookies: { risk: 'read_only' },
+  browser_verify_visual_state: { risk: 'read_only' },
+  browser_describe_screen: { risk: 'read_only' },
 
   // Browser navigation = network_get (we can't easily know the URL ahead).
   browser_navigate: { risk: 'network_get' },

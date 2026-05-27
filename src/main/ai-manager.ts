@@ -19,6 +19,8 @@ import { WorkspaceStore } from './workspace-store'
 import { AgentStore } from './agent-store'
 import { OrchestrationStore } from './orchestration-store'
 import { ConfigLoader } from './config-loader'
+import { AIStore } from './ai-store'
+import { promises as fs } from 'fs'
 import { getBrowserWebContents } from './browser-pane-registry'
 import { appendActionLog } from './browser-action-log'
 import { requestApproval, selectorLooksLikePassword } from './browser-approval'
@@ -85,6 +87,7 @@ export class AIManager {
   private agentStore: AgentStore
   private orchestrationStore: OrchestrationStore
   private configLoader: ConfigLoader
+  private aiStore: AIStore
   private activeRequests: Map<string, AbortController> = new Map()
 
   // Shared state for tools that need to coordinate across calls (e.g., the
@@ -114,13 +117,15 @@ export class AIManager {
     ptyManager: PtyManager,
     workspaceStore: WorkspaceStore,
     agentStore: AgentStore,
-    orchestrationStore: OrchestrationStore
+    orchestrationStore: OrchestrationStore,
+    aiStore: AIStore
   ) {
     this.window = window
     this.ptyManager = ptyManager
     this.workspaceStore = workspaceStore
     this.agentStore = agentStore
     this.orchestrationStore = orchestrationStore
+    this.aiStore = aiStore
     this.configLoader = new ConfigLoader()
     // Populate the global tool registry on first AIManager construction.
     // Migration is incremental — registered tools take precedence; everything
@@ -137,7 +142,88 @@ export class AIManager {
       agentStore: this.agentStore,
       orchestrationStore: this.orchestrationStore,
       configLoader: this.configLoader,
-      state: this.toolState
+      state: this.toolState,
+      vision: this.buildVisionHelpers()
+    }
+  }
+
+  /**
+   * Vision helpers — wraps the active provider's vision model in a yes/no
+   * judge + a free-form describe. The image is read from disk and embedded
+   * as a base64 data URL so the model can see the screenshot exactly as
+   * captured. Returns undefined if no provider is configured or no vision
+   * model is set on the active provider (tools must guard for this).
+   */
+  private buildVisionHelpers() {
+    const settings = this.aiStore.getSettings()
+    const providerId = settings.activeProviderId
+    if (!providerId) return undefined
+    const baseProvider = this.aiStore.getProvider(providerId)
+    if (!baseProvider) return undefined
+    const apiKey = this.aiStore.getApiKey(providerId) ?? undefined
+    // Build a "vision provider" — same config but with the vision model
+    // swapped in. If no vision model is configured, fall back to the main
+    // model (some providers do dual-purpose; Claude/GPT-4o for example).
+    const visionProvider: AIProviderConfig = {
+      ...baseProvider,
+      model: baseProvider.visionModel || baseProvider.model
+    }
+
+    const readImageAsDataUrl = async (path: string): Promise<string> => {
+      const buf = await fs.readFile(path)
+      const mime = path.toLowerCase().endsWith('.jpg') || path.toLowerCase().endsWith('.jpeg')
+        ? 'image/jpeg'
+        : 'image/png'
+      return `data:${mime};base64,${buf.toString('base64')}`
+    }
+
+    return {
+      verify: async ({ imagePath, question }: { imagePath: string; question: string }) => {
+        const dataUrl = await readImageAsDataUrl(imagePath)
+        const messages: AIMessage[] = [
+          {
+            id: uuidv4(),
+            role: 'system',
+            content: 'You are a strict visual judge. Reply on the first line with EXACTLY one of: YES / NO / UNCLEAR. On the second line, give a one-sentence reason. Nothing else.',
+            timestamp: Date.now()
+          },
+          {
+            id: uuidv4(),
+            role: 'user',
+            content: `Looking at this screenshot, is this true: ${question}`,
+            images: [dataUrl],
+            timestamp: Date.now()
+          }
+        ]
+        const reply = await this.sendMessage(messages, visionProvider, apiKey)
+        const [verdictLine, ...rest] = (reply.content ?? '').trim().split('\n')
+        const token = verdictLine.trim().toUpperCase().split(/\s|[.,:]/)[0]
+        const verdict: 'yes' | 'no' | 'unclear' =
+          token === 'YES' ? 'yes' :
+          token === 'NO' ? 'no' :
+          'unclear'
+        return { verdict, explanation: rest.join(' ').trim() || verdictLine.trim() }
+      },
+      describe: async ({ imagePath, prompt }: { imagePath: string; prompt?: string }) => {
+        const dataUrl = await readImageAsDataUrl(imagePath)
+        const messages: AIMessage[] = [
+          {
+            id: uuidv4(),
+            role: 'system',
+            content: 'You are describing a UI screenshot for an autonomous browser agent. Be concise and concrete: name the page, list visible interactive elements (buttons, fields, links) with their labels, and note any modals/dialogs/loading states.',
+            timestamp: Date.now()
+          },
+          {
+            id: uuidv4(),
+            role: 'user',
+            content: prompt?.trim() || 'Describe what is visible on screen.',
+            images: [dataUrl],
+            timestamp: Date.now()
+          }
+        ]
+        const reply = await this.sendMessage(messages, visionProvider, apiKey)
+        return { description: (reply.content ?? '').trim() }
+      }
     }
   }
 

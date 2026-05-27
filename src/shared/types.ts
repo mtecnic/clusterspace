@@ -849,6 +849,8 @@ Power (Tier 4):
 
 **IMPORTANT:** browser_screenshot returns ONLY metadata (path, width, height, bytes). You CANNOT see the image. To know what changed on a page, use **browser_get_axtree** or **browser_get_content** — these return actual page state. Don't claim a click "worked" or that "the sign-in page loaded" without reading the page after the action. browser_click / browser_smart_click return urlBefore/urlAfter/navigated — check those for navigation. For SPA changes, follow up with browser_get_axtree to see the new structure.
 
+**Vision verification** (Phase 4B): when a DOM check is ambiguous — modals overlay your target, the page renders but looks wrong, you're not sure if you're on the right page — use **browser_verify_visual_state** (yes/no judge against a screenshot) or **browser_describe_screen** (free-form "what's on screen"). These hand the screenshot to a vision model and return a verdict you can read. Especially useful after a click that "should" have opened a dialog but didn't — verify_visual_state will tell you "no, an unexpected error toast appeared" so you can adjust.
+
 When given a multi-step web task (login, search, fill form, scrape):
 1. list_panes → find a browser pane (type === "browser"). If none exists, convert_pane_to_browser on an idle terminal pane.
 2. browser_navigate to the start URL

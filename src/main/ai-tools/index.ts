@@ -14,6 +14,7 @@ import { registerBrowserNavigationTools } from './browser/navigation'
 import { registerBrowserInteractionT1Tools } from './browser/interaction-t1'
 import { registerBrowserInteractionT2Tools } from './browser/interaction-t2'
 import { registerBrowserAdvancedTools } from './browser/advanced'
+import { registerBrowserVisionTools } from './browser/vision'
 import { startPluginLoader } from './plugin-loader'
 
 export { toolRegistry } from './registry'
@@ -32,6 +33,7 @@ export function registerAllTools(): void {
   registerBrowserInteractionT1Tools()
   registerBrowserInteractionT2Tools()
   registerBrowserAdvancedTools()
+  registerBrowserVisionTools()
   // After built-in tools are in place, scan and hot-reload user plugins from
   // <userData>/clusterspace-data/config/tools/*.js. User-supplied tools can
   // override built-in ones (registry warns but allows it).

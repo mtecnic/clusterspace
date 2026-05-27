@@ -20,6 +20,19 @@ export interface ToolRuntimeState {
  * Everything a tool's `run` function might need. Passed in to dispatch();
  * tools destructure what they need.
  */
+/**
+ * Vision helpers exposed to tools that need to send screenshots to a
+ * multimodal model. AIManager supplies the implementation in
+ * buildToolContext — the registry stays unaware of provider details.
+ *
+ * `verify` returns a strict yes/no judgement; `describe` returns a free-
+ * form description (for when the agent needs to figure out where it is).
+ */
+export interface VisionHelpers {
+  verify: (input: { imagePath: string; question: string }) => Promise<{ verdict: 'yes' | 'no' | 'unclear'; explanation: string }>
+  describe: (input: { imagePath: string; prompt?: string }) => Promise<{ description: string }>
+}
+
 export interface ToolContext {
   window: BrowserWindow
   ptyManager: PtyManager
@@ -28,6 +41,8 @@ export interface ToolContext {
   orchestrationStore: OrchestrationStore
   configLoader: ConfigLoader
   state: ToolRuntimeState
+  /** Optional — present when an AI provider with a vision model is active. */
+  vision?: VisionHelpers
 }
 
 /**
