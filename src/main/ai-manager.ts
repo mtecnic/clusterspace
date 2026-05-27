@@ -301,6 +301,23 @@ export class AIManager {
       }
     }
 
+    // Some OpenAI-compatible endpoints (notably Anthropic's compat shim)
+    // reject requests with no `user` role. After trimming, if every user
+    // message got elided — the original goal/prompt is too old — re-anchor
+    // by re-inserting the FIRST user message from the full history. The
+    // elided-marker stays so the model still knows context was dropped.
+    const hasUser = messagesToKeep.some(m => m.role === 'user')
+    if (!hasUser) {
+      const firstUser = messages.find(m => m.role === 'user')
+      if (firstUser) {
+        // Insert just after the elided marker (if present) so the order is:
+        //   [elided-marker], original-user-goal, ...recent messages
+        const insertAt = messagesToKeep[0]?.id === 'context-elided-marker' ? 1 : 0
+        messagesToKeep.splice(insertAt, 0, firstUser)
+        console.log('[AI] Re-anchored trimmed conversation with original user goal')
+      }
+    }
+
     return messagesToKeep
   }
 
