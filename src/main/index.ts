@@ -9,6 +9,7 @@ import { AIStore } from './ai-store'
 import { AIManager } from './ai-manager'
 import { AIMemoryStore, AIConversation } from './ai-memory-store'
 import { AgentStore } from './agent-store'
+import { GoalStore } from './goal-store'
 import { OrchestrationStore } from './orchestration-store'
 import { ConfigLoader } from './config-loader'
 import { BrowserStore } from './browser-store'
@@ -52,6 +53,7 @@ let aiManager: AIManager | null = null
 let aiMemoryStore: AIMemoryStore | null = null
 let agentStore: AgentStore | null = null
 let orchestrationStore: OrchestrationStore | null = null
+let goalStore: GoalStore | null = null
 let configLoader: ConfigLoader | null = null
 let browserStore: BrowserStore | null = null
 let browserCredentialsStore: BrowserCredentialsStore | null = null
@@ -131,6 +133,7 @@ function createWindow() {
   aiMemoryStore = new AIMemoryStore()
   agentStore = new AgentStore()
   orchestrationStore = new OrchestrationStore()
+  goalStore = new GoalStore()
   configLoader = new ConfigLoader()
   browserStore = new BrowserStore()
   browserCredentialsStore = new BrowserCredentialsStore()
@@ -876,6 +879,35 @@ function registerIpcHandlers() {
       console.error('AI memory clear all error:', error)
       return false
     }
+  })
+
+  // ============= GOAL STORE HANDLERS =============
+  // Read-only handlers landing first; resume/start/abort come with
+  // Phase 3A GoalRunner.
+
+  ipcMain.handle('goal:list', async (_e, filter?: { status?: string; paneId?: string }) => {
+    try { return goalStore?.list(filter as { status?: 'pending' | 'running' | 'paused' | 'completed' | 'failed' | 'aborted'; paneId?: string }) ?? [] }
+    catch { return [] }
+  })
+
+  ipcMain.handle('goal:get', async (_e, id: string) => {
+    try { return goalStore?.get(id) ?? null }
+    catch { return null }
+  })
+
+  ipcMain.handle('goal:list-resumable', async () => {
+    try { return goalStore?.listResumable() ?? [] }
+    catch { return [] }
+  })
+
+  ipcMain.handle('goal:delete', async (_e, id: string) => {
+    try { return goalStore?.delete(id) ?? false }
+    catch { return false }
+  })
+
+  ipcMain.handle('goal:prune', async () => {
+    try { return goalStore?.prune() ?? 0 }
+    catch { return 0 }
   })
 
   // ============= AGENT HANDLERS =============

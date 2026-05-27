@@ -146,6 +146,13 @@ export interface ElectronAPI {
   deleteAIConversation: (id: string) => Promise<boolean>
   clearAllAIConversations: () => Promise<boolean>
 
+  // Goal log (Phase 2B — runner / dashboard coming in Phase 3A / 4A)
+  listGoals: (filter?: { status?: string; paneId?: string }) => Promise<unknown[]>
+  getGoal: (id: string) => Promise<unknown | null>
+  listResumableGoals: () => Promise<unknown[]>
+  deleteGoal: (id: string) => Promise<boolean>
+  pruneGoals: () => Promise<number>
+
   // Agent operations
   getAgentState: (paneId: string) => Promise<PaneAgentState | null>
   getAllAgentStates: () => Promise<PaneAgentState[]>
@@ -569,6 +576,23 @@ const electronAPI: ElectronAPI = {
 
   deleteAIConversation: (id: string) => {
     return ipcRenderer.invoke(IPC_CHANNELS.AI_MEMORY_DELETE_CONVERSATION, id)
+  },
+
+  // Goal log
+  listGoals: (filter?: { status?: string; paneId?: string }) => {
+    return ipcRenderer.invoke('goal:list', filter)
+  },
+  getGoal: (id: string) => {
+    return ipcRenderer.invoke('goal:get', id)
+  },
+  listResumableGoals: () => {
+    return ipcRenderer.invoke('goal:list-resumable')
+  },
+  deleteGoal: (id: string) => {
+    return ipcRenderer.invoke('goal:delete', id)
+  },
+  pruneGoals: () => {
+    return ipcRenderer.invoke('goal:prune')
   },
 
   clearAllAIConversations: () => {
