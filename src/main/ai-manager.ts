@@ -95,6 +95,20 @@ export class AIManager {
 
   // COMPLETION_PATTERNS moved to src/main/ai-tools/terminal.ts.
 
+  // Active goal policy. When set (by GoalRunner before kicking off a goal),
+  // executeTool consults this instead of the legacy regex approval gate.
+  // When null, chat-from-the-AI-panel uses the legacy gate so user-driven
+  // exploration isn't surprised by extra prompts.
+  private activePolicy: import('./goal-policy').GoalPolicy | null = null
+
+  setActivePolicy(policy: import('./goal-policy').GoalPolicy | null): void {
+    this.activePolicy = policy
+  }
+
+  getActivePolicy(): import('./goal-policy').GoalPolicy | null {
+    return this.activePolicy
+  }
+
   constructor(
     window: BrowserWindow,
     ptyManager: PtyManager,
@@ -641,12 +655,42 @@ export class AIManager {
       const args = toolCall.arguments
       const dispatchStart = Date.now()
 
-      // 1. Approval gate for sensitive browser operations. Keeps the user in
-      //    the loop for file uploads and password-field typing. Phase 2A
-      //    replaces this regex-based gate with a per-goal policy.
+      // 1a. Policy gate (Phase 2A) — if an active goal has a declared policy,
+      //     enforce it. Tools beyond the goal's risk ceiling, outside its
+      //     allowlist, or escaping its sandbox dir get prompted/denied.
+      if (this.activePolicy) {
+        // Lazy import to avoid pulling goal-policy into bundles that don't
+        // run goal flows.
+        const { evaluate, getPermissions } = await import('./goal-policy')
+        const perms = getPermissions(toolCall.name, args as Record<string, unknown>)
+        const verdict = evaluate(toolCall.name, perms, this.activePolicy)
+        if (!verdict.allow) {
+          if (verdict.needsApproval) {
+            const approved = await requestApproval(this.window, {
+              paneId: (args.pane_id as string) ?? 'unknown',
+              tool: toolCall.name,
+              description: `Goal policy: ${verdict.reason ?? 'tool exceeds declared risk'}`,
+              reason: 'Goal-policy override',
+              args: args as Record<string, unknown>
+            })
+            if (!approved) {
+              return { toolCallId: toolCall.id, result: { success: false, error: `Denied by goal policy: ${verdict.reason ?? 'risk exceeded'}` } }
+            }
+            // Approved — fall through to dispatch.
+          } else {
+            // Hard deny (denylist) — never prompt.
+            return { toolCallId: toolCall.id, result: { success: false, error: `Denied by goal policy: ${verdict.reason ?? 'tool denied'}` } }
+          }
+        }
+      }
+
+      // 1b. Legacy regex gate for chat-from-the-AI-panel (no active policy).
+      //     File uploads and password-field typing prompt regardless.
       const needsGate =
-        toolCall.name === 'browser_set_files' ||
-        (toolCall.name === 'browser_type' && typeof args.selector === 'string' && selectorLooksLikePassword(args.selector as string))
+        !this.activePolicy && (
+          toolCall.name === 'browser_set_files' ||
+          (toolCall.name === 'browser_type' && typeof args.selector === 'string' && selectorLooksLikePassword(args.selector as string))
+        )
       if (needsGate) {
         const approved = await requestApproval(this.window, {
           paneId: args.pane_id as string,
