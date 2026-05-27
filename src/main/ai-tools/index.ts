@@ -12,6 +12,7 @@ import { registerOrchestrationTools } from './orchestration'
 import { registerTerminalTools } from './terminal'
 import { registerBrowserNavigationTools } from './browser/navigation'
 import { registerBrowserInteractionT1Tools } from './browser/interaction-t1'
+import { registerBrowserInteractionT2Tools } from './browser/interaction-t2'
 
 export { toolRegistry } from './registry'
 export type { ToolContext, ToolDef, ToolRuntimeState } from './registry'
@@ -27,5 +28,6 @@ export function registerAllTools(): void {
   registerTerminalTools()
   registerBrowserNavigationTools()
   registerBrowserInteractionT1Tools()
-  // Browser interaction T2/T3 + advanced + convert tools still in legacy switch.
+  registerBrowserInteractionT2Tools()
+  // Browser T3 + advanced + convert tools still in legacy switch.
 }

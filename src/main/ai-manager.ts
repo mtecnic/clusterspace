@@ -21,12 +21,11 @@ import { AgentStore } from './agent-store'
 import { OrchestrationStore } from './orchestration-store'
 import { ConfigLoader } from './config-loader'
 import { getBrowserWebContents } from './browser-pane-registry'
-import { sendCdpCommand } from './cdp-helpers'
 import { appendActionLog, getActionLog } from './browser-action-log'
 import { requestApproval, selectorLooksLikePassword } from './browser-approval'
 import { getRecipeStore, runRecipe, type Recipe } from './browser-recipes'
 import { registerAllTools, toolRegistry, type ToolContext, type ToolRuntimeState } from './ai-tools'
-import { saveScreenshotToDisk, cdpClickAt } from './ai-tools/browser/_helpers'
+import { cdpClickAt } from './ai-tools/browser/_helpers'
 
 // OpenAI-compatible request/response types
 interface ChatCompletionRequest {
@@ -210,151 +209,10 @@ export class AIManager {
       // browser_type, browser_wait_for_selector, browser_wait_for_navigation,
       // browser_wait_for_text, browser_keypress, browser_scroll,
       // browser_select_option, browser_check.
-      {
-        type: 'function',
-        function: {
-          name: 'browser_query',
-          description: 'Read properties of a single element (text, value, href, aria-*, position) without screenshotting. Cheap way to verify the page state.',
-          parameters: {
-            type: 'object',
-            properties: {
-              pane_id: { type: 'string', description: 'The ID of the browser pane' },
-              selector: { type: 'string', description: 'CSS selector' },
-              attrs: { type: 'string', description: 'Comma-separated attribute names to fetch (default: text,value,href,title,aria-label,role,placeholder,name,id). Use "text" for innerText, "value" for input values.' }
-            },
-            required: ['pane_id', 'selector']
-          }
-        }
-      },
-      {
-        type: 'function',
-        function: {
-          name: 'browser_query_all',
-          description: 'Read properties of multiple elements matching a selector. Useful for scraping lists of results, links, etc.',
-          parameters: {
-            type: 'object',
-            properties: {
-              pane_id: { type: 'string', description: 'The ID of the browser pane' },
-              selector: { type: 'string', description: 'CSS selector' },
-              attrs: { type: 'string', description: 'Comma-separated attribute names (default: text,value,href,title,aria-label,role)' },
-              limit: { type: 'number', description: 'Max elements to return (default: 50)' }
-            },
-            required: ['pane_id', 'selector']
-          }
-        }
-      },
-      // === BROWSER TIER 2: CDP + VISUAL TOOLS ===
-      {
-        type: 'function',
-        function: {
-          name: 'browser_get_axtree',
-          description: 'Get the page accessibility tree (semantic structure: roles, names, values). Far more compact and stable than HTML — preferred way to understand page structure for navigation/interaction.',
-          parameters: {
-            type: 'object',
-            properties: {
-              pane_id: { type: 'string', description: 'The ID of the browser pane' },
-              max_depth: { type: 'number', description: 'Optional depth limit. Omit for full tree.' }
-            },
-            required: ['pane_id']
-          }
-        }
-      },
-      {
-        type: 'function',
-        function: {
-          name: 'browser_set_files',
-          description: 'Set files on a <input type="file"> element. paths must be a comma-separated absolute path list.',
-          parameters: {
-            type: 'object',
-            properties: {
-              pane_id: { type: 'string', description: 'The ID of the browser pane' },
-              selector: { type: 'string', description: 'CSS selector for the file input' },
-              paths: { type: 'string', description: 'Comma-separated absolute file paths' }
-            },
-            required: ['pane_id', 'selector', 'paths']
-          }
-        }
-      },
-      {
-        type: 'function',
-        function: {
-          name: 'browser_click_at',
-          description: 'Click at specific viewport pixel coordinates. Use after a screenshot when CSS selectors don\'t reach the element (canvas, shadow DOM, custom widgets).',
-          parameters: {
-            type: 'object',
-            properties: {
-              pane_id: { type: 'string', description: 'The ID of the browser pane' },
-              x: { type: 'number', description: 'Viewport-relative X (CSS pixels)' },
-              y: { type: 'number', description: 'Viewport-relative Y (CSS pixels)' },
-              button: { type: 'string', enum: ['left', 'right', 'middle'], description: 'Mouse button (default: left)' }
-            },
-            required: ['pane_id', 'x', 'y']
-          }
-        }
-      },
-      {
-        type: 'function',
-        function: {
-          name: 'browser_hover',
-          description: 'Move the mouse cursor over an element or coordinate to trigger hover-only menus, tooltips, etc. Provide either selector OR (x, y).',
-          parameters: {
-            type: 'object',
-            properties: {
-              pane_id: { type: 'string', description: 'The ID of the browser pane' },
-              selector: { type: 'string', description: 'CSS selector to hover over (uses element center)' },
-              x: { type: 'number', description: 'Viewport X if no selector' },
-              y: { type: 'number', description: 'Viewport Y if no selector' }
-            },
-            required: ['pane_id']
-          }
-        }
-      },
-      {
-        type: 'function',
-        function: {
-          name: 'browser_drag',
-          description: 'Drag from one viewport coordinate to another. Useful for sliders, draggable list items, drawing.',
-          parameters: {
-            type: 'object',
-            properties: {
-              pane_id: { type: 'string', description: 'The ID of the browser pane' },
-              from_x: { type: 'number', description: 'Start X' },
-              from_y: { type: 'number', description: 'Start Y' },
-              to_x: { type: 'number', description: 'End X' },
-              to_y: { type: 'number', description: 'End Y' },
-              steps: { type: 'number', description: 'Interpolation steps (default: 10)' }
-            },
-            required: ['pane_id', 'from_x', 'from_y', 'to_x', 'to_y']
-          }
-        }
-      },
-      {
-        type: 'function',
-        function: {
-          name: 'browser_screenshot_full_page',
-          description: 'Capture the entire scrollable page as a single PNG (not just the viewport). Saves to disk, returns {path, width, height, bytes}.',
-          parameters: {
-            type: 'object',
-            properties: { pane_id: { type: 'string', description: 'The ID of the browser pane' } },
-            required: ['pane_id']
-          }
-        }
-      },
-      {
-        type: 'function',
-        function: {
-          name: 'browser_screenshot_annotated',
-          description: 'Take a screenshot with numbered red boxes overlaid on each named selector (1-based indexing). Saves the PNG to disk and returns {path, width, height, bytes, labels[{index, selector, rect, visible}]}. The labels list is the most useful part — even without seeing the image you can decide which selector to click by inspecting `rect`/`visible`.',
-          parameters: {
-            type: 'object',
-            properties: {
-              pane_id: { type: 'string', description: 'The ID of the browser pane' },
-              selectors: { type: 'string', description: 'Comma-separated CSS selectors to highlight (max ~20 for readability)' }
-            },
-            required: ['pane_id', 'selectors']
-          }
-        }
-      },
+      // Migrated to ai-tools/browser/interaction-t2.ts: browser_query,
+      // browser_query_all, browser_get_axtree, browser_set_files,
+      // browser_click_at, browser_hover, browser_drag,
+      // browser_screenshot_full_page, browser_screenshot_annotated.
       // === BROWSER TIER 3: WORKFLOWS + OBSERVABILITY ===
       {
         type: 'function',
@@ -965,64 +823,10 @@ export class AIManager {
         // browser_click, browser_type, browser_wait_for_selector,
         // browser_wait_for_navigation, browser_wait_for_text, browser_keypress,
         // browser_scroll, browser_select_option, browser_check.
-        case 'browser_query':
-          result = await this.browserQuery(
-            args.pane_id as string,
-            args.selector as string,
-            (args.attrs as string | undefined)?.split(',').map(s => s.trim()).filter(Boolean)
-          )
-          break
-        case 'browser_query_all':
-          result = await this.browserQueryAll(
-            args.pane_id as string,
-            args.selector as string,
-            (args.attrs as string | undefined)?.split(',').map(s => s.trim()).filter(Boolean),
-            (args.limit as number) || 50
-          )
-          break
-
-        // === BROWSER TIER 2 ===
-        case 'browser_get_axtree':
-          result = await this.browserGetAxtree(args.pane_id as string, args.max_depth as number | undefined)
-          break
-        case 'browser_set_files': {
-          const paths = (args.paths as string).split(',').map(s => s.trim()).filter(Boolean)
-          result = await this.browserSetFiles(args.pane_id as string, args.selector as string, paths)
-          break
-        }
-        case 'browser_click_at':
-          result = await this.browserClickAt(
-            args.pane_id as string,
-            args.x as number,
-            args.y as number,
-            (args.button as 'left' | 'right' | 'middle') || 'left'
-          )
-          break
-        case 'browser_hover':
-          result = await this.browserHover(args.pane_id as string, {
-            selector: args.selector as string | undefined,
-            x: args.x as number | undefined,
-            y: args.y as number | undefined
-          })
-          break
-        case 'browser_drag':
-          result = await this.browserDrag(
-            args.pane_id as string,
-            args.from_x as number,
-            args.from_y as number,
-            args.to_x as number,
-            args.to_y as number,
-            (args.steps as number) || 10
-          )
-          break
-        case 'browser_screenshot_full_page':
-          result = await this.browserScreenshotFullPage(args.pane_id as string)
-          break
-        case 'browser_screenshot_annotated': {
-          const sels = (args.selectors as string).split(',').map(s => s.trim()).filter(Boolean)
-          result = await this.browserScreenshotAnnotated(args.pane_id as string, sels)
-          break
-        }
+        // === BROWSER TIER 2: migrated to ai-tools/browser/interaction-t2.ts ===
+        // browser_query, browser_query_all, browser_get_axtree, browser_set_files,
+        // browser_click_at, browser_hover, browser_drag,
+        // browser_screenshot_full_page, browser_screenshot_annotated.
 
         // === BROWSER TIER 3 ===
         case 'browser_smart_click':
@@ -1230,174 +1034,9 @@ export class AIManager {
   // browser_scroll / browser_select_option / browser_check all moved to
   // ai-tools/browser/interaction-t1.ts. cdpClickAt → ai-tools/browser/_helpers.ts.
 
-  private async browserQuery(paneId: string, selector: string, attrs?: string[]): Promise<{ success: boolean; found?: boolean; element?: Record<string, unknown>; error?: string }> {
-    const wc = getBrowserWebContents(paneId)
-    if (!wc) return { success: false, error: `No browser pane ${paneId}` }
-    const wantedAttrs = attrs ?? ['text', 'value', 'href', 'title', 'aria-label', 'role', 'placeholder', 'name', 'id']
-    const code = `(() => {
-      const el = document.querySelector(${JSON.stringify(selector)});
-      if (!el) return { found: false };
-      const attrs = ${JSON.stringify(wantedAttrs)};
-      const out = { tag: el.tagName.toLowerCase() };
-      for (const a of attrs) {
-        if (a === 'text') out.text = (el.innerText || '').slice(0, 500);
-        else if (a === 'value') out.value = el.value;
-        else out[a] = el.getAttribute(a);
-      }
-      const r = el.getBoundingClientRect();
-      out.rect = { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) };
-      out.visible = el.offsetParent !== null && r.width > 0 && r.height > 0;
-      return { found: true, element: out };
-    })()`
-    try {
-      const result = await wc.executeJavaScript(code, true) as { found: boolean; element?: Record<string, unknown> }
-      return { success: true, ...result }
-    } catch (error) {
-      return { success: false, error: error instanceof Error ? error.message : String(error) }
-    }
-  }
-
-  // ====== Tier 2: CDP + visual tools ======
-
-  private async browserGetAxtree(paneId: string, maxDepth?: number): Promise<{ success: boolean; tree?: unknown; error?: string }> {
-    const wc = getBrowserWebContents(paneId)
-    if (!wc) return { success: false, error: `No browser pane ${paneId}` }
-    try {
-      const result = await sendCdpCommand<{ nodes: unknown[] }>(wc, 'Accessibility.getFullAXTree')
-      // Compact the tree: drop ignored nodes, keep role/name/value/rect.
-      type AXNode = { nodeId: string; ignored?: boolean; role?: { value?: string }; name?: { value?: string }; value?: { value?: unknown }; childIds?: string[]; backendDOMNodeId?: number; properties?: Array<{ name: string; value: { value?: unknown } }> }
-      const nodes = result.nodes as AXNode[]
-      const compact = nodes
-        .filter(n => !n.ignored)
-        .map(n => {
-          const out: Record<string, unknown> = { id: n.nodeId }
-          if (n.role?.value) out.role = n.role.value
-          if (n.name?.value) out.name = n.name.value
-          if (n.value?.value !== undefined) out.value = n.value.value
-          if (n.childIds && n.childIds.length) out.children = n.childIds
-          const focusable = n.properties?.find(p => p.name === 'focusable')?.value?.value
-          if (focusable) out.focusable = true
-          return out
-        })
-      // Truncate via maxDepth if requested. Otherwise return all (could be large).
-      if (maxDepth && maxDepth > 0) {
-        const byId = new Map(compact.map(n => [n.id as string, n]))
-        const root = compact[0]
-        const trimmed: typeof compact = []
-        const walk = (id: string, depth: number) => {
-          const n = byId.get(id); if (!n) return
-          trimmed.push(n)
-          if (depth < maxDepth) {
-            for (const c of (n.children as string[] | undefined) ?? []) walk(c, depth + 1)
-          }
-        }
-        if (root) walk(root.id as string, 0)
-        return { success: true, tree: trimmed }
-      }
-      return { success: true, tree: compact }
-    } catch (error) {
-      return { success: false, error: error instanceof Error ? error.message : String(error) }
-    }
-  }
-
-  private async browserSetFiles(paneId: string, selector: string, paths: string[]): Promise<{ success: boolean; found?: boolean; error?: string }> {
-    const wc = getBrowserWebContents(paneId)
-    if (!wc) return { success: false, error: `No browser pane ${paneId}` }
-    try {
-      // 1. Find the element via DOM.querySelector to get its CDP nodeId
-      const root = await sendCdpCommand<{ root: { nodeId: number } }>(wc, 'DOM.getDocument')
-      const node = await sendCdpCommand<{ nodeId: number }>(wc, 'DOM.querySelector', {
-        nodeId: root.root.nodeId,
-        selector
-      })
-      if (!node || !node.nodeId) return { success: true, found: false }
-      // 2. Set files via DOM.setFileInputFiles (only works on file inputs)
-      await sendCdpCommand(wc, 'DOM.setFileInputFiles', { nodeId: node.nodeId, files: paths })
-      return { success: true, found: true }
-    } catch (error) {
-      return { success: false, error: error instanceof Error ? error.message : String(error) }
-    }
-  }
-
-  private async browserClickAt(paneId: string, x: number, y: number, button: 'left' | 'right' | 'middle' = 'left'): Promise<{ success: boolean; urlBefore?: string; urlAfter?: string; navigated?: boolean; error?: string }> {
-    const wc = getBrowserWebContents(paneId)
-    if (!wc) return { success: false, error: `No browser pane ${paneId}` }
-    try {
-      const urlBefore = wc.getURL()
-      await cdpClickAt(wc, x, y, button)
-      await new Promise(r => setTimeout(r, 250))
-      const urlAfter = wc.getURL()
-      return { success: true, urlBefore, urlAfter, navigated: urlBefore !== urlAfter }
-    } catch (error) {
-      return { success: false, error: error instanceof Error ? error.message : String(error) }
-    }
-  }
-
-  private async browserHover(paneId: string, opts: { selector?: string; x?: number; y?: number }): Promise<{ success: boolean; found?: boolean; error?: string }> {
-    const wc = getBrowserWebContents(paneId)
-    if (!wc) return { success: false, error: `No browser pane ${paneId}` }
-    try {
-      let x: number | undefined = opts.x
-      let y: number | undefined = opts.y
-      if (opts.selector) {
-        const code = `(() => { const el = document.querySelector(${JSON.stringify(opts.selector)}); if (!el) return null; const r = el.getBoundingClientRect(); return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }; })()`
-        const center = await wc.executeJavaScript(code, true) as { x: number; y: number } | null
-        if (!center) return { success: true, found: false }
-        x = center.x; y = center.y
-      }
-      if (x == null || y == null) return { success: false, error: 'Need either selector or (x,y)' }
-      wc.sendInputEvent({ type: 'mouseMove', x, y })
-      return { success: true, found: true }
-    } catch (error) {
-      return { success: false, error: error instanceof Error ? error.message : String(error) }
-    }
-  }
-
-  private async browserDrag(paneId: string, fromX: number, fromY: number, toX: number, toY: number, steps = 10): Promise<{ success: boolean; error?: string }> {
-    const wc = getBrowserWebContents(paneId)
-    if (!wc) return { success: false, error: `No browser pane ${paneId}` }
-    try {
-      wc.sendInputEvent({ type: 'mouseDown', x: fromX, y: fromY, button: 'left', clickCount: 1 })
-      // Move in interpolated steps so drag handlers see motion
-      for (let i = 1; i <= steps; i++) {
-        const t = i / steps
-        const x = Math.round(fromX + (toX - fromX) * t)
-        const y = Math.round(fromY + (toY - fromY) * t)
-        wc.sendInputEvent({ type: 'mouseMove', x, y, button: 'left' })
-        // Brief pause so React drag handlers can keep up
-        await new Promise(r => setTimeout(r, 10))
-      }
-      wc.sendInputEvent({ type: 'mouseUp', x: toX, y: toY, button: 'left', clickCount: 1 })
-      return { success: true }
-    } catch (error) {
-      return { success: false, error: error instanceof Error ? error.message : String(error) }
-    }
-  }
-
-  private async browserScreenshotFullPage(paneId: string): Promise<{ success: boolean; path?: string; width?: number; height?: number; bytes?: number; error?: string }> {
-    const wc = getBrowserWebContents(paneId)
-    if (!wc) return { success: false, error: `No browser pane ${paneId}` }
-    try {
-      const result = await sendCdpCommand<{ data: string }>(wc, 'Page.captureScreenshot', {
-        format: 'png',
-        captureBeyondViewport: true
-      })
-      const buffer = Buffer.from(result.data, 'base64')
-      // We don't have width/height directly from CDP without another call;
-      // viewport size is good enough as a hint.
-      const dims = await wc.executeJavaScript('({w: document.documentElement.scrollWidth, h: document.documentElement.scrollHeight})', true) as { w: number; h: number }
-      return await saveScreenshotToDisk(buffer, dims.w, dims.h)
-    } catch {
-      // Fallback: viewport-only screenshot if CDP path fails
-      try {
-        const image = await wc.capturePage()
-        const size = image.getSize()
-        return await saveScreenshotToDisk(image.toPNG(), size.width, size.height)
-      } catch (error) {
-        return { success: false, error: error instanceof Error ? error.message : String(error) }
-      }
-    }
-  }
+  // browser_query / browser_query_all / browser_get_axtree / browser_set_files /
+  // browser_click_at / browser_hover / browser_drag / browser_screenshot_full_page /
+  // browser_screenshot_annotated moved to ai-tools/browser/interaction-t2.ts.
 
   // ====== Tier 3: workflows + observability ======
 
@@ -1569,79 +1208,6 @@ export class AIManager {
     }
   }
 
-  private async browserScreenshotAnnotated(paneId: string, selectors: string[]): Promise<{ success: boolean; path?: string; width?: number; height?: number; bytes?: number; labels?: Array<{ index: number; selector: string; rect?: { x: number; y: number; w: number; h: number }; visible: boolean }>; error?: string }> {
-    const wc = getBrowserWebContents(paneId)
-    if (!wc) return { success: false, error: `No browser pane ${paneId}` }
-    // Inject overlay, screenshot, remove overlay.
-    const setup = `(() => {
-      const sels = ${JSON.stringify(selectors)};
-      const labels = [];
-      const overlay = document.createElement('div');
-      overlay.id = '__clusterspace_annotate_overlay__';
-      overlay.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:2147483647;font-family:monospace;';
-      sels.forEach((sel, i) => {
-        const el = document.querySelector(sel);
-        if (!el) { labels.push({ index: i+1, selector: sel, visible: false }); return; }
-        const r = el.getBoundingClientRect();
-        const visible = el.offsetParent !== null && r.width > 0 && r.height > 0;
-        labels.push({ index: i+1, selector: sel, rect: { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) }, visible });
-        if (!visible) return;
-        const box = document.createElement('div');
-        box.style.cssText = 'position:absolute;border:2px solid #ff3b30;border-radius:3px;left:'+r.x+'px;top:'+r.y+'px;width:'+r.width+'px;height:'+r.height+'px;';
-        const tag = document.createElement('div');
-        tag.textContent = String(i+1);
-        tag.style.cssText = 'position:absolute;top:-2px;left:-2px;background:#ff3b30;color:white;font-weight:700;font-size:12px;padding:1px 5px;border-radius:3px;';
-        box.appendChild(tag);
-        overlay.appendChild(box);
-      });
-      document.body.appendChild(overlay);
-      return labels;
-    })()`
-    const teardown = `(() => { const o = document.getElementById('__clusterspace_annotate_overlay__'); if (o) o.remove(); return true; })()`
-    try {
-      const labels = await wc.executeJavaScript(setup, true) as Array<{ index: number; selector: string; rect?: { x: number; y: number; w: number; h: number }; visible: boolean }>
-      // Briefly let the layout settle
-      await new Promise(r => setTimeout(r, 50))
-      const image = await wc.capturePage()
-      const size = image.getSize()
-      const saved = await saveScreenshotToDisk(image.toPNG(), size.width, size.height)
-      await wc.executeJavaScript(teardown, true)
-      return { ...saved, labels }
-    } catch (error) {
-      // Make sure to clean up the overlay even on error
-      try { await wc.executeJavaScript(teardown, true) } catch { /* ignore */ }
-      return { success: false, error: error instanceof Error ? error.message : String(error) }
-    }
-  }
-
-  private async browserQueryAll(paneId: string, selector: string, attrs?: string[], limit = 50): Promise<{ success: boolean; elements?: Array<Record<string, unknown>>; truncated?: boolean; error?: string }> {
-    const wc = getBrowserWebContents(paneId)
-    if (!wc) return { success: false, error: `No browser pane ${paneId}` }
-    const wantedAttrs = attrs ?? ['text', 'value', 'href', 'title', 'aria-label', 'role']
-    const code = `(() => {
-      const all = Array.from(document.querySelectorAll(${JSON.stringify(selector)}));
-      const limit = ${limit};
-      const truncated = all.length > limit;
-      const slice = all.slice(0, limit);
-      const attrs = ${JSON.stringify(wantedAttrs)};
-      const elements = slice.map(el => {
-        const out = { tag: el.tagName.toLowerCase() };
-        for (const a of attrs) {
-          if (a === 'text') out.text = (el.innerText || '').slice(0, 200);
-          else if (a === 'value') out.value = el.value;
-          else out[a] = el.getAttribute(a);
-        }
-        const r = el.getBoundingClientRect();
-        out.rect = { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) };
-        return out;
-      });
-      return { elements, truncated, total: all.length };
-    })()`
-    try {
-      const result = await wc.executeJavaScript(code, true) as { elements: Array<Record<string, unknown>>; truncated: boolean }
-      return { success: true, ...result }
-    } catch (error) {
-      return { success: false, error: error instanceof Error ? error.message : String(error) }
-    }
-  }
+  // browser_screenshot_annotated, browser_query_all migrated to
+  // ai-tools/browser/interaction-t2.ts.
 }
