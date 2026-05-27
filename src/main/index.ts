@@ -10,6 +10,7 @@ import { AIManager } from './ai-manager'
 import { AIMemoryStore, AIConversation } from './ai-memory-store'
 import { AgentStore } from './agent-store'
 import { GoalStore } from './goal-store'
+import { GoalRunner, type StartGoalInput } from './goal-runner'
 import { OrchestrationStore } from './orchestration-store'
 import { ConfigLoader } from './config-loader'
 import { BrowserStore } from './browser-store'
@@ -54,6 +55,7 @@ let aiMemoryStore: AIMemoryStore | null = null
 let agentStore: AgentStore | null = null
 let orchestrationStore: OrchestrationStore | null = null
 let goalStore: GoalStore | null = null
+let goalRunner: GoalRunner | null = null
 let configLoader: ConfigLoader | null = null
 let browserStore: BrowserStore | null = null
 let browserCredentialsStore: BrowserCredentialsStore | null = null
@@ -146,6 +148,7 @@ function createWindow() {
   orchestrationStore.setWindow(mainWindow)
   orchestrationStore.setAgentStore(agentStore)
   aiManager = new AIManager(mainWindow, ptyManager, workspaceStore, agentStore, orchestrationStore)
+  goalRunner = new GoalRunner(mainWindow, aiManager, aiMemoryStore, aiStore, agentStore, goalStore)
 
   // Register IPC handlers
   registerIpcHandlers()
@@ -908,6 +911,26 @@ function registerIpcHandlers() {
   ipcMain.handle('goal:prune', async () => {
     try { return goalStore?.prune() ?? 0 }
     catch { return 0 }
+  })
+
+  // GoalRunner lifecycle
+  ipcMain.handle('goal:start', async (_e, input: StartGoalInput) => {
+    try {
+      if (!goalRunner) return { goalId: '', error: 'GoalRunner not initialized' }
+      return await goalRunner.start(input)
+    } catch (err) {
+      return { goalId: '', error: (err as Error).message ?? String(err) }
+    }
+  })
+
+  ipcMain.handle('goal:abort', async (_e, id: string) => {
+    try { return goalRunner?.abort(id) ?? false }
+    catch { return false }
+  })
+
+  ipcMain.handle('goal:status', async (_e, id: string) => {
+    try { return goalRunner?.status(id) ?? null }
+    catch { return null }
   })
 
   // ============= AGENT HANDLERS =============

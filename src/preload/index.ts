@@ -146,12 +146,16 @@ export interface ElectronAPI {
   deleteAIConversation: (id: string) => Promise<boolean>
   clearAllAIConversations: () => Promise<boolean>
 
-  // Goal log (Phase 2B — runner / dashboard coming in Phase 3A / 4A)
+  // Goal log + runner (Phase 2B + 3A)
   listGoals: (filter?: { status?: string; paneId?: string }) => Promise<unknown[]>
   getGoal: (id: string) => Promise<unknown | null>
   listResumableGoals: () => Promise<unknown[]>
   deleteGoal: (id: string) => Promise<boolean>
   pruneGoals: () => Promise<number>
+  startGoal: (input: unknown) => Promise<{ goalId: string; error?: string }>
+  abortGoal: (id: string) => Promise<boolean>
+  goalStatus: (id: string) => Promise<unknown | null>
+  onGoalEvent: (cb: (event: unknown) => void) => () => void
 
   // Agent operations
   getAgentState: (paneId: string) => Promise<PaneAgentState | null>
@@ -593,6 +597,20 @@ const electronAPI: ElectronAPI = {
   },
   pruneGoals: () => {
     return ipcRenderer.invoke('goal:prune')
+  },
+  startGoal: (input: unknown) => {
+    return ipcRenderer.invoke('goal:start', input)
+  },
+  abortGoal: (id: string) => {
+    return ipcRenderer.invoke('goal:abort', id)
+  },
+  goalStatus: (id: string) => {
+    return ipcRenderer.invoke('goal:status', id)
+  },
+  onGoalEvent: (cb: (event: unknown) => void) => {
+    const handler = (_event: IpcRendererEvent, payload: unknown) => cb(payload)
+    ipcRenderer.on('goal:event', handler)
+    return () => { ipcRenderer.removeListener('goal:event', handler) }
   },
 
   clearAllAIConversations: () => {

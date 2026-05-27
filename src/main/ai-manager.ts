@@ -449,12 +449,15 @@ export class AIManager {
     }
   }
 
-  // Stream a message
+  // Stream a message. Still emits AI_STREAM_CHUNK/END for the chat UI,
+  // and now also returns the final assembled assistant message so server-
+  // side loops (like the GoalRunner) can drive multi-turn tool-use without
+  // relying on the renderer's auto-loop.
   async streamMessage(
     messages: AIMessage[],
     config: AIProviderConfig,
     apiKey?: string
-  ): Promise<void> {
+  ): Promise<AIMessage | null> {
     const requestId = uuidv4()
     const controller = new AbortController()
     this.activeRequests.set(requestId, controller)
@@ -624,6 +627,7 @@ export class AIManager {
       if (!this.window.isDestroyed()) {
         this.window.webContents.send(IPC_CHANNELS.AI_STREAM_END, finalMessage)
       }
+      return finalMessage
     } catch (error) {
       if (!this.window.isDestroyed()) {
         this.window.webContents.send(
@@ -631,6 +635,7 @@ export class AIManager {
           error instanceof Error ? error.message : 'Stream failed'
         )
       }
+      return null
     } finally {
       clearTimeout(timeoutId)
       this.activeRequests.delete(requestId)
