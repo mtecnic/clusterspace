@@ -1,5 +1,4 @@
-import { BrowserWindow, dialog, session } from 'electron'
-import { writeFile } from 'fs/promises'
+import { BrowserWindow } from 'electron'
 import { v4 as uuidv4 } from 'uuid'
 import {
   AIProviderConfig,
@@ -21,11 +20,9 @@ import { AgentStore } from './agent-store'
 import { OrchestrationStore } from './orchestration-store'
 import { ConfigLoader } from './config-loader'
 import { getBrowserWebContents } from './browser-pane-registry'
-import { appendActionLog, getActionLog } from './browser-action-log'
+import { appendActionLog } from './browser-action-log'
 import { requestApproval, selectorLooksLikePassword } from './browser-approval'
-import { getRecipeStore, runRecipe, type Recipe } from './browser-recipes'
 import { registerAllTools, toolRegistry, type ToolContext, type ToolRuntimeState } from './ai-tools'
-import { cdpClickAt } from './ai-tools/browser/_helpers'
 
 // OpenAI-compatible request/response types
 interface ChatCompletionRequest {
@@ -213,151 +210,9 @@ export class AIManager {
       // browser_query_all, browser_get_axtree, browser_set_files,
       // browser_click_at, browser_hover, browser_drag,
       // browser_screenshot_full_page, browser_screenshot_annotated.
-      // === BROWSER TIER 3: WORKFLOWS + OBSERVABILITY ===
-      {
-        type: 'function',
-        function: {
-          name: 'browser_smart_click',
-          description: 'Click an element using multiple resolution strategies (selector, aria-label, role+text, visible text). More resilient than browser_click on sites with brittle selectors.',
-          parameters: {
-            type: 'object',
-            properties: {
-              pane_id: { type: 'string', description: 'The ID of the browser pane' },
-              selector: { type: 'string', description: 'Optional CSS selector (tried first if provided)' },
-              aria_label: { type: 'string', description: 'Optional aria-label to match' },
-              role: { type: 'string', description: 'Optional ARIA role (use with text)' },
-              text: { type: 'string', description: 'Visible text to match (case-insensitive, exact then substring)' }
-            },
-            required: ['pane_id']
-          }
-        }
-      },
-      {
-        type: 'function',
-        function: {
-          name: 'browser_run_recipe',
-          description: 'Run a saved recipe by name, or a recipe defined inline (steps_json). Recipes are sequences of browser_* tool calls with optional retries. Returns per-step results.',
-          parameters: {
-            type: 'object',
-            properties: {
-              pane_id: { type: 'string', description: 'The ID of the browser pane (auto-injected as pane_id arg into every step that doesn\'t already have one)' },
-              name: { type: 'string', description: 'Saved recipe name. Use either name or steps_json.' },
-              steps_json: { type: 'string', description: 'Inline recipe as JSON: {"name":"...","steps":[{"tool":"...","args":{...},"retry":1}]}' }
-            },
-            required: ['pane_id']
-          }
-        }
-      },
-      {
-        type: 'function',
-        function: {
-          name: 'convert_pane_to_browser',
-          description: 'Turn a terminal pane into a browser pane. The PTY is killed and a webview takes its place. Use this when the user asks to browse / open a website but no browser pane exists in the workspace yet — pick any terminal pane (idle or unused) and convert it. Optionally navigates to a URL after conversion.',
-          parameters: {
-            type: 'object',
-            properties: {
-              pane_id: { type: 'string', description: 'The ID of the pane to convert (terminal panes only — already-browser panes are no-ops)' },
-              url: { type: 'string', description: 'Optional URL to load after conversion (default: user\'s configured default browser URL)' }
-            },
-            required: ['pane_id']
-          }
-        }
-      },
-      {
-        type: 'function',
-        function: {
-          name: 'convert_pane_to_terminal',
-          description: 'Turn a browser pane back into a terminal pane. Useful for cleanup when a browser pane is no longer needed.',
-          parameters: {
-            type: 'object',
-            properties: {
-              pane_id: { type: 'string', description: 'The ID of the browser pane' }
-            },
-            required: ['pane_id']
-          }
-        }
-      },
-      {
-        type: 'function',
-        function: {
-          name: 'browser_get_cookies',
-          description: 'Read cookies from the browser-pane partition. Optionally filter by URL.',
-          parameters: {
-            type: 'object',
-            properties: {
-              pane_id: { type: 'string', description: 'The ID of the browser pane' },
-              url: { type: 'string', description: 'Optional URL to filter cookies by' }
-            },
-            required: ['pane_id']
-          }
-        }
-      },
-      {
-        type: 'function',
-        function: {
-          name: 'browser_set_cookie',
-          description: 'Set a cookie in the browser-pane partition. Useful for bypassing logins when you have a session cookie.',
-          parameters: {
-            type: 'object',
-            properties: {
-              pane_id: { type: 'string', description: 'The ID of the browser pane' },
-              url: { type: 'string', description: 'URL the cookie applies to (required)' },
-              name: { type: 'string', description: 'Cookie name' },
-              value: { type: 'string', description: 'Cookie value' },
-              domain: { type: 'string', description: 'Optional domain (defaults to URL\'s host)' },
-              path: { type: 'string', description: 'Optional path (default: /)' }
-            },
-            required: ['pane_id', 'url', 'name', 'value']
-          }
-        }
-      },
-      {
-        type: 'function',
-        function: {
-          name: 'browser_save_pdf',
-          description: 'Save the current page as a PDF. If path is omitted, prompts the user for a location.',
-          parameters: {
-            type: 'object',
-            properties: {
-              pane_id: { type: 'string', description: 'The ID of the browser pane' },
-              path: { type: 'string', description: 'Optional absolute file path to save to' }
-            },
-            required: ['pane_id']
-          }
-        }
-      },
-      {
-        type: 'function',
-        function: {
-          name: 'browser_save_html',
-          description: 'Save the current page\'s HTML source. If path is omitted, prompts the user for a location.',
-          parameters: {
-            type: 'object',
-            properties: {
-              pane_id: { type: 'string', description: 'The ID of the browser pane' },
-              path: { type: 'string', description: 'Optional absolute file path to save to' }
-            },
-            required: ['pane_id']
-          }
-        }
-      },
-      {
-        type: 'function',
-        function: {
-          name: 'browser_get_action_log',
-          description: 'Read recent browser tool-call log entries (timestamp, tool, args, success, error). Useful for debugging your own multi-step flow.',
-          parameters: {
-            type: 'object',
-            properties: {
-              pane_id: { type: 'string', description: 'Optional filter by pane' },
-              limit: { type: 'number', description: 'Max entries to return (default: 50)' }
-            }
-          }
-        }
-      }
+      // Tier 3 + advanced + convert tools migrated to ai-tools/browser/advanced.ts.
     ]
-    // Append every tool registered in the tool registry (step protocol today;
-    // more categories as they migrate out of the legacy switch).
+    // Legacy switch is now empty — every tool comes from the registry.
     return [...legacyDefs, ...toolRegistry.listDefinitions()]
   }
 
@@ -760,25 +615,19 @@ export class AIManager {
     }
   }
 
-  // Execute a tool call
+  // Execute a tool call. Every tool now lives in the registry (see
+  // src/main/ai-tools/). AIManager handles three things around dispatch:
+  //   1. Approval gate (modal for sensitive browser ops)
+  //   2. Browser action log (live ticker in the UI)
+  //   3. Result truncation (avoid blowing the model's context budget)
   async executeTool(toolCall: AIToolCall): Promise<AIToolResult> {
     try {
       const args = toolCall.arguments
-      let result: unknown
       const dispatchStart = Date.now()
 
-      // Registry-first dispatch: any tool registered in src/main/ai-tools/
-      // is handled there, no need to fall into the legacy switch. As tool
-      // categories migrate out of the switch they just disappear from below.
-      if (toolRegistry.has(toolCall.name)) {
-        const r = await toolRegistry.dispatch(toolCall.name, args as Record<string, unknown>, this.buildToolContext())
-        if (r.ok) {
-          return { toolCallId: toolCall.id, result: r.result }
-        }
-        return { toolCallId: toolCall.id, result: { success: false, error: r.error } }
-      }
-
-      // Approval gate for sensitive browser operations
+      // 1. Approval gate for sensitive browser operations. Keeps the user in
+      //    the loop for file uploads and password-field typing. Phase 2A
+      //    replaces this regex-based gate with a per-goal policy.
       const needsGate =
         toolCall.name === 'browser_set_files' ||
         (toolCall.name === 'browser_type' && typeof args.selector === 'string' && selectorLooksLikePassword(args.selector as string))
@@ -805,98 +654,37 @@ export class AIManager {
         }
       }
 
-      switch (toolCall.name) {
-        // Terminal-control cases moved to ai-tools/terminal.ts (registry).
-
-        // Migrated to ai-tools/{pane,orchestration,step-protocol}.ts:
-        // list_panes, capture_screenshot, focus_pane, maximize_pane,
-        // create_workspace, restart_terminal, get_fleet_status,
-        // set_agent_role, assign_task, complete_task, fail_task,
-        // wait_for_agent, share_context, create_goal, declare_step, verify_step.
-        // Dispatched via the registry short-circuit at the top of executeTool.
-
-        // === BROWSER PANE TOOLS ===
-        // browser_navigate, browser_get_content, browser_screenshot,
-        // browser_execute_js, browser_back, browser_forward, browser_reload
-        // migrated to ai-tools/browser/navigation.ts.
-        // === BROWSER TIER 1: migrated to ai-tools/browser/interaction-t1.ts ===
-        // browser_click, browser_type, browser_wait_for_selector,
-        // browser_wait_for_navigation, browser_wait_for_text, browser_keypress,
-        // browser_scroll, browser_select_option, browser_check.
-        // === BROWSER TIER 2: migrated to ai-tools/browser/interaction-t2.ts ===
-        // browser_query, browser_query_all, browser_get_axtree, browser_set_files,
-        // browser_click_at, browser_hover, browser_drag,
-        // browser_screenshot_full_page, browser_screenshot_annotated.
-
-        // === BROWSER TIER 3 ===
-        case 'browser_smart_click':
-          result = await this.browserSmartClick(args.pane_id as string, {
-            selector: args.selector as string | undefined,
-            ariaLabel: args.aria_label as string | undefined,
-            role: args.role as string | undefined,
-            text: args.text as string | undefined
-          })
-          break
-        case 'browser_run_recipe': {
-          let recipeOrName: Recipe | string
-          if (args.name) recipeOrName = args.name as string
-          else if (args.steps_json) {
-            try { recipeOrName = JSON.parse(args.steps_json as string) as Recipe }
-            catch (err) { result = { success: false, error: `Invalid steps_json: ${(err as Error).message}` }; break }
-          } else { result = { success: false, error: 'Provide either name or steps_json' }; break }
-          result = await this.browserRunRecipe(args.pane_id as string, recipeOrName)
-          break
+      // 2. Registry dispatch — single path, no legacy switch.
+      if (!toolRegistry.has(toolCall.name)) {
+        return {
+          toolCallId: toolCall.id,
+          result: null,
+          error: `Unknown tool: ${toolCall.name}`
         }
-        case 'browser_get_action_log':
-          result = this.browserGetActionLog(args.pane_id as string | undefined, (args.limit as number) || 50)
-          break
-
-        case 'convert_pane_to_browser':
-          result = await this.convertPaneToBrowser(args.pane_id as string, args.url as string | undefined)
-          break
-        case 'convert_pane_to_terminal':
-          result = await this.convertPaneToTerminal(args.pane_id as string)
-          break
-
-        // === BROWSER TIER 4 ===
-        case 'browser_get_cookies':
-          result = await this.browserGetCookies(args.pane_id as string, args.url as string | undefined)
-          break
-        case 'browser_set_cookie':
-          result = await this.browserSetCookie(args.pane_id as string, {
-            url: args.url as string,
-            name: args.name as string,
-            value: args.value as string,
-            domain: args.domain as string | undefined,
-            path: (args.path as string | undefined) ?? '/'
-          })
-          break
-        case 'browser_save_pdf':
-          result = await this.browserSavePdf(args.pane_id as string, args.path as string | undefined)
-          break
-        case 'browser_save_html':
-          result = await this.browserSaveHtml(args.pane_id as string, args.path as string | undefined)
-          break
-
-        default:
-          throw new Error(`Unknown tool: ${toolCall.name}`)
       }
+      const dispatched = await toolRegistry.dispatch(
+        toolCall.name,
+        args as Record<string, unknown>,
+        this.buildToolContext()
+      )
+      let result: unknown = dispatched.ok ? dispatched.result : { success: false, error: dispatched.error }
 
-      // Append every browser_* call to the action log for live observability
+      // 3. Browser-tool action log for live observability.
       if (toolCall.name.startsWith('browser_') && typeof args.pane_id === 'string') {
         const r = result as { success?: boolean; error?: string } | null | undefined
-        const ok = (r && typeof r === 'object' && 'success' in (r as object)) ? !!r.success : true
+        const ok = dispatched.ok && (r && typeof r === 'object' && 'success' in (r as object) ? !!r.success : true)
         appendActionLog({
           paneId: args.pane_id,
           tool: toolCall.name,
           args: args as Record<string, unknown>,
           ok,
           durationMs: Date.now() - dispatchStart,
-          error: ok ? undefined : r?.error
+          error: ok ? undefined : (r?.error ?? (dispatched.ok ? undefined : dispatched.error))
         })
       }
 
-      // Truncate large string results to prevent context bloat
+      // 4. Truncate large string results to keep context manageable. (Phase
+      //    1B will replace this with a structured pagination envelope.)
       if (typeof result === 'string' && result.length > 3000) {
         console.log(`[AI] Truncating large tool result from ${result.length} chars`)
         result = result.slice(0, 2000) + '\n\n...[truncated middle section]...\n\n' + result.slice(-500)
@@ -1040,174 +828,7 @@ export class AIManager {
 
   // ====== Tier 3: workflows + observability ======
 
-  private async browserSmartClick(paneId: string, target: { selector?: string; text?: string; ariaLabel?: string; role?: string }): Promise<{ success: boolean; found?: boolean; matchedBy?: string; urlBefore?: string; urlAfter?: string; navigated?: boolean; error?: string }> {
-    const wc = getBrowserWebContents(paneId)
-    if (!wc) return { success: false, error: `No browser pane ${paneId}` }
-    // Find element via the strategies, scroll into view, return its center
-    // coordinates. Real OS mouse events are then dispatched via
-    // sendInputEvent — synthetic el.click() misses many real-world sites.
-    const code = `(async () => {
-      const t = ${JSON.stringify(target)};
-      let matchedBy = null, el = null;
-      if (t.selector) { const x = document.querySelector(t.selector); if (x) { el = x; matchedBy = 'selector'; } }
-      if (!el && t.ariaLabel) { const x = document.querySelector('[aria-label=' + JSON.stringify(t.ariaLabel) + ']'); if (x) { el = x; matchedBy = 'aria-label'; } }
-      if (!el && t.role && t.text) {
-        const els = Array.from(document.querySelectorAll('[role=' + JSON.stringify(t.role) + ']'));
-        el = els.find(e => (e.innerText || '').trim().toLowerCase() === t.text.toLowerCase()) || els.find(e => (e.innerText || '').toLowerCase().includes(t.text.toLowerCase()));
-        if (el) matchedBy = 'role+text';
-      }
-      if (!el && t.text) {
-        const all = document.querySelectorAll('a, button, [role=button], [onclick], input[type=submit], input[type=button]');
-        for (const e of all) { const txt = ((e.innerText || e.value || '') + '').trim().toLowerCase(); if (txt === t.text.toLowerCase()) { el = e; break; } }
-        if (!el) for (const e of all) { const txt = ((e.innerText || e.value || '') + '').toLowerCase(); if (txt.includes(t.text.toLowerCase())) { el = e; break; } }
-        if (el) matchedBy = 'text';
-      }
-      if (!el) return { found: false };
-      el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
-      await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
-      const r = el.getBoundingClientRect();
-      return { found: true, matchedBy, tag: el.tagName.toLowerCase(), x: Math.round(r.x + r.width/2), y: Math.round(r.y + r.height/2) };
-    })()`
-    try {
-      const result = await wc.executeJavaScript(code, true) as { found: boolean; matchedBy?: string; tag?: string; x?: number; y?: number }
-      if (!result.found || result.x == null || result.y == null) return { success: true, found: false }
-      const urlBefore = wc.getURL()
-      await cdpClickAt(wc, result.x, result.y)
-      await new Promise(r => setTimeout(r, 250))
-      const urlAfter = wc.getURL()
-      return { success: true, found: true, matchedBy: result.matchedBy, urlBefore, urlAfter, navigated: urlBefore !== urlAfter }
-    } catch (error) {
-      return { success: false, error: error instanceof Error ? error.message : String(error) }
-    }
-  }
-
-  private async browserRunRecipe(paneId: string, recipeOrName: Recipe | string): Promise<unknown> {
-    let recipe: Recipe | undefined
-    if (typeof recipeOrName === 'string') {
-      recipe = getRecipeStore().get(recipeOrName)
-      if (!recipe) return { success: false, error: `Recipe "${recipeOrName}" not found` }
-    } else {
-      recipe = recipeOrName
-    }
-    // Inject pane_id into every step's args if not already present, so recipes
-    // can be paneId-agnostic.
-    const stepsWithPane = recipe.steps.map(s => ({ ...s, args: { pane_id: paneId, ...s.args } }))
-    const dispatcher = (tool: string, args: Record<string, unknown>) =>
-      this.executeTool({ id: 'recipe-step', name: tool, arguments: args })
-    const result = await runRecipe({ ...recipe, steps: stepsWithPane }, dispatcher)
-    return { success: result.ok, ...result }
-  }
-
-  private browserGetActionLog(paneId?: string, limit = 50) {
-    return { success: true, entries: getActionLog(paneId, limit) }
-  }
-
-  // ====== Tier 4: power features ======
-
-  private async browserGetCookies(_paneId: string, url?: string): Promise<{ success: boolean; cookies?: unknown[]; error?: string }> {
-    try {
-      const ses = session.fromPartition('persist:browser-pane')
-      const cookies = await ses.cookies.get(url ? { url } : {})
-      return { success: true, cookies }
-    } catch (error) {
-      return { success: false, error: error instanceof Error ? error.message : String(error) }
-    }
-  }
-
-  private async browserSetCookie(_paneId: string, opts: { url: string; name: string; value: string; domain?: string; path?: string; expirationDate?: number }): Promise<{ success: boolean; error?: string }> {
-    try {
-      const ses = session.fromPartition('persist:browser-pane')
-      await ses.cookies.set(opts)
-      return { success: true }
-    } catch (error) {
-      return { success: false, error: error instanceof Error ? error.message : String(error) }
-    }
-  }
-
-  private async browserSavePdf(paneId: string, path?: string): Promise<{ success: boolean; path?: string; error?: string }> {
-    const wc = getBrowserWebContents(paneId)
-    if (!wc) return { success: false, error: `No browser pane ${paneId}` }
-    try {
-      let savePath = path
-      if (!savePath) {
-        const result = await dialog.showSaveDialog(this.window, {
-          defaultPath: `${(wc.getTitle() || 'page').replace(/[^a-z0-9-_ ]/gi, '_')}.pdf`,
-          filters: [{ name: 'PDF', extensions: ['pdf'] }]
-        })
-        if (result.canceled || !result.filePath) return { success: false, error: 'User cancelled save' }
-        savePath = result.filePath
-      }
-      const buffer = await wc.printToPDF({})
-      await writeFile(savePath, buffer)
-      return { success: true, path: savePath }
-    } catch (error) {
-      return { success: false, error: error instanceof Error ? error.message : String(error) }
-    }
-  }
-
-  private async convertPaneToBrowser(paneId: string, url?: string): Promise<{ success: boolean; pane_id?: string; url?: string; error?: string }> {
-    const settings = this.workspaceStore.getSettings()
-    if (!settings.activeWorkspaceId) return { success: false, error: 'No active workspace' }
-    const workspace = this.workspaceStore.get(settings.activeWorkspaceId)
-    if (!workspace) return { success: false, error: 'Active workspace not found' }
-    const pane = workspace.panes.find(p => p.id === paneId)
-    if (!pane) return { success: false, error: `Pane ${paneId} not found in active workspace` }
-    if (pane.type === 'browser') {
-      // Already a browser — optionally just navigate. Inlined navigate
-      // (browser_navigate lives in ai-tools/browser/navigation.ts now).
-      if (url) {
-        const wc = getBrowserWebContents(paneId)
-        if (!wc) return { success: false, pane_id: paneId, error: `No browser pane with id ${paneId}` }
-        try {
-          await wc.loadURL(url)
-          return { success: true, pane_id: paneId, url: wc.getURL() }
-        } catch (error) {
-          return { success: false, pane_id: paneId, error: error instanceof Error ? error.message : String(error) }
-        }
-      }
-      return { success: true, pane_id: paneId, url: pane.url }
-    }
-    // Tear down the PTY first so we don't leak a shell process when the
-    // BrowserPane swaps in.
-    const ptyId = this.ptyManager.getPtyIdForPane(paneId)
-    if (ptyId) this.ptyManager.kill(ptyId)
-    const fallbackUrl = url ?? settings.defaultBrowserUrl ?? 'https://www.google.com'
-    this.workspaceStore.updatePane(workspace.id, paneId, { type: 'browser', url: fallbackUrl })
-    return { success: true, pane_id: paneId, url: fallbackUrl }
-  }
-
-  private async convertPaneToTerminal(paneId: string): Promise<{ success: boolean; pane_id?: string; error?: string }> {
-    const settings = this.workspaceStore.getSettings()
-    if (!settings.activeWorkspaceId) return { success: false, error: 'No active workspace' }
-    const workspace = this.workspaceStore.get(settings.activeWorkspaceId)
-    if (!workspace) return { success: false, error: 'Active workspace not found' }
-    const pane = workspace.panes.find(p => p.id === paneId)
-    if (!pane) return { success: false, error: `Pane ${paneId} not found` }
-    this.workspaceStore.updatePane(workspace.id, paneId, { type: 'terminal', url: undefined })
-    return { success: true, pane_id: paneId }
-  }
-
-  private async browserSaveHtml(paneId: string, path?: string): Promise<{ success: boolean; path?: string; error?: string }> {
-    const wc = getBrowserWebContents(paneId)
-    if (!wc) return { success: false, error: `No browser pane ${paneId}` }
-    try {
-      let savePath = path
-      if (!savePath) {
-        const result = await dialog.showSaveDialog(this.window, {
-          defaultPath: `${(wc.getTitle() || 'page').replace(/[^a-z0-9-_ ]/gi, '_')}.html`,
-          filters: [{ name: 'HTML', extensions: ['html', 'htm'] }]
-        })
-        if (result.canceled || !result.filePath) return { success: false, error: 'User cancelled save' }
-        savePath = result.filePath
-      }
-      const html = await wc.executeJavaScript(`'<!DOCTYPE html>\\n' + document.documentElement.outerHTML`, true) as string
-      await writeFile(savePath, html, 'utf8')
-      return { success: true, path: savePath }
-    } catch (error) {
-      return { success: false, error: error instanceof Error ? error.message : String(error) }
-    }
-  }
-
-  // browser_screenshot_annotated, browser_query_all migrated to
-  // ai-tools/browser/interaction-t2.ts.
+  // Phase 1A complete: every AI tool now lives in src/main/ai-tools/ and
+  // dispatches via the registry. AIManager retains only the streaming loop,
+  // tool-context construction, approval-gate logic, and bookkeeping.
 }

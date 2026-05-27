@@ -13,6 +13,7 @@ import { registerTerminalTools } from './terminal'
 import { registerBrowserNavigationTools } from './browser/navigation'
 import { registerBrowserInteractionT1Tools } from './browser/interaction-t1'
 import { registerBrowserInteractionT2Tools } from './browser/interaction-t2'
+import { registerBrowserAdvancedTools } from './browser/advanced'
 
 export { toolRegistry } from './registry'
 export type { ToolContext, ToolDef, ToolRuntimeState } from './registry'
@@ -29,5 +30,6 @@ export function registerAllTools(): void {
   registerBrowserNavigationTools()
   registerBrowserInteractionT1Tools()
   registerBrowserInteractionT2Tools()
-  // Browser T3 + advanced + convert tools still in legacy switch.
+  registerBrowserAdvancedTools()
+  // ALL tools migrated. Legacy switch in ai-manager.ts is now a sealed fallback.
 }
