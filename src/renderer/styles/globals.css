@@ -1143,6 +1143,19 @@ img.ac-favicon { object-fit: contain; }
   background-color: var(--cs-border);
 }
 
+/* Soft accent halo around the AI chat panel while streaming. Pairs with
+   the streaming shimmer above the input — together they make "the AI is
+   actively running" unmistakable without being obnoxious. */
+@keyframes ai-panel-pulse {
+  0%, 100% { box-shadow: 0 16px 48px rgba(0, 0, 0, 0.4), 0 0 24px -4px rgba(88, 166, 255, 0.35); }
+  50%      { box-shadow: 0 16px 48px rgba(0, 0, 0, 0.4), 0 0 32px 0px rgba(88, 166, 255, 0.55); }
+}
+
+.ai-panel-active {
+  animation: ai-panel-pulse 2.4s ease-in-out infinite;
+  border-color: rgba(88, 166, 255, 0.5);
+}
+
 /* AI streaming shimmer — a 2px bar with a moving gradient highlight.
    Shows above the chat input while a stream is in flight. */
 .ai-stream-shimmer {

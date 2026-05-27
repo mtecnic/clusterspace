@@ -11,6 +11,7 @@ import { registerPaneTools } from './pane'
 import { registerOrchestrationTools } from './orchestration'
 import { registerTerminalTools } from './terminal'
 import { registerBrowserNavigationTools } from './browser/navigation'
+import { registerBrowserInteractionT1Tools } from './browser/interaction-t1'
 
 export { toolRegistry } from './registry'
 export type { ToolContext, ToolDef, ToolRuntimeState } from './registry'
@@ -25,5 +26,6 @@ export function registerAllTools(): void {
   registerOrchestrationTools()
   registerTerminalTools()
   registerBrowserNavigationTools()
-  // Browser interaction tiers + advanced + convert tools still in legacy switch.
+  registerBrowserInteractionT1Tools()
+  // Browser interaction T2/T3 + advanced + convert tools still in legacy switch.
 }

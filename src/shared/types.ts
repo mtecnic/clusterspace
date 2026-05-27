@@ -144,6 +144,26 @@ export interface AIToolResult {
 }
 
 // OpenAI-compatible tool definition
+/**
+ * OpenAI-compatible tool definition. The parameters shape is intentionally
+ * permissive — JSON Schema allows nested objects, arrays with `items`,
+ * `enum`, `default`, etc. The model's SDK validates the actual shape; we
+ * just have to round-trip whatever the tool registers.
+ */
+export interface AIToolParameterSchema {
+  type: string
+  description?: string
+  enum?: unknown[]
+  default?: unknown
+  // For arrays
+  items?: AIToolParameterSchema
+  // For nested objects
+  properties?: Record<string, AIToolParameterSchema>
+  required?: string[]
+  // Allow other JSON-Schema-ish keys without type-checking gymnastics
+  [key: string]: unknown
+}
+
 export interface AIToolDefinition {
   type: 'function'
   function: {
@@ -151,11 +171,7 @@ export interface AIToolDefinition {
     description: string
     parameters: {
       type: 'object'
-      properties: Record<string, {
-        type: string
-        description: string
-        enum?: string[]
-      }>
+      properties: Record<string, AIToolParameterSchema>
       required?: string[]
     }
   }

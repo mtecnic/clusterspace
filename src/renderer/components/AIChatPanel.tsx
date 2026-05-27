@@ -184,7 +184,7 @@ export function AIChatPanel({ onOpenSettings }: AIChatPanelProps) {
   // Full panel
   return (
     <div className="fixed top-0 left-1/2 -translate-x-1/2 z-50 w-[600px] max-w-[90vw]">
-      <div className="bg-cs-surface rounded-b-lg shadow-2xl border border-cs-border border-t-0 flex flex-col max-h-[70vh]">
+      <div className={`bg-cs-surface rounded-b-lg shadow-2xl border border-cs-border border-t-0 flex flex-col max-h-[70vh] ${isStreaming ? 'ai-panel-active' : ''}`}>
         {/* Header */}
         <div className="flex items-center justify-between px-4 py-2 border-b border-cs-border">
           <div className="flex items-center gap-2">
