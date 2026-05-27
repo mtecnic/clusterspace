@@ -1,4 +1,5 @@
 import type { PtyManager } from '../pty-manager'
+import type { PagedTextResult } from '../../shared/types'
 import { toolRegistry } from './registry'
 
 /**
@@ -112,23 +113,49 @@ export function registerTerminalTools(): void {
     }
   })
 
-  toolRegistry.register<{ pane_id: string; lines?: number }, string>({
+  toolRegistry.register<{ pane_id: string; lines?: number; cursor?: number }, PagedTextResult>({
     name: 'read_terminal_output',
-    description: 'Read the recent output from a terminal pane scrollback buffer',
+    description: 'Read terminal scrollback. Default: returns the last N lines (lines=50, max 500). For long-tailed output, pass `cursor` (line offset from the start of scrollback) to page forward; the result includes `hasMore` + `nextCursor`. `totalBytes` is the total line count.',
     parameters: {
       type: 'object',
       properties: {
         pane_id: { type: 'string', description: 'The ID of the pane to read from' },
-        lines: { type: 'number', description: 'Number of lines to read (default: 50, max: 500)' }
+        lines: { type: 'number', description: 'Number of lines to return (default 50, max 500)' },
+        cursor: { type: 'number', description: 'Line offset to start reading from. Omit to get the most recent `lines` lines. Pass `nextCursor` from a previous call to continue paging.' }
       },
       required: ['pane_id']
     },
-    run: async ({ pane_id, lines }, { ptyManager }) => {
+    run: async ({ pane_id, lines, cursor }, { ptyManager }) => {
       const cappedLines = Math.min(lines ?? 50, 500)
       const ptyId = ptyManager.getPtyIdForPane(pane_id)
       if (!ptyId) throw new Error(`No terminal found for pane ${pane_id}`)
       const scrollback = ptyManager.getScrollbackBuffer(ptyId)
-      return scrollback.slice(-cappedLines).join('\n')
+      const totalBytes = scrollback.length
+
+      // Without a cursor: tail mode (last N lines, no "more" before that).
+      if (cursor === undefined) {
+        const start = Math.max(0, totalBytes - cappedLines)
+        const chunk = scrollback.slice(start).join('\n')
+        return {
+          success: true,
+          content: chunk,
+          hasMore: false,
+          totalBytes
+        }
+      }
+
+      // With a cursor: paged mode (chunk starting at `cursor`).
+      const start = Math.max(0, Math.min(cursor, totalBytes))
+      const end = Math.min(start + cappedLines, totalBytes)
+      const chunk = scrollback.slice(start, end).join('\n')
+      const hasMore = end < totalBytes
+      return {
+        success: true,
+        content: chunk,
+        hasMore,
+        nextCursor: hasMore ? end : undefined,
+        totalBytes
+      }
     }
   })
 

@@ -1,4 +1,5 @@
 import { getBrowserWebContents } from '../../browser-pane-registry'
+import type { PagedTextResult } from '../../../shared/types'
 import { toolRegistry } from '../registry'
 import { saveScreenshotToDisk } from './_helpers'
 
@@ -31,30 +32,42 @@ export function registerBrowserNavigationTools(): void {
     }
   })
 
-  toolRegistry.register<{ pane_id: string; max_chars?: number }, { success: boolean; url?: string; title?: string; text?: string; truncated?: boolean; error?: string }>({
+  toolRegistry.register<{ pane_id: string; max_chars?: number; cursor?: number }, PagedTextResult & { url?: string; title?: string }>({
     name: 'browser_get_content',
-    description: 'Extract visible text content from the current page (document.body.innerText). Useful for reading article text, form labels, error messages.',
+    description: 'Extract visible text from the current page (document.body.innerText). Returns a paged envelope: pass `cursor` (char offset) to continue from where the last call left off. Default chunk size is 8000 chars; bump via `max_chars`. `totalBytes` is the full page length.',
     parameters: {
       type: 'object',
       properties: {
         pane_id: { type: 'string', description: 'The browser pane ID' },
-        max_chars: { type: 'number', description: 'Truncate at this many chars (default 8000)' }
+        max_chars: { type: 'number', description: 'Max chars per chunk (default 8000)' },
+        cursor: { type: 'number', description: 'Char offset to start from. Pass `nextCursor` from the previous call to continue paging.' }
       },
       required: ['pane_id']
     },
-    run: async ({ pane_id, max_chars }) => {
+    run: async ({ pane_id, max_chars, cursor }) => {
       const wc = getBrowserWebContents(pane_id)
-      if (!wc) return { success: false, error: `No browser pane with id ${pane_id}` }
+      if (!wc) return { success: false, content: '', hasMore: false, totalBytes: 0, error: `No browser pane with id ${pane_id}` }
       const cap = max_chars ?? 8000
       try {
         const raw = await wc.executeJavaScript(
           `(() => { const b = document.body; return b ? b.innerText : '' })()`,
           true
         ) as string
-        const truncated = raw.length > cap
-        return { success: true, url: wc.getURL(), title: wc.getTitle(), text: truncated ? raw.slice(0, cap) : raw, truncated }
+        const start = cursor !== undefined ? Math.max(0, Math.min(cursor, raw.length)) : 0
+        const end = Math.min(start + cap, raw.length)
+        const chunk = raw.slice(start, end)
+        const hasMore = end < raw.length
+        return {
+          success: true,
+          content: chunk,
+          hasMore,
+          nextCursor: hasMore ? end : undefined,
+          totalBytes: raw.length,
+          url: wc.getURL(),
+          title: wc.getTitle()
+        }
       } catch (error) {
-        return { success: false, error: error instanceof Error ? error.message : String(error) }
+        return { success: false, content: '', hasMore: false, totalBytes: 0, error: error instanceof Error ? error.message : String(error) }
       }
     }
   })

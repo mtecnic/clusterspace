@@ -145,6 +145,33 @@ export interface AIToolResult {
 
 // OpenAI-compatible tool definition
 /**
+ * Pagination envelope for tools that return potentially-large text. Lets
+ * the model page through long output deliberately instead of relying on
+ * a silent post-hoc truncation (which loses information without telling
+ * the caller what got cut).
+ *
+ * Conventions:
+ *   - `cursor` semantics are tool-specific (line offset, byte offset, ...);
+ *     the model treats it as opaque and just passes it back unchanged.
+ *   - `hasMore: true` plus a defined `nextCursor` means "call me again
+ *     with `cursor: nextCursor` to get the next chunk."
+ *   - `totalBytes` is the total source size (in whatever unit makes sense
+ *     for the tool), so the model can decide whether to keep paging.
+ *   - `truncated` is for tools that hit a hard internal cap and won't
+ *     return more even if asked — distinct from `hasMore` which just
+ *     means "I returned a chunk; there's another chunk available."
+ */
+export interface PagedTextResult {
+  success: boolean
+  content: string
+  hasMore: boolean
+  nextCursor?: number
+  totalBytes: number
+  truncated?: boolean
+  error?: string
+}
+
+/**
  * OpenAI-compatible tool definition. The parameters shape is intentionally
  * permissive — JSON Schema allows nested objects, arrays with `items`,
  * `enum`, `default`, etc. The model's SDK validates the actual shape; we
@@ -710,6 +737,9 @@ export const DEFAULT_AI_SETTINGS: AISettings = {
 
 // Default AI system prompt
 export const DEFAULT_AI_SYSTEM_PROMPT = `You are an AI orchestrator managing a fleet of terminal agents in ClusterSpace.
+
+## Paginated Tool Results
+Some tools return a paged envelope: \`{success, content, hasMore, nextCursor, totalBytes}\`. When \`hasMore\` is true, call the same tool again with \`cursor: <nextCursor>\` to get the next chunk. Use \`totalBytes\` to decide whether to keep paging (don't dump megabytes of output just because you can). Tools currently paged: \`read_terminal_output\` (line offset), \`browser_get_content\` (char offset).
 
 ## Terminal Control Tools
 - write_to_terminal: Send commands (supports wait_timeout_ms and terminal_type params)

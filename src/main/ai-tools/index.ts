@@ -14,6 +14,7 @@ import { registerBrowserNavigationTools } from './browser/navigation'
 import { registerBrowserInteractionT1Tools } from './browser/interaction-t1'
 import { registerBrowserInteractionT2Tools } from './browser/interaction-t2'
 import { registerBrowserAdvancedTools } from './browser/advanced'
+import { startPluginLoader } from './plugin-loader'
 
 export { toolRegistry } from './registry'
 export type { ToolContext, ToolDef, ToolRuntimeState } from './registry'
@@ -31,5 +32,8 @@ export function registerAllTools(): void {
   registerBrowserInteractionT1Tools()
   registerBrowserInteractionT2Tools()
   registerBrowserAdvancedTools()
-  // ALL tools migrated. Legacy switch in ai-manager.ts is now a sealed fallback.
+  // After built-in tools are in place, scan and hot-reload user plugins from
+  // <userData>/clusterspace-data/config/tools/*.js. User-supplied tools can
+  // override built-in ones (registry warns but allows it).
+  startPluginLoader()
 }
