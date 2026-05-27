@@ -324,6 +324,20 @@ export function AIChatPanel({ onOpenSettings }: AIChatPanelProps) {
           <div ref={messagesEndRef} />
         </div>
 
+        {/* Streaming indicator — flowing gradient bar above the input.
+            Telegraphs "the model is doing something right now" with motion
+            instead of waiting for the next message bubble to materialize. */}
+        {isStreaming && (
+          <div className="px-3 pt-2 border-t border-cs-border bg-cs-bg/40">
+            <div className="ai-stream-shimmer" />
+            <div className="mt-1 mb-2 flex items-center gap-2 text-[10px] text-cs-text-secondary">
+              <span className="w-1.5 h-1.5 rounded-full bg-cs-accent animate-pulse" />
+              <span className="font-mono uppercase tracking-wider opacity-70">streaming</span>
+              <span className="opacity-50">· press Esc to stop</span>
+            </div>
+          </div>
+        )}
+
         {/* Error display */}
         {error && (
           <div className="px-4 py-2 bg-cs-error/10 border-t border-cs-error/20">

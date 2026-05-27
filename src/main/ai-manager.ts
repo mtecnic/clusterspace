@@ -97,19 +97,7 @@ export class AIManager {
   // registry's dispatch() as part of ToolContext.
   private toolState: ToolRuntimeState = { currentStep: null }
 
-  // Completion patterns for different terminal types
-  private readonly COMPLETION_PATTERNS: Record<string, RegExp[]> = {
-    shell: [/\$\s*$/, />\s*$/, /#\s*$/, /❯\s*$/, /➜\s*$/, /\]\s*$/],
-    claude_code: [
-      /^>\s*$/m,                    // Claude Code input prompt
-      /Tokens:/,                    // Cost summary at end
-      /\[Y\/n\]/i,                  // Yes/no prompt
-      /What would you like/i,       // Asking for input
-      /Is there anything else/i,    // End of response
-      /Continue\?/i,                // Continuation prompt
-    ],
-    interactive: [/:\s*$/, /\?\s*$/, /password:/i, /username:/i]
-  }
+  // COMPLETION_PATTERNS moved to src/main/ai-tools/terminal.ts.
 
   constructor(
     window: BrowserWindow,
@@ -206,76 +194,13 @@ export class AIManager {
 
   // Get tool definitions for the AI model
   getToolDefinitions(): AIToolDefinition[] {
+    // Migrated to ai-tools/ (registry, appended at bottom of this function):
+    //   - terminal.ts: write_to_terminal, read_terminal_output, poll_terminal_status, wait_for_output
+    //   - pane.ts: list_panes, capture_screenshot, focus_pane, maximize_pane, create_workspace, restart_terminal
+    //   - step-protocol.ts: declare_step, verify_step
+    //   - orchestration.ts: get_fleet_status, set_agent_role, assign_task, complete_task, fail_task, wait_for_agent, share_context, create_goal
+    // Only browser tools remain inline (next migration batch).
     const legacyDefs: AIToolDefinition[] = [
-      {
-        type: 'function',
-        function: {
-          name: 'write_to_terminal',
-          description: 'Write text or commands to a terminal pane. When press_enter=true, waits for command completion and returns the output. Use terminal_type="claude_code" with higher timeout for Claude Code instances.',
-          parameters: {
-            type: 'object',
-            properties: {
-              pane_id: { type: 'string', description: 'The ID of the pane to write to' },
-              text: { type: 'string', description: 'The text or command to write' },
-              press_enter: { type: 'boolean', description: 'Whether to press Enter after writing (default: true)' },
-              wait_timeout_ms: { type: 'number', description: 'Max time to wait for completion in ms (default: 3000, max: 120000). Use 60000+ for Claude Code.' },
-              terminal_type: { type: 'string', enum: ['shell', 'claude_code', 'interactive'], description: 'Type of terminal for smart completion detection. Use "claude_code" for Claude Code instances.' }
-            },
-            required: ['pane_id', 'text']
-          }
-        }
-      },
-      {
-        type: 'function',
-        function: {
-          name: 'read_terminal_output',
-          description: 'Read the recent output from a terminal pane scrollback buffer',
-          parameters: {
-            type: 'object',
-            properties: {
-              pane_id: { type: 'string', description: 'The ID of the pane to read from' },
-              lines: { type: 'number', description: 'Number of lines to read (default: 50, max: 500)' }
-            },
-            required: ['pane_id']
-          }
-        }
-      },
-      {
-        type: 'function',
-        function: {
-          name: 'poll_terminal_status',
-          description: 'Check if a terminal is busy (receiving output) or idle. Lightweight check that does not write to the terminal.',
-          parameters: {
-            type: 'object',
-            properties: {
-              pane_id: { type: 'string', description: 'The ID of the pane to check' }
-            },
-            required: ['pane_id']
-          }
-        }
-      },
-      {
-        type: 'function',
-        function: {
-          name: 'wait_for_output',
-          description: 'Wait for terminal output with configurable timeout. Use for long-running commands or Claude Code responses.',
-          parameters: {
-            type: 'object',
-            properties: {
-              pane_id: { type: 'string', description: 'The ID of the pane to monitor' },
-              timeout_ms: { type: 'number', description: 'Maximum time to wait in ms (default: 30000, max: 120000)' },
-              until_pattern: { type: 'string', description: 'Optional regex pattern to wait for (e.g., "error|success|complete")' },
-              terminal_type: { type: 'string', enum: ['shell', 'claude_code', 'interactive'], description: 'Terminal type for smart completion detection (default: shell)' }
-            },
-            required: ['pane_id']
-          }
-        }
-      },
-      // Migrated to ai-tools/pane.ts (registry): list_panes, capture_screenshot,
-      // focus_pane, maximize_pane, create_workspace, restart_terminal.
-      // Migrated to ai-tools/step-protocol.ts: declare_step, verify_step.
-      // Registry definitions are appended at the bottom of this function.
-      // === AGENT ORCHESTRATION TOOLS migrated to ai-tools/orchestration.ts ===
       // === BROWSER PANE TOOLS ===
       // Use list_panes first to find browser panes (type === 'browser').
       {
@@ -1257,35 +1182,7 @@ export class AIManager {
       }
 
       switch (toolCall.name) {
-        case 'write_to_terminal':
-          result = await this.writeToTerminal(
-            args.pane_id as string,
-            args.text as string,
-            args.press_enter !== false,
-            (args.wait_timeout_ms as number) || 3000,
-            (args.terminal_type as 'shell' | 'claude_code' | 'interactive') || 'shell'
-          )
-          break
-
-        case 'read_terminal_output':
-          result = await this.readTerminalOutput(
-            args.pane_id as string,
-            Math.min(args.lines as number || 50, 500)
-          )
-          break
-
-        case 'poll_terminal_status':
-          result = await this.pollTerminalStatus(args.pane_id as string)
-          break
-
-        case 'wait_for_output':
-          result = await this.waitForOutput(
-            args.pane_id as string,
-            (args.timeout_ms as number) || 30000,
-            args.until_pattern as string | undefined,
-            (args.terminal_type as 'shell' | 'claude_code' | 'interactive') || 'shell'
-          )
-          break
+        // Terminal-control cases moved to ai-tools/terminal.ts (registry).
 
         // Migrated to ai-tools/{pane,orchestration,step-protocol}.ts:
         // list_panes, capture_screenshot, focus_pane, maximize_pane,
@@ -1504,238 +1401,10 @@ export class AIManager {
   }
 
   // Tool implementations
-
-  // Wait for terminal output to stabilize (prompt appears or timeout)
-  private async waitForCommandCompletion(
-    ptyId: string,
-    timeoutMs: number = 3000,
-    terminalType: 'shell' | 'claude_code' | 'interactive' = 'shell'
-  ): Promise<{ output: string; completionType: 'prompt' | 'stable' | 'timeout' }> {
-    const startTime = Date.now()
-    const patterns = this.COMPLETION_PATTERNS[terminalType] || this.COMPLETION_PATTERNS.shell
-
-    // For Claude Code, use longer stability window (500ms vs 300ms)
-    const stabilityThreshold = terminalType === 'claude_code' ? 5 : 3
-    const pollInterval = 100
-
-    let lastOutput = ''
-    let stableCount = 0
-
-    while (Date.now() - startTime < timeoutMs) {
-      await new Promise(r => setTimeout(r, pollInterval))
-
-      const scrollback = this.ptyManager.getScrollbackBuffer(ptyId)
-      const recentLines = scrollback.slice(-50)
-      const recentOutput = recentLines.join('\n')
-      const lastLine = recentLines[recentLines.length - 1] || ''
-
-      // Check if output looks like a prompt (command done)
-      if (patterns.some(p => p.test(lastLine) || p.test(recentOutput))) {
-        console.log(`[AI] Command completed - ${terminalType} prompt detected`)
-        return {
-          output: scrollback.slice(-30).join('\n'),
-          completionType: 'prompt'
-        }
-      }
-
-      // Check if output has stabilized (no new content)
-      if (recentOutput === lastOutput) {
-        stableCount++
-        if (stableCount >= stabilityThreshold) {
-          console.log(`[AI] Command completed - output stabilized after ${stableCount * pollInterval}ms`)
-          return {
-            output: scrollback.slice(-30).join('\n'),
-            completionType: 'stable'
-          }
-        }
-      } else {
-        stableCount = 0
-        lastOutput = recentOutput
-      }
-    }
-
-    // Timeout - return what we have
-    console.log(`[AI] Command timeout after ${timeoutMs}ms - returning current output`)
-    return {
-      output: this.ptyManager.getScrollbackBuffer(ptyId).slice(-30).join('\n'),
-      completionType: 'timeout'
-    }
-  }
-
-  private async writeToTerminal(
-    paneId: string,
-    text: string,
-    pressEnter: boolean,
-    waitTimeoutMs: number = 3000,
-    terminalType: 'shell' | 'claude_code' | 'interactive' = 'shell'
-  ): Promise<string> {
-    console.log('[AI] writeToTerminal called:', { paneId, text, pressEnter, waitTimeoutMs, terminalType })
-
-    const ptyId = this.ptyManager.getPtyIdForPane(paneId)
-    console.log('[AI] getPtyIdForPane result:', { paneId, ptyId, found: !!ptyId })
-
-    if (!ptyId) {
-      // Debug: list all available PTYs
-      const allPanes = this.getPanesList()
-      console.log('[AI] Available panes:', allPanes.map(p => ({ id: p.id, label: p.label, isConnected: p.isConnected })))
-      throw new Error(`No terminal found for pane ${paneId}. Available panes: ${allPanes.map(p => p.id).join(', ')}`)
-    }
-
-    const data = pressEnter ? text + '\r' : text
-    console.log('[AI] Writing to PTY:', { ptyId, dataLength: data.length })
-    this.ptyManager.write(ptyId, data)
-
-    // Wait for command to complete if pressing enter
-    if (pressEnter) {
-      // Cap timeout at 2 minutes max
-      const cappedTimeout = Math.min(waitTimeoutMs, 120000)
-      const { output, completionType } = await this.waitForCommandCompletion(ptyId, cappedTimeout, terminalType)
-      return `Executed: ${text}\n\nCompletion: ${completionType}\nOutput:\n${output}`
-    }
-
-    return `Wrote to terminal: ${text}`
-  }
-
-  private async readTerminalOutput(paneId: string, lines: number): Promise<string> {
-    console.log('[AI] readTerminalOutput called:', { paneId, lines })
-
-    const ptyId = this.ptyManager.getPtyIdForPane(paneId)
-    if (!ptyId) {
-      console.log('[AI] No PTY found for pane:', paneId)
-      throw new Error(`No terminal found for pane ${paneId}`)
-    }
-
-    const scrollback = this.ptyManager.getScrollbackBuffer(ptyId)
-    console.log('[AI] Scrollback buffer size:', scrollback.length)
-    const recentLines = scrollback.slice(-lines)
-    return recentLines.join('\n')
-  }
-
-  // Poll terminal status without writing (lightweight check)
-  private async pollTerminalStatus(paneId: string): Promise<{
-    pane_id: string
-    is_busy: boolean
-    idle_ms: number
-    recent_output_preview: string
-  }> {
-    console.log('[AI] pollTerminalStatus called:', { paneId })
-
-    const ptyId = this.ptyManager.getPtyIdForPane(paneId)
-    if (!ptyId) {
-      throw new Error(`No terminal found for pane ${paneId}`)
-    }
-
-    const status = this.ptyManager.getActivityStatus(ptyId)
-    if (!status) {
-      throw new Error(`Could not get status for pane ${paneId}`)
-    }
-
-    const scrollback = this.ptyManager.getScrollbackBuffer(ptyId)
-    const preview = scrollback.slice(-5).join('\n').slice(-200)
-
-    return {
-      pane_id: paneId,
-      is_busy: status.isActive,
-      idle_ms: status.idleMs,
-      recent_output_preview: preview
-    }
-  }
-
-  // Wait for terminal output with configurable timeout and pattern matching
-  private async waitForOutput(
-    paneId: string,
-    timeoutMs: number = 30000,
-    untilPattern?: string,
-    terminalType: 'shell' | 'claude_code' | 'interactive' = 'shell'
-  ): Promise<{
-    output: string
-    matched: boolean
-    matched_pattern?: string
-    timed_out: boolean
-    stable_ms: number
-  }> {
-    console.log('[AI] waitForOutput called:', { paneId, timeoutMs, untilPattern, terminalType })
-
-    const ptyId = this.ptyManager.getPtyIdForPane(paneId)
-    if (!ptyId) {
-      throw new Error(`No terminal found for pane ${paneId}`)
-    }
-
-    const startTime = Date.now()
-    const pollInterval = 100
-    const defaultStableMs = terminalType === 'claude_code' ? 500 : 300
-    const stableThreshold = Math.ceil(defaultStableMs / pollInterval)
-
-    const customPattern = untilPattern ? new RegExp(untilPattern, 'i') : null
-    const completionPatterns = this.COMPLETION_PATTERNS[terminalType] || this.COMPLETION_PATTERNS.shell
-
-    let lastOutput = ''
-    let stableCount = 0
-    const cappedTimeout = Math.min(timeoutMs, 120000)
-
-    while (Date.now() - startTime < cappedTimeout) {
-      await new Promise(r => setTimeout(r, pollInterval))
-
-      const scrollback = this.ptyManager.getScrollbackBuffer(ptyId)
-      const recentOutput = scrollback.slice(-100).join('\n')
-
-      // Check custom pattern first
-      if (customPattern && customPattern.test(recentOutput)) {
-        const match = recentOutput.match(customPattern)
-        console.log('[AI] waitForOutput - custom pattern matched:', match?.[0])
-        return {
-          output: scrollback.slice(-30).join('\n'),
-          matched: true,
-          matched_pattern: match?.[0],
-          timed_out: false,
-          stable_ms: stableCount * pollInterval
-        }
-      }
-
-      // Check completion patterns
-      const lastLine = scrollback[scrollback.length - 1] || ''
-      if (completionPatterns.some(p => p.test(lastLine))) {
-        console.log('[AI] waitForOutput - completion pattern matched')
-        return {
-          output: scrollback.slice(-30).join('\n'),
-          matched: true,
-          matched_pattern: 'completion_prompt',
-          timed_out: false,
-          stable_ms: stableCount * pollInterval
-        }
-      }
-
-      // Check stability
-      if (recentOutput === lastOutput) {
-        stableCount++
-        if (stableCount >= stableThreshold) {
-          console.log('[AI] waitForOutput - output stabilized after', stableCount * pollInterval, 'ms')
-          return {
-            output: scrollback.slice(-30).join('\n'),
-            matched: false,
-            timed_out: false,
-            stable_ms: stableCount * pollInterval
-          }
-        }
-      } else {
-        stableCount = 0
-        lastOutput = recentOutput
-      }
-    }
-
-    // Timeout
-    console.log('[AI] waitForOutput - timeout after', cappedTimeout, 'ms')
-    return {
-      output: this.ptyManager.getScrollbackBuffer(ptyId).slice(-30).join('\n'),
-      matched: false,
-      timed_out: true,
-      stable_ms: stableCount * pollInterval
-    }
-  }
-
-  // Step protocol, pane tools, and orchestration tools all moved to
-  // src/main/ai-tools/. Their dispatch happens via toolRegistry at the top
-  // of executeTool.
+  //
+  // Terminal-control, pane, step-protocol, and orchestration tools all moved
+  // to src/main/ai-tools/. Their dispatch happens via toolRegistry at the
+  // top of executeTool. Only browser tools remain inline below.
 
   // Build OpenAI-compatible request
   private buildRequest(

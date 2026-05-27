@@ -1143,6 +1143,27 @@ img.ac-favicon { object-fit: contain; }
   background-color: var(--cs-border);
 }
 
+/* AI streaming shimmer — a 2px bar with a moving gradient highlight.
+   Shows above the chat input while a stream is in flight. */
+.ai-stream-shimmer {
+  height: 2px;
+  width: 100%;
+  border-radius: 1px;
+  background: linear-gradient(
+    90deg,
+    rgba(88, 166, 255, 0.15) 0%,
+    rgba(88, 166, 255, 0.85) 50%,
+    rgba(88, 166, 255, 0.15) 100%
+  );
+  background-size: 200% 100%;
+  animation: ai-stream-flow 1.4s linear infinite;
+}
+
+@keyframes ai-stream-flow {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
 /* Chat message fade-in — soft enough not to feel laggy, distinct enough
    to telegraph "a new message just arrived" */
 @keyframes ai-message-fade-in {

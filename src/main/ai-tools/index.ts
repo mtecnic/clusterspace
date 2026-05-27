@@ -9,6 +9,7 @@
 import { registerStepProtocolTools } from './step-protocol'
 import { registerPaneTools } from './pane'
 import { registerOrchestrationTools } from './orchestration'
+import { registerTerminalTools } from './terminal'
 
 export { toolRegistry } from './registry'
 export type { ToolContext, ToolDef, ToolRuntimeState } from './registry'
@@ -21,7 +22,7 @@ export function registerAllTools(): void {
   registerStepProtocolTools()
   registerPaneTools()
   registerOrchestrationTools()
-  // Still in the legacy switch (next batches):
-  //   registerTerminalTools()    -- write/read/wait/poll
-  //   registerBrowserTools()     -- 38 of them
+  registerTerminalTools()
+  // Still in the legacy switch (next batch):
+  //   registerBrowserTools()     -- ~38 of them
 }
