@@ -1,6 +1,5 @@
-import { app, BrowserWindow, dialog, session } from 'electron'
-import { writeFile, mkdir } from 'fs/promises'
-import { join } from 'path'
+import { BrowserWindow, dialog, session } from 'electron'
+import { writeFile } from 'fs/promises'
 import { v4 as uuidv4 } from 'uuid'
 import {
   AIProviderConfig,
@@ -27,6 +26,7 @@ import { appendActionLog, getActionLog } from './browser-action-log'
 import { requestApproval, selectorLooksLikePassword } from './browser-approval'
 import { getRecipeStore, runRecipe, type Recipe } from './browser-recipes'
 import { registerAllTools, toolRegistry, type ToolContext, type ToolRuntimeState } from './ai-tools'
+import { saveScreenshotToDisk } from './ai-tools/browser/_helpers'
 
 // OpenAI-compatible request/response types
 interface ChatCompletionRequest {
@@ -203,65 +203,9 @@ export class AIManager {
     const legacyDefs: AIToolDefinition[] = [
       // === BROWSER PANE TOOLS ===
       // Use list_panes first to find browser panes (type === 'browser').
-      {
-        type: 'function',
-        function: {
-          name: 'browser_navigate',
-          description: 'Load a URL in a browser pane. Pass a full URL (https://...) or a search query — bare hostnames get https:// prepended. Returns the resolved URL and page title.',
-          parameters: {
-            type: 'object',
-            properties: {
-              pane_id: { type: 'string', description: 'The ID of the browser pane' },
-              url: { type: 'string', description: 'URL to load' }
-            },
-            required: ['pane_id', 'url']
-          }
-        }
-      },
-      {
-        type: 'function',
-        function: {
-          name: 'browser_get_content',
-          description: 'Extract the visible text of the current page in a browser pane (document.body.innerText). Returns url, title, text. Long pages are truncated.',
-          parameters: {
-            type: 'object',
-            properties: {
-              pane_id: { type: 'string', description: 'The ID of the browser pane' },
-              max_chars: { type: 'number', description: 'Max characters of text to return (default: 8000)' }
-            },
-            required: ['pane_id']
-          }
-        }
-      },
-      {
-        type: 'function',
-        function: {
-          name: 'browser_screenshot',
-          description: 'Capture a screenshot of the browser pane viewport. Saves the PNG to disk and returns {path, width, height, bytes}. The image is NOT inlined in the response (raw base64 would bloat the chat history) — read the file from `path` if you need the bytes.',
-          parameters: {
-            type: 'object',
-            properties: {
-              pane_id: { type: 'string', description: 'The ID of the browser pane' }
-            },
-            required: ['pane_id']
-          }
-        }
-      },
-      {
-        type: 'function',
-        function: {
-          name: 'browser_execute_js',
-          description: 'Run arbitrary JavaScript in the browser pane and return the result (must be JSON-serializable). Use this for anything not covered by the other browser_* tools (scrolling, reading attributes, complex DOM queries). Powerful — prefer browser_click / browser_type when they fit.',
-          parameters: {
-            type: 'object',
-            properties: {
-              pane_id: { type: 'string', description: 'The ID of the browser pane' },
-              code: { type: 'string', description: 'JavaScript to evaluate. Wrap in an IIFE that returns a serializable value.' }
-            },
-            required: ['pane_id', 'code']
-          }
-        }
-      },
+      // Migrated to ai-tools/browser/navigation.ts: browser_navigate,
+      // browser_get_content, browser_screenshot, browser_execute_js,
+      // browser_back, browser_forward, browser_reload.
       {
         type: 'function',
         function: {
@@ -294,42 +238,8 @@ export class AIManager {
           }
         }
       },
-      {
-        type: 'function',
-        function: {
-          name: 'browser_back',
-          description: 'Navigate back in the browser pane history.',
-          parameters: {
-            type: 'object',
-            properties: { pane_id: { type: 'string', description: 'The ID of the browser pane' } },
-            required: ['pane_id']
-          }
-        }
-      },
-      {
-        type: 'function',
-        function: {
-          name: 'browser_forward',
-          description: 'Navigate forward in the browser pane history.',
-          parameters: {
-            type: 'object',
-            properties: { pane_id: { type: 'string', description: 'The ID of the browser pane' } },
-            required: ['pane_id']
-          }
-        }
-      },
-      {
-        type: 'function',
-        function: {
-          name: 'browser_reload',
-          description: 'Reload the current page in the browser pane.',
-          parameters: {
-            type: 'object',
-            properties: { pane_id: { type: 'string', description: 'The ID of the browser pane' } },
-            required: ['pane_id']
-          }
-        }
-      },
+      // browser_back / browser_forward / browser_reload migrated to
+      // ai-tools/browser/navigation.ts.
       // === BROWSER TIER 1: RELIABILITY PRIMITIVES ===
       {
         type: 'function',
@@ -1192,32 +1102,14 @@ export class AIManager {
         // Dispatched via the registry short-circuit at the top of executeTool.
 
         // === BROWSER PANE TOOLS ===
-        case 'browser_navigate':
-          result = await this.browserNavigate(args.pane_id as string, args.url as string)
-          break
-        case 'browser_get_content':
-          result = await this.browserGetContent(args.pane_id as string, (args.max_chars as number) || 8000)
-          break
-        case 'browser_screenshot':
-          result = await this.browserScreenshot(args.pane_id as string)
-          break
-        case 'browser_execute_js':
-          result = await this.browserExecuteJs(args.pane_id as string, args.code as string)
-          break
+        // browser_navigate, browser_get_content, browser_screenshot,
+        // browser_execute_js, browser_back, browser_forward, browser_reload
+        // migrated to ai-tools/browser/navigation.ts.
         case 'browser_click':
           result = await this.browserClick(args.pane_id as string, args.selector as string)
           break
         case 'browser_type':
           result = await this.browserType(args.pane_id as string, args.selector as string, args.text as string, !!args.submit)
-          break
-        case 'browser_back':
-          result = await this.browserBack(args.pane_id as string)
-          break
-        case 'browser_forward':
-          result = await this.browserForward(args.pane_id as string)
-          break
-        case 'browser_reload':
-          result = await this.browserReload(args.pane_id as string)
           break
 
         // === BROWSER TIER 1 ===
@@ -1512,68 +1404,10 @@ export class AIManager {
 
   // ====== Browser-pane tools (AI-driven webview control) ======
 
-  private async browserNavigate(paneId: string, url: string): Promise<{ success: boolean; url?: string; title?: string; error?: string }> {
-    const wc = getBrowserWebContents(paneId)
-    if (!wc) return { success: false, error: `No browser pane with id ${paneId}` }
-    try {
-      await wc.loadURL(url)
-      return { success: true, url: wc.getURL(), title: wc.getTitle() }
-    } catch (error) {
-      return { success: false, error: error instanceof Error ? error.message : String(error) }
-    }
-  }
-
-  private async browserGetContent(paneId: string, maxChars = 8000): Promise<{ success: boolean; url?: string; title?: string; text?: string; truncated?: boolean; error?: string }> {
-    const wc = getBrowserWebContents(paneId)
-    if (!wc) return { success: false, error: `No browser pane with id ${paneId}` }
-    try {
-      const raw = await wc.executeJavaScript(
-        `(() => { const b = document.body; return b ? b.innerText : '' })()`,
-        true
-      ) as string
-      const truncated = raw.length > maxChars
-      const text = truncated ? raw.slice(0, maxChars) : raw
-      return { success: true, url: wc.getURL(), title: wc.getTitle(), text, truncated }
-    } catch (error) {
-      return { success: false, error: error instanceof Error ? error.message : String(error) }
-    }
-  }
-
-  // Save a NativeImage (or already-PNG buffer) to a temp file and return
-  // metadata. Avoids sending massive base64 strings back through the chat
-  // history, which inflates token usage and breaks some local LLM proxies.
-  private async saveScreenshotToDisk(pngBuffer: Buffer, width: number, height: number): Promise<{ success: true; path: string; width: number; height: number; bytes: number }> {
-    const dir = join(app.getPath('userData'), 'browser-screenshots')
-    await mkdir(dir, { recursive: true })
-    const fname = `shot-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.png`
-    const fullPath = join(dir, fname)
-    await writeFile(fullPath, pngBuffer)
-    return { success: true, path: fullPath, width, height, bytes: pngBuffer.length }
-  }
-
-  private async browserScreenshot(paneId: string): Promise<{ success: boolean; path?: string; width?: number; height?: number; bytes?: number; error?: string }> {
-    const wc = getBrowserWebContents(paneId)
-    if (!wc) return { success: false, error: `No browser pane ${paneId}` }
-    try {
-      const image = await wc.capturePage()
-      const size = image.getSize()
-      const buffer = image.toPNG()
-      return await this.saveScreenshotToDisk(buffer, size.width, size.height)
-    } catch (error) {
-      return { success: false, error: error instanceof Error ? error.message : String(error) }
-    }
-  }
-
-  private async browserExecuteJs(paneId: string, code: string): Promise<{ success: boolean; result?: unknown; error?: string }> {
-    const wc = getBrowserWebContents(paneId)
-    if (!wc) return { success: false, error: `No browser pane with id ${paneId}` }
-    try {
-      const result = await wc.executeJavaScript(code, true)
-      return { success: true, result }
-    } catch (error) {
-      return { success: false, error: error instanceof Error ? error.message : String(error) }
-    }
-  }
+  // browser_navigate / browser_get_content / browser_screenshot /
+  // browser_execute_js migrated to ai-tools/browser/navigation.ts.
+  // saveScreenshotToDisk now lives in ai-tools/browser/_helpers.ts; the
+  // other not-yet-migrated screenshot tools below import from there.
 
   // CDP-based click. webContents.sendInputEvent has known reliability gaps
   // on <webview> tags (events sometimes come through with reduced trust),
@@ -1637,21 +1471,8 @@ export class AIManager {
     }
   }
 
-  private async browserBack(paneId: string): Promise<{ success: boolean }> {
-    const wc = getBrowserWebContents(paneId); if (!wc) return { success: false }
-    if (wc.canGoBack()) wc.goBack()
-    return { success: true }
-  }
-  private async browserForward(paneId: string): Promise<{ success: boolean }> {
-    const wc = getBrowserWebContents(paneId); if (!wc) return { success: false }
-    if (wc.canGoForward()) wc.goForward()
-    return { success: true }
-  }
-  private async browserReload(paneId: string): Promise<{ success: boolean }> {
-    const wc = getBrowserWebContents(paneId); if (!wc) return { success: false }
-    wc.reload()
-    return { success: true }
-  }
+  // browser_back / browser_forward / browser_reload moved to
+  // ai-tools/browser/navigation.ts.
 
   // ====== Tier 1: reliability primitives ======
 
@@ -1956,13 +1777,13 @@ export class AIManager {
       // We don't have width/height directly from CDP without another call;
       // viewport size is good enough as a hint.
       const dims = await wc.executeJavaScript('({w: document.documentElement.scrollWidth, h: document.documentElement.scrollHeight})', true) as { w: number; h: number }
-      return await this.saveScreenshotToDisk(buffer, dims.w, dims.h)
+      return await saveScreenshotToDisk(buffer, dims.w, dims.h)
     } catch {
       // Fallback: viewport-only screenshot if CDP path fails
       try {
         const image = await wc.capturePage()
         const size = image.getSize()
-        return await this.saveScreenshotToDisk(image.toPNG(), size.width, size.height)
+        return await saveScreenshotToDisk(image.toPNG(), size.width, size.height)
       } catch (error) {
         return { success: false, error: error instanceof Error ? error.message : String(error) }
       }
@@ -2084,10 +1905,17 @@ export class AIManager {
     const pane = workspace.panes.find(p => p.id === paneId)
     if (!pane) return { success: false, error: `Pane ${paneId} not found in active workspace` }
     if (pane.type === 'browser') {
-      // Already a browser — optionally just navigate.
+      // Already a browser — optionally just navigate. Inlined navigate
+      // (browser_navigate lives in ai-tools/browser/navigation.ts now).
       if (url) {
-        const navResult = await this.browserNavigate(paneId, url)
-        return { success: navResult.success, pane_id: paneId, url: navResult.url, error: navResult.error }
+        const wc = getBrowserWebContents(paneId)
+        if (!wc) return { success: false, pane_id: paneId, error: `No browser pane with id ${paneId}` }
+        try {
+          await wc.loadURL(url)
+          return { success: true, pane_id: paneId, url: wc.getURL() }
+        } catch (error) {
+          return { success: false, pane_id: paneId, error: error instanceof Error ? error.message : String(error) }
+        }
       }
       return { success: true, pane_id: paneId, url: pane.url }
     }
@@ -2167,7 +1995,7 @@ export class AIManager {
       await new Promise(r => setTimeout(r, 50))
       const image = await wc.capturePage()
       const size = image.getSize()
-      const saved = await this.saveScreenshotToDisk(image.toPNG(), size.width, size.height)
+      const saved = await saveScreenshotToDisk(image.toPNG(), size.width, size.height)
       await wc.executeJavaScript(teardown, true)
       return { ...saved, labels }
     } catch (error) {

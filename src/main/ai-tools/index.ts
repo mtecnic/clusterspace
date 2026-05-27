@@ -10,6 +10,7 @@ import { registerStepProtocolTools } from './step-protocol'
 import { registerPaneTools } from './pane'
 import { registerOrchestrationTools } from './orchestration'
 import { registerTerminalTools } from './terminal'
+import { registerBrowserNavigationTools } from './browser/navigation'
 
 export { toolRegistry } from './registry'
 export type { ToolContext, ToolDef, ToolRuntimeState } from './registry'
@@ -23,6 +24,6 @@ export function registerAllTools(): void {
   registerPaneTools()
   registerOrchestrationTools()
   registerTerminalTools()
-  // Still in the legacy switch (next batch):
-  //   registerBrowserTools()     -- ~38 of them
+  registerBrowserNavigationTools()
+  // Browser interaction tiers + advanced + convert tools still in legacy switch.
 }
