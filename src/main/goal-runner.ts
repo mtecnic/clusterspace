@@ -33,6 +33,7 @@ import { toolRegistry } from './ai-tools/registry'
 
 const DEFAULT_WALL_CLOCK_MS = 60 * 60 * 1000  // 1 hour
 const POLL_INTERVAL_MS = 100
+const DEFAULT_CRITIC_INTERVAL_STEPS = 5
 
 export interface StartGoalInput {
   paneId: string
@@ -42,6 +43,11 @@ export interface StartGoalInput {
   providerId?: string
   personaId?: string
   wallClockMs?: number
+  /** Fire the critic every N step batches. 0 disables it. Default 5. */
+  criticIntervalSteps?: number
+  /** Optional separate provider for critic calls (cheaper / faster model).
+   *  Defaults to the main provider. */
+  criticProviderId?: string
 }
 
 type RunnerState =
@@ -53,6 +59,9 @@ interface RuntimeGoal {
   state: RunnerState
   startedAt: number
   wallClockMs: number
+  criticIntervalSteps: number
+  criticProviderId?: string
+  stepsSinceLastCritic: number
   /** Set by the model's claim_complete tool; the loop body picks it up. */
   pendingClaim?: { rationale: string }
   /** Set by abort_with_report. */
@@ -189,7 +198,10 @@ export class GoalRunner {
       checkpoint,
       state: { kind: 'running', abortRequested: false, pauseRequested: false },
       startedAt: Date.now(),
-      wallClockMs: input.wallClockMs ?? DEFAULT_WALL_CLOCK_MS
+      wallClockMs: input.wallClockMs ?? DEFAULT_WALL_CLOCK_MS,
+      criticIntervalSteps: input.criticIntervalSteps ?? DEFAULT_CRITIC_INTERVAL_STEPS,
+      criticProviderId: input.criticProviderId,
+      stepsSinceLastCritic: 0
     }
     this.running.set(checkpoint.id, runtime)
     this.goalStore.update(checkpoint.id, { status: 'running' })
@@ -288,6 +300,7 @@ export class GoalRunner {
         }
 
         // Dispatch each tool call (executeTool handles policy + action log).
+        let nonTransientStepsThisBatch = 0
         for (const tc of toolCalls) {
           const result = await this.aiManager.executeTool(tc)
           const resultPreview = this.previewResult(result.result)
@@ -313,7 +326,13 @@ export class GoalRunner {
             toolCallId: result.toolCallId,
             timestamp: Date.now()
           })
+          // claim_complete / abort_with_report are flow-control, not work —
+          // don't count them toward critic firing.
+          if (tc.name !== 'claim_complete' && tc.name !== 'abort_with_report') {
+            nonTransientStepsThisBatch++
+          }
         }
+        runtime.stepsSinceLastCritic += nonTransientStepsThisBatch
 
         // Handle runner-driven exits surfaced by the transient tools.
         if (runtime.pendingAbort) {
@@ -324,7 +343,7 @@ export class GoalRunner {
         if (runtime.pendingClaim) {
           const claim = runtime.pendingClaim
           runtime.pendingClaim = undefined
-          const verdict = await this.verifySuccessCriterion(runtime.checkpoint.successCriterion, claim.rationale)
+          const verdict = await this.verifySuccessCriterion(runtime.checkpoint.successCriterion, claim.rationale, provider, apiKey ?? undefined)
           if (verdict.verified) {
             this.endGoal(runtime, 'completed', verdict.detail ?? claim.rationale)
             return
@@ -341,6 +360,15 @@ export class GoalRunner {
             goalId: runtime.checkpoint.id,
             detail: verdict.detail ?? 'criterion not satisfied'
           })
+        }
+
+        // Critic / replan check. Fires every N non-transient steps.
+        if (
+          runtime.criticIntervalSteps > 0 &&
+          runtime.stepsSinceLastCritic >= runtime.criticIntervalSteps
+        ) {
+          runtime.stepsSinceLastCritic = 0
+          await this.runCritic(runtime, provider, apiKey ?? undefined, messages)
         }
       }
     } catch (err) {
@@ -383,7 +411,12 @@ export class GoalRunner {
     }
   }
 
-  private async verifySuccessCriterion(c: SuccessCriterion, rationale: string): Promise<{ verified: boolean; detail?: string }> {
+  private async verifySuccessCriterion(
+    c: SuccessCriterion,
+    rationale: string,
+    provider: ReturnType<AIStore['getProvider']>,
+    apiKey?: string
+  ): Promise<{ verified: boolean; detail?: string }> {
     switch (c.type) {
       case 'shell':
         return await new Promise<{ verified: boolean; detail?: string }>(resolve => {
@@ -407,12 +440,159 @@ export class GoalRunner {
         // Manual = trust the model's rationale. The user will see it in
         // the dashboard and can re-open the goal if it was bogus.
         return { verified: true, detail: `Manual completion. Rationale: ${rationale}` }
-      case 'model_question':
+      case 'model_question': {
+        if (!provider) return { verified: false, detail: 'No provider available for model_question verification' }
+        const judgePrompt: AIMessage[] = [
+          {
+            id: uuidv4(),
+            role: 'system',
+            content: 'You are a strict yes/no judge. Reply with exactly one token: "YES" or "NO" — nothing else.',
+            timestamp: Date.now()
+          },
+          {
+            id: uuidv4(),
+            role: 'user',
+            content: `Question: ${c.question}\n\nAgent rationale: ${rationale}\n\nAnswer:`,
+            timestamp: Date.now()
+          }
+        ]
+        try {
+          const reply = await this.aiManager.sendMessage(judgePrompt, provider, apiKey)
+          const verdict = (reply.content ?? '').trim().toUpperCase()
+          if (verdict.startsWith('YES')) {
+            return { verified: true, detail: `Model verified: ${rationale}` }
+          }
+          return { verified: false, detail: `Judge replied "${verdict.slice(0, 30)}" to: ${c.question}` }
+        } catch (err) {
+          return { verified: false, detail: `Verification call failed: ${(err as Error).message}` }
+        }
+      }
       case 'json_predicate':
-        // TODO Phase 3B: model-question via a fresh provider call;
-        // json-predicate via a sandboxed expression evaluator.
-        return { verified: true, detail: `Verification of type "${c.type}" not yet implemented — accepting rationale: ${rationale}` }
+        // Sandboxed JSON predicate evaluation is non-trivial — deferring to
+        // a future phase. For now, accept the model's rationale and surface
+        // the predicate in the final report so the user can see what was
+        // asserted.
+        return { verified: true, detail: `JSON predicate "${c.expr}" — accepted rationale (full evaluator not yet implemented): ${rationale}` }
     }
+  }
+
+  /**
+   * Fire the critic. Asks a sibling model call (cheap, non-streaming) to
+   * judge whether the loop is making progress and inject guidance into the
+   * conversation. Three signals:
+   *   progressing → no-op
+   *   stuck       → inject "you've been repeating yourself, try a different
+   *                  angle" system message
+   *   achieved    → set pendingClaim so the next loop iteration runs
+   *                  verification (saves a turn vs. waiting for the model
+   *                  to call claim_complete)
+   *   misled      → inject reminder of the original goal + recent drift
+   */
+  private async runCritic(
+    runtime: RuntimeGoal,
+    mainProvider: ReturnType<AIStore['getProvider']>,
+    mainApiKey: string | undefined,
+    messages: AIMessage[]
+  ): Promise<void> {
+    // Pick the critic provider (separate cheap model, or fall back to main).
+    let critic = mainProvider
+    let criticKey: string | undefined = mainApiKey
+    if (runtime.criticProviderId) {
+      const alt = this.aiStore.getProvider(runtime.criticProviderId)
+      if (alt) {
+        critic = alt
+        criticKey = this.aiStore.getApiKey(runtime.criticProviderId) ?? undefined
+      }
+    }
+    if (!critic) return
+
+    const recentSteps = runtime.checkpoint.steps.slice(-runtime.criticIntervalSteps * 2)
+    const stepSummary = recentSteps.length === 0
+      ? '(no steps yet)'
+      : recentSteps.map(s => `[${s.index}] ${s.tool}(${this.briefArgs(s.args)}) → ${s.ok ? 'ok' : 'err'}: ${s.resultPreview.slice(0, 80)}`).join('\n')
+
+    const judgePrompt: AIMessage[] = [
+      {
+        id: uuidv4(),
+        role: 'system',
+        content:
+          'You are a critic evaluating an autonomous AI agent\'s progress toward a goal.\n' +
+          'Reply with EXACTLY ONE of these tokens on the first line:\n' +
+          '  PROGRESSING — clear forward movement\n' +
+          '  STUCK — repeating or thrashing\n' +
+          '  ACHIEVED — goal appears complete, ready for verification\n' +
+          '  MISLED — drifted away from the goal\n' +
+          'On the second line, give a one-sentence reason. Nothing else.',
+        timestamp: Date.now()
+      },
+      {
+        id: uuidv4(),
+        role: 'user',
+        content:
+          `GOAL: ${runtime.checkpoint.goal}\n` +
+          `SUCCESS CRITERION: ${this.humanizeCriterion(runtime.checkpoint.successCriterion)}\n\n` +
+          `RECENT STEPS:\n${stepSummary}\n\nVerdict:`,
+        timestamp: Date.now()
+      }
+    ]
+
+    let reply: AIMessage
+    try {
+      reply = await this.aiManager.sendMessage(judgePrompt, critic, criticKey)
+    } catch (err) {
+      console.warn('[goal-runner] critic call failed:', err)
+      return
+    }
+
+    const [verdictLine, ...rest] = (reply.content ?? '').trim().split('\n')
+    const verdict = verdictLine.trim().toUpperCase().split(/\s|[.,:]/)[0]
+    const reason = rest.join(' ').trim() || '(no reason given)'
+
+    this.emitEvent({
+      type: 'critic',
+      goalId: runtime.checkpoint.id,
+      verdict: verdict.toLowerCase(),
+      reason
+    })
+
+    switch (verdict) {
+      case 'PROGRESSING':
+        // No injection — let the loop continue.
+        return
+      case 'STUCK':
+        messages.push({
+          id: uuidv4(),
+          role: 'system',
+          content: `CRITIC: You appear to be stuck. Recent reason: ${reason}\n\nStep back and try a different approach. Consider: are you using the right tool? Is the assumption you've been operating under wrong? Could a simpler or different angle work? If you've genuinely exhausted ideas, call abort_with_report.`,
+          timestamp: Date.now()
+        })
+        return
+      case 'ACHIEVED':
+        // Synthesize a claim so the next loop iteration runs verification.
+        runtime.pendingClaim = { rationale: `Critic believes goal achieved: ${reason}` }
+        return
+      case 'MISLED':
+        messages.push({
+          id: uuidv4(),
+          role: 'system',
+          content: `CRITIC: You've drifted from the goal. Reason: ${reason}\n\nORIGINAL GOAL: ${runtime.checkpoint.goal}\n\nRefocus on the goal. Ignore tangents.`,
+          timestamp: Date.now()
+        })
+        return
+      default:
+        // Unrecognized — treat as progressing (don't interrupt a working agent).
+        return
+    }
+  }
+
+  private briefArgs(args: Record<string, unknown>): string {
+    const keys = Object.keys(args)
+    if (keys.length === 0) return ''
+    return keys.slice(0, 2).map(k => {
+      const v = args[k]
+      const s = typeof v === 'string' ? v : JSON.stringify(v)
+      return `${k}=${s.length > 30 ? s.slice(0, 30) + '…' : s}`
+    }).join(', ')
   }
 
   private previewResult(result: unknown): string {
@@ -446,4 +626,5 @@ export type GoalRunnerEvent =
   | { type: 'started'; goalId: string }
   | { type: 'step'; goalId: string; tool: string; ok: boolean; preview: string }
   | { type: 'verification_failed'; goalId: string; detail: string }
+  | { type: 'critic'; goalId: string; verdict: string; reason: string }
   | { type: 'ended'; goalId: string; status: GoalCheckpoint['status']; finalReport: string }
