@@ -12,6 +12,8 @@
  * fallback runs.
  */
 
+import type { GoalRisk, GoalPolicy } from '../shared/types'
+
 /**
  * Risk profile for a goal. Tools are tagged with required risk levels;
  * the policy picks which ones are allowed without prompting.
@@ -23,7 +25,7 @@
  *   network_write  → tools that submit forms, POST, write cookies, etc.
  *   spends_money   → tools that interact with payment / checkout pages
  */
-export type GoalRisk = 'read_only' | 'write_local' | 'network_get' | 'network_write' | 'spends_money'
+export type { GoalRisk, GoalPolicy }
 
 /**
  * The permissions a tool needs to run. Most tools declare a single
@@ -36,17 +38,6 @@ export type GoalRisk = 'read_only' | 'write_local' | 'network_get' | 'network_wr
 export interface ToolPermissions {
   risk: GoalRisk
   paths?: string[]
-}
-
-export interface GoalPolicy {
-  /** Risk ceiling — tools at or below this level run without prompting. */
-  risk: GoalRisk
-  /** Tool name allowlist. If set, only these are allowed (more restrictive than risk). */
-  allowedTools?: string[]
-  /** Tool name denylist. Always blocked, regardless of risk. */
-  deniedTools?: string[]
-  /** When set, file-touching tools may only operate inside this dir. */
-  sandboxDir?: string
 }
 
 const RISK_ORDER: GoalRisk[] = ['read_only', 'write_local', 'network_get', 'network_write', 'spends_money']

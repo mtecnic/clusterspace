@@ -9,6 +9,8 @@ interface StatusBarProps {
   onToggleBypass: () => void
   onOpenSettings?: () => void
   onOpenFleetDashboard?: () => void
+  onOpenGoalDashboard?: () => void
+  runningGoalCount?: number
 }
 
 const statusColors: Record<AgentStatus, string> = {
@@ -25,7 +27,9 @@ export function StatusBar({
   settings,
   onToggleBypass,
   onOpenSettings,
-  onOpenFleetDashboard
+  onOpenFleetDashboard,
+  onOpenGoalDashboard,
+  runningGoalCount = 0
 }: StatusBarProps) {
   const [memoryUsage, setMemoryUsage] = useState<string>('--')
   const { getStatusCounts, activeGoal } = useAgent()
@@ -82,6 +86,25 @@ export function StatusBar({
               )
             ))}
           </div>
+        </div>
+
+        {/* Goal Dashboard Button */}
+        <div
+          className="status-item clickable flex items-center gap-2"
+          onClick={onOpenGoalDashboard}
+          title="Open Goal Runner (Ctrl+Shift+G)"
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <circle cx="12" cy="12" r="10" />
+            <circle cx="12" cy="12" r="6" />
+            <circle cx="12" cy="12" r="2" />
+          </svg>
+          <span>Goals</span>
+          {runningGoalCount > 0 && (
+            <span className="px-1.5 py-0 rounded bg-blue-600 text-white text-[10px] animate-pulse">
+              {runningGoalCount}
+            </span>
+          )}
         </div>
 
         {/* Active Goal Indicator */}

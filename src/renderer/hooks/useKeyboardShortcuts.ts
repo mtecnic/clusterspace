@@ -13,6 +13,7 @@ interface KeyboardShortcutHandlers {
   onFocusNextPane?: () => void
   onFocusPreviousPane?: () => void
   onToggleAI?: () => void
+  onToggleGoals?: () => void
 }
 
 export function useKeyboardShortcuts(handlers: KeyboardShortcutHandlers) {
@@ -41,6 +42,13 @@ export function useKeyboardShortcuts(handlers: KeyboardShortcutHandlers) {
     if (ctrlKey && shiftKey && key === 'A') {
       event.preventDefault()
       handlers.onToggleAI?.()
+      return
+    }
+
+    // Ctrl+Shift+G - Toggle Goal Dashboard
+    if (ctrlKey && shiftKey && key === 'G') {
+      event.preventDefault()
+      handlers.onToggleGoals?.()
       return
     }
 

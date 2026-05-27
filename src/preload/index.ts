@@ -28,8 +28,26 @@ import {
   BrowserShortcutMessage,
   BrowserContextMenuParams,
   BrowserCredential,
-  BrowserCredentialMeta
+  BrowserCredentialMeta,
+  GoalCheckpoint,
+  GoalStatus,
+  GoalRunnerEvent,
+  SuccessCriterion,
+  GoalPolicy
 } from '../shared/types'
+
+/** Args accepted by GoalRunner.start — mirrors StartGoalInput on the main side. */
+export interface StartGoalInput {
+  paneId: string
+  goal: string
+  successCriterion: SuccessCriterion
+  policy: GoalPolicy
+  providerId?: string
+  personaId?: string
+  wallClockMs?: number
+  criticIntervalSteps?: number
+  criticProviderId?: string
+}
 
 // Type for the exposed API
 export interface ElectronAPI {
@@ -147,15 +165,15 @@ export interface ElectronAPI {
   clearAllAIConversations: () => Promise<boolean>
 
   // Goal log + runner (Phase 2B + 3A)
-  listGoals: (filter?: { status?: string; paneId?: string }) => Promise<unknown[]>
-  getGoal: (id: string) => Promise<unknown | null>
-  listResumableGoals: () => Promise<unknown[]>
+  listGoals: (filter?: { status?: GoalStatus; paneId?: string }) => Promise<GoalCheckpoint[]>
+  getGoal: (id: string) => Promise<GoalCheckpoint | null>
+  listResumableGoals: () => Promise<GoalCheckpoint[]>
   deleteGoal: (id: string) => Promise<boolean>
   pruneGoals: () => Promise<number>
-  startGoal: (input: unknown) => Promise<{ goalId: string; error?: string }>
+  startGoal: (input: StartGoalInput) => Promise<{ goalId: string; error?: string }>
   abortGoal: (id: string) => Promise<boolean>
-  goalStatus: (id: string) => Promise<unknown | null>
-  onGoalEvent: (cb: (event: unknown) => void) => () => void
+  goalStatus: (id: string) => Promise<{ status: GoalStatus; step: number; lastStep?: GoalCheckpoint['steps'][number] } | null>
+  onGoalEvent: (cb: (event: GoalRunnerEvent) => void) => () => void
 
   // Agent operations
   getAgentState: (paneId: string) => Promise<PaneAgentState | null>
@@ -607,8 +625,8 @@ const electronAPI: ElectronAPI = {
   goalStatus: (id: string) => {
     return ipcRenderer.invoke('goal:status', id)
   },
-  onGoalEvent: (cb: (event: unknown) => void) => {
-    const handler = (_event: IpcRendererEvent, payload: unknown) => cb(payload)
+  onGoalEvent: (cb: (event: GoalRunnerEvent) => void) => {
+    const handler = (_event: IpcRendererEvent, payload: GoalRunnerEvent) => cb(payload)
     ipcRenderer.on('goal:event', handler)
     return () => { ipcRenderer.removeListener('goal:event', handler) }
   },

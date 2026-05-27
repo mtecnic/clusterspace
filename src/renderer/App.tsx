@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react'
+import React, { useState, useCallback, useEffect } from 'react'
 import { WorkspaceProvider, useWorkspace } from './context/WorkspaceContext'
 import { AIProvider, useAI } from './context/AIContext'
 import { AgentProvider } from './context/AgentContext'
@@ -15,6 +15,7 @@ import { BrowserCredentialsDialog } from './components/BrowserCredentialsDialog'
 import { AIChatPanel } from './components/AIChatPanel'
 import { AISettingsDialog } from './components/AISettingsDialog'
 import { FleetDashboard } from './components/FleetDashboard'
+import { GoalDashboard } from './components/GoalDashboard'
 import { BrowserApprovalModal } from './components/BrowserApprovalModal'
 import { GridConfig, PaneConfig } from '@shared/types'
 
@@ -46,6 +47,8 @@ function AppContent({ onRegisterFocusPane, onRegisterMaximizePane }: AppContentP
   const [showBrowserCredentialsDialog, setShowBrowserCredentialsDialog] = useState(false)
   const [showAISettingsDialog, setShowAISettingsDialog] = useState(false)
   const [showFleetDashboard, setShowFleetDashboard] = useState(false)
+  const [showGoalDashboard, setShowGoalDashboard] = useState(false)
+  const [runningGoalCount, setRunningGoalCount] = useState(0)
   const [focusedPaneId, setFocusedPaneId] = useState<string | null>(null)
   const [broadcastEnabled, setBroadcastEnabled] = useState(false)
   const [maximizedPaneId, setMaximizedPaneId] = useState<string | null>(null)
@@ -150,6 +153,23 @@ function AppContent({ onRegisterFocusPane, onRegisterMaximizePane }: AppContentP
     input.click()
   }, [createWorkspace, updateWorkspace, switchWorkspace])
 
+  // Keep the running-goal count in the status bar live.
+  useEffect(() => {
+    let cancelled = false
+    const refresh = async () => {
+      const list = await window.electronAPI.listGoals({ status: 'running' })
+      if (!cancelled) setRunningGoalCount(list.length)
+    }
+    refresh()
+    const unsubscribe = window.electronAPI.onGoalEvent((event) => {
+      if (event.type === 'started' || event.type === 'ended') refresh()
+    })
+    return () => {
+      cancelled = true
+      unsubscribe()
+    }
+  }, [])
+
   // Navigate workspaces
   const navigateWorkspace = useCallback((direction: 'next' | 'prev') => {
     if (!activeWorkspace || workspaces.length <= 1) return
@@ -206,7 +226,8 @@ function AppContent({ onRegisterFocusPane, onRegisterMaximizePane }: AppContentP
     onCommandPalette: () => setShowCommandPalette(true),
     onFocusNextPane: () => navigatePane('next'),
     onFocusPreviousPane: () => navigatePane('prev'),
-    onToggleAI: toggleAIPanel
+    onToggleAI: toggleAIPanel,
+    onToggleGoals: () => setShowGoalDashboard(prev => !prev)
   })
 
   // Register AI pane control callbacks
@@ -290,6 +311,8 @@ function AppContent({ onRegisterFocusPane, onRegisterMaximizePane }: AppContentP
         onToggleBypass={toggleGlobalBypass}
         onOpenSettings={() => setShowSettingsDialog(true)}
         onOpenFleetDashboard={() => setShowFleetDashboard(true)}
+        onOpenGoalDashboard={() => setShowGoalDashboard(true)}
+        runningGoalCount={runningGoalCount}
       />
 
       {/* New Workspace Dialog */}
@@ -406,6 +429,12 @@ function AppContent({ onRegisterFocusPane, onRegisterMaximizePane }: AppContentP
       />
 
       {/* Fleet Dashboard */}
+      <GoalDashboard
+        isOpen={showGoalDashboard}
+        onClose={() => setShowGoalDashboard(false)}
+        panes={activeWorkspace?.panes ?? []}
+      />
+
       <FleetDashboard
         isOpen={showFleetDashboard}
         onClose={() => setShowFleetDashboard(false)}

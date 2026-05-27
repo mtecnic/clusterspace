@@ -315,6 +315,63 @@ export interface Skill {
 
 // ============= End Agent Ecosystem Types =============
 
+// ============= GoalRunner Types (Phase 3A/3B) =============
+// Shared between main (goal-store/goal-policy/goal-runner) and renderer
+// (GoalDashboard). Keep the main-process types in sync via re-export.
+
+export type GoalStatus = 'pending' | 'running' | 'paused' | 'completed' | 'failed' | 'aborted'
+
+export type GoalRisk = 'read_only' | 'write_local' | 'network_get' | 'network_write' | 'spends_money'
+
+export type SuccessCriterion =
+  | { type: 'shell'; command: string; exitCode?: number }
+  | { type: 'model_question'; question: string; threshold?: 'yes' | 'high_confidence' }
+  | { type: 'json_predicate'; expr: string }
+  | { type: 'manual' }
+
+export interface GoalPolicy {
+  risk: GoalRisk
+  allowedTools?: string[]
+  deniedTools?: string[]
+  sandboxDir?: string
+}
+
+export interface GoalStep {
+  index: number
+  tool: string
+  args: Record<string, unknown>
+  resultPreview: string
+  ok: boolean
+  elapsedMs: number
+  timestamp: number
+}
+
+export interface GoalCheckpoint {
+  id: string
+  paneId: string
+  goal: string
+  successCriterion: SuccessCriterion
+  policy: GoalPolicy
+  providerId?: string
+  personaId?: string
+  conversationId: string
+  status: GoalStatus
+  step: number
+  steps: GoalStep[]
+  finalReport?: string
+  createdAt: number
+  updatedAt: number
+}
+
+export type GoalRunnerEvent =
+  | { type: 'started'; goalId: string }
+  | { type: 'step'; goalId: string; tool: string; ok: boolean; preview: string }
+  | { type: 'verification_failed'; goalId: string; detail: string }
+  | { type: 'critic'; goalId: string; verdict: string; reason: string }
+  | { type: 'ended'; goalId: string; status: GoalStatus; finalReport: string }
+
+// ============= End GoalRunner Types =============
+
 // High-level orchestration goal
 export interface OrchestrationGoal {
   id: string

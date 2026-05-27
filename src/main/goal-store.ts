@@ -1,6 +1,6 @@
 import Store from 'electron-store'
 import { v4 as uuidv4 } from 'uuid'
-import type { GoalPolicy } from './goal-policy'
+import type { GoalCheckpoint, GoalStatus, GoalStep, SuccessCriterion } from '../shared/types'
 
 /**
  * Persistent goal log. Each goal a GoalRunner kicks off gets a checkpoint
@@ -16,52 +16,8 @@ import type { GoalPolicy } from './goal-policy'
  * lifecycle changes can't accidentally pollute conversation history.
  */
 
-export type GoalStatus = 'pending' | 'running' | 'paused' | 'completed' | 'failed' | 'aborted'
-
-export type SuccessCriterion =
-  | { type: 'shell'; command: string; exitCode?: number }
-  | { type: 'model_question'; question: string; threshold?: 'yes' | 'high_confidence' }
-  | { type: 'json_predicate'; expr: string }
-  | { type: 'manual' }
-
-export interface GoalStep {
-  index: number
-  /** Tool name that ran (or "_critic", "_replan", etc. for runner-internal events). */
-  tool: string
-  /** Arguments the runner sent. */
-  args: Record<string, unknown>
-  /** Compact result preview — the full result lives in the linked conversation. */
-  resultPreview: string
-  ok: boolean
-  /** Wall-clock ms relative to goal start. */
-  elapsedMs: number
-  timestamp: number
-}
-
-export interface GoalCheckpoint {
-  id: string
-  paneId: string
-  /** Free-form description from the user when the goal was created. */
-  goal: string
-  /** How the runner verifies the goal is done. */
-  successCriterion: SuccessCriterion
-  /** What the goal is allowed to do (consulted by the dispatcher). */
-  policy: GoalPolicy
-  /** Provider used to drive the conversation. */
-  providerId?: string
-  /** Persona id (loaded from ConfigLoader). */
-  personaId?: string
-  /** Linked conversation in ai-memory-store. */
-  conversationId: string
-  status: GoalStatus
-  /** Step counter — matches the latest entry in `steps`. */
-  step: number
-  steps: GoalStep[]
-  /** Human-facing report set when the goal completes / fails / aborts. */
-  finalReport?: string
-  createdAt: number
-  updatedAt: number
-}
+// Re-export shared types so existing imports `from './goal-store'` keep working.
+export type { GoalStatus, SuccessCriterion, GoalStep, GoalCheckpoint }
 
 interface Schema {
   goals: GoalCheckpoint[]
