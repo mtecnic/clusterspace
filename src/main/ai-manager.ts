@@ -157,30 +157,46 @@ export class AIManager {
     return tokens
   }
 
-  // Trim messages to fit within token budget (keeps recent messages)
+  // Trim messages to fit within token budget. Keeps the most recent
+  // messages; when older ones don't fit, prepends a synthetic system
+  // marker so the model knows context was elided rather than silently
+  // losing it (the previous silent-drop behavior made long autonomous
+  // runs lose critical setup messages).
+  //
+  // Future: Phase 3 GoalRunner will drive LLM-summarization compaction
+  // into AIConversation.summary, populated as a separate system message
+  // here so the model sees a real summary instead of a placeholder.
   private trimMessagesToFit(
     messages: AIMessage[],
     maxTokens: number = 16000
   ): AIMessage[] {
-    // Reserve budget for system prompt (~2000) and tool definitions (~2000)
-    const availableForMessages = maxTokens - 4000
+    const availableForMessages = maxTokens - 4000  // system + tools reserve
 
     if (messages.length === 0) return messages
 
-    // Count tokens from newest to oldest, keep what fits
     let totalTokens = 0
     const messagesToKeep: AIMessage[] = []
 
     for (let i = messages.length - 1; i >= 0; i--) {
       const msg = messages[i]
       const msgTokens = this.estimateMessageTokens(msg)
-
       if (totalTokens + msgTokens < availableForMessages) {
         messagesToKeep.unshift(msg)
         totalTokens += msgTokens
       } else {
-        // Budget exceeded - log and stop
-        console.log(`[AI] Trimming ${i + 1} old messages to fit token budget (${totalTokens} tokens kept)`)
+        // Budget reached — note how many we elided so the model can ask
+        // for them (and so debugging is obvious in transcripts).
+        const elidedCount = i + 1
+        const elidedUser = messages.slice(0, elidedCount).filter(m => m.role === 'user').length
+        const elidedAssistant = messages.slice(0, elidedCount).filter(m => m.role === 'assistant').length
+        const elidedTools = messages.slice(0, elidedCount).filter(m => m.role === 'tool').length
+        messagesToKeep.unshift({
+          id: 'context-elided-marker',
+          role: 'system',
+          content: `[CONTEXT TRIMMED: ${elidedCount} earlier message(s) were omitted to fit the token budget (${elidedUser} user, ${elidedAssistant} assistant, ${elidedTools} tool). If you need them, ask the user to recap or re-share relevant prior context.]`,
+          timestamp: Date.now()
+        })
+        console.log(`[AI] Trimming ${elidedCount} old messages to fit token budget (${totalTokens} tokens kept)`)
         break
       }
     }

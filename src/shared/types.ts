@@ -215,11 +215,15 @@ export interface AIChatSession {
   updatedAt: number
 }
 
-// AI Conversation (for memory persistence)
+// AI Conversation (for memory persistence).
+// paneId: when set, this conversation is scoped to a specific pane (per-pane
+// agent chat, goal runs). When absent, it's the workspace-level orchestrator
+// chat. Scoping prevents one pane's agent context from contaminating another.
 export interface AIConversation {
   id: string
   providerId: string
   workspaceId?: string
+  paneId?: string
   messages: AIMessage[]
   summary?: string
   createdAt: number

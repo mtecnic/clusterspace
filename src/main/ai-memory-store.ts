@@ -2,11 +2,15 @@ import Store from 'electron-store'
 import { v4 as uuidv4 } from 'uuid'
 import { AIMessage } from '../shared/types'
 
-// Conversation type for memory storage
+// Conversation type for memory storage.
+// scope: when `paneId` is set, the conversation belongs to that pane (use
+// for goal-runner work and chat-from-a-specific-pane). When absent, it's
+// the workspace-level orchestrator chat (use for the global AI panel).
 export interface AIConversation {
   id: string
   providerId: string
   workspaceId?: string
+  paneId?: string
   messages: AIMessage[]
   summary?: string
   createdAt: number
@@ -50,15 +54,21 @@ export class AIMemoryStore {
     return conversations.find(c => c.id === id) || null
   }
 
-  // Get or create current conversation for a provider/workspace
-  getOrCreateConversation(providerId: string, workspaceId?: string): AIConversation {
+  // Get or create the current conversation for a (provider, workspace, pane)
+  // triple. paneId distinguishes per-pane agent chats from the workspace-
+  // level orchestrator chat — without it, all panes in a workspace would
+  // contaminate each other's contexts (the Builder agent in pane A would
+  // see the Tester agent's chatter in pane B, etc.).
+  getOrCreateConversation(providerId: string, workspaceId?: string, paneId?: string): AIConversation {
     const conversations = this.store.get('conversations', [])
 
-    // Look for existing conversation with same provider and workspace
+    // Reuse if the same (provider, workspace, pane) tuple was active in the
+    // last 24h. paneId is part of the match key, so a workspace-level chat
+    // (paneId undefined) and a per-pane chat are distinct conversations.
     let conversation = conversations.find(c =>
       c.providerId === providerId &&
       c.workspaceId === workspaceId &&
-      // Only reuse conversations from last 24 hours
+      c.paneId === paneId &&
       (Date.now() - c.updatedAt) < 24 * 60 * 60 * 1000
     )
 
@@ -67,6 +77,7 @@ export class AIMemoryStore {
         id: uuidv4(),
         providerId,
         workspaceId,
+        paneId,
         messages: [],
         createdAt: Date.now(),
         updatedAt: Date.now()
@@ -75,6 +86,14 @@ export class AIMemoryStore {
     }
 
     return conversation
+  }
+
+  // Per-pane conversation lookup (for the goal runner + per-pane chat UI).
+  getConversationsByPane(paneId: string, limit?: number): AIConversation[] {
+    const conversations = this.store.get('conversations', [])
+    const filtered = conversations.filter(c => c.paneId === paneId)
+    const sorted = filtered.sort((a, b) => b.updatedAt - a.updatedAt)
+    return limit ? sorted.slice(0, limit) : sorted
   }
 
   // Save or update a conversation
