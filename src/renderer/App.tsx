@@ -52,6 +52,11 @@ function AppContent({ onRegisterFocusPane, onRegisterMaximizePane }: AppContentP
   const [focusedPaneId, setFocusedPaneId] = useState<string | null>(null)
   const [broadcastEnabled, setBroadcastEnabled] = useState(false)
   const [maximizedPaneId, setMaximizedPaneId] = useState<string | null>(null)
+  // Workspaces we've visited at least once. We keep their PaneGrids mounted
+  // (CSS-hidden when inactive) so switching workspaces never disposes/re-spawns
+  // their terminals — the same keep-alive trick TerminalPane uses for tabs.
+  // Mount lazily on first visit so we don't SSH into every workspace at launch.
+  const [mountedWorkspaceIds, setMountedWorkspaceIds] = useState<Set<string>>(new Set())
 
   // AI context
   const { togglePanel: toggleAIPanel, isPanelOpen, clearChat: clearAIChat } = useAI()
@@ -252,6 +257,25 @@ function AppContent({ onRegisterFocusPane, onRegisterMaximizePane }: AppContentP
     }
   }, [activeWorkspace?.id])
 
+  // Keep-alive bookkeeping: remember the active workspace so its grid stays
+  // mounted, and drop ids for workspaces that no longer exist (deleted) so we
+  // don't render a stale grid for them.
+  React.useEffect(() => {
+    const liveIds = new Set(workspaces.map(w => w.id))
+    setMountedWorkspaceIds(prev => {
+      const next = new Set<string>()
+      for (const id of prev) {
+        if (liveIds.has(id)) next.add(id)
+      }
+      if (activeWorkspace) next.add(activeWorkspace.id)
+      // Avoid a state churn when nothing actually changed.
+      if (next.size === prev.size && [...next].every(id => prev.has(id))) {
+        return prev
+      }
+      return next
+    })
+  }, [activeWorkspace?.id, workspaces])
+
   if (isLoading) {
     return (
       <div className="h-screen flex items-center justify-center bg-cs-bg">
@@ -274,20 +298,39 @@ function AppContent({ onRegisterFocusPane, onRegisterMaximizePane }: AppContentP
         onToggleBroadcast={() => setBroadcastEnabled(prev => !prev)}
       />
 
-      {/* Main Content - Pane Grid */}
-      <div className="flex-1 overflow-hidden">
+      {/* Main Content - Pane Grid.
+          Every visited workspace's grid stays mounted; only the active one is
+          visible (CSS). This holds each workspace's terminal sessions alive
+          across switches instead of unmounting + re-spawning them. */}
+      <div className="flex-1 overflow-hidden relative">
         {activeWorkspace ? (
-          <PaneGrid
-            workspace={activeWorkspace}
-            onUpdatePane={handleUpdatePane}
-            onUpdateGrid={handleResizeGrid}
-            onSwapPanes={handleSwapPanes}
-            focusedPaneId={focusedPaneId}
-            onPaneFocus={setFocusedPaneId}
-            broadcastEnabled={broadcastEnabled}
-            onManageSSH={() => setShowSSHServersDialog(true)}
-            onManageBrowserCredentials={() => setShowBrowserCredentialsDialog(true)}
-          />
+          workspaces
+            // Render every visited workspace, plus the active one immediately
+            // (its id lands in mountedWorkspaceIds a tick later via effect —
+            // including it here avoids a blank frame on first visit).
+            .filter(w => mountedWorkspaceIds.has(w.id) || w.id === activeWorkspace.id)
+            .map(w => {
+              const isActive = w.id === activeWorkspace.id
+              return (
+                <div
+                  key={w.id}
+                  className="absolute inset-0"
+                  style={{ display: isActive ? 'block' : 'none' }}
+                >
+                  <PaneGrid
+                    workspace={w}
+                    onUpdatePane={handleUpdatePane}
+                    onUpdateGrid={handleResizeGrid}
+                    onSwapPanes={handleSwapPanes}
+                    focusedPaneId={isActive ? focusedPaneId : null}
+                    onPaneFocus={setFocusedPaneId}
+                    broadcastEnabled={isActive ? broadcastEnabled : false}
+                    onManageSSH={() => setShowSSHServersDialog(true)}
+                    onManageBrowserCredentials={() => setShowBrowserCredentialsDialog(true)}
+                  />
+                </div>
+              )
+            })
         ) : (
           <div className="h-full flex items-center justify-center">
             <div className="text-center">
