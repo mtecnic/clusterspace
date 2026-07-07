@@ -1563,6 +1563,18 @@ app.whenReady().then(() => {
       return { action: 'deny' }
     })
 
+    // Don't let browser-pane webviews trap the user with beforeunload prompts.
+    // Pages with unsaved-form handlers (e.g. GitHub settings/*/new) fire a
+    // beforeunload that, unhandled, makes Electron CANCEL the navigation — so
+    // link clicks and address-bar loadURL silently do nothing and the pane is
+    // stuck on that page across relaunches. preventDefault() here ignores the
+    // handler and lets the navigation proceed.
+    if (contents.getType() === 'webview') {
+      contents.on('will-prevent-unload', (event) => {
+        event.preventDefault()
+      })
+    }
+
     // Browser-pane right-click. Webviews don't have a default menu in Electron;
     // forward the params to the renderer so it can show a contextual popup.
     if (contents.getType() === 'webview') {

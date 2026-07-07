@@ -315,7 +315,16 @@ function AppContent({ onRegisterFocusPane, onRegisterMaximizePane }: AppContentP
                 <div
                   key={w.id}
                   className="absolute inset-0"
-                  style={{ display: isActive ? 'block' : 'none' }}
+                  // Hide inactive workspaces with visibility (not display:none):
+                  // display:none makes Electron <webview> guests detach/wedge,
+                  // whereas visibility:hidden keeps them laid out and attached so
+                  // browser panes stay alive across switches. pointer-events:none
+                  // + z-index keep the hidden grid from intercepting clicks.
+                  // (If a webview ever still throttles while hidden, move it
+                  // off-screen at full size, e.g. transform: translateX(-200%).)
+                  style={isActive
+                    ? undefined
+                    : { visibility: 'hidden', pointerEvents: 'none', zIndex: -1 }}
                 >
                   <PaneGrid
                     workspace={w}

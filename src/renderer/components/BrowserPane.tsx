@@ -111,10 +111,20 @@ export function BrowserPane({
   const [activeTabId, setActiveTabId] = useState<string>(initialResolved.activeId)
   const activeTab = tabs.find(t => t.id === activeTabId) ?? tabs[0]
 
-  // Snapshot URL at mount so the <webview src> doesn't get re-set on every
-  // re-render (which would cause reload loops). When the user switches tabs
-  // we call webview.loadURL() explicitly rather than re-keying the element.
-  const [initialUrl] = useState(activeTab.url)
+  // The URL the <webview> mounts with. Snapshotted at mount so the src isn't
+  // re-set on every re-render (which would cause reload loops) — tab switches
+  // call webview.loadURL() explicitly instead. A recovery recreate updates this
+  // to the current page so a revived webview lands back where the user was.
+  const [mountUrl, setMountUrl] = useState(activeTab.url)
+  // Bumping this key destroys and recreates the <webview> element, giving a
+  // brand-new guest WebContents — the only reliable way to revive a crashed or
+  // wedged renderer (reload() can't resurrect a dead guest).
+  const [webviewKey, setWebviewKey] = useState(0)
+  // Non-null when the guest has crashed, hung, or failed a main-frame load.
+  // Drives the recovery overlay.
+  const [crashState, setCrashState] = useState<
+    { kind: 'crashed' | 'unresponsive' | 'failed'; code?: number; desc?: string; url?: string; reason?: string } | null
+  >(null)
   const [currentUrl, setCurrentUrl] = useState(activeTab.url)
   const [urlInput, setUrlInput] = useState(activeTab.url)
   const [pageTitle, setPageTitle] = useState(activeTab.title ?? '')
@@ -276,7 +286,12 @@ export function BrowserPane({
     const webview = webviewRef.current
     if (!webview) return
 
-    const onStartLoading: EventListener = () => setIsLoading(true)
+    const onStartLoading: EventListener = () => {
+      setIsLoading(true)
+      // A new load starting means the guest is alive again — dismiss any
+      // crash/fail overlay so a successful recovery hides it.
+      setCrashState(null)
+    }
     const onStopLoading: EventListener = () => {
       setIsLoading(false)
       try {
@@ -315,9 +330,30 @@ export function BrowserPane({
       }
     }
     const onFailLoad: EventListener = (evt) => {
-      const e = evt as Event & { errorCode?: number; errorDescription?: string; validatedURL?: string }
-      if (e.errorCode === -3) return // ERR_ABORTED
+      const e = evt as Event & { errorCode?: number; errorDescription?: string; validatedURL?: string; isMainFrame?: boolean }
+      if (e.errorCode === -3) return // ERR_ABORTED (user navigated away mid-load)
       console.warn('Webview failed to load:', e.errorDescription, e.validatedURL)
+      // Only surface a recovery overlay for main-frame failures — subframe/asset
+      // errors shouldn't block the whole page. Clear the spinner either way.
+      setIsLoading(false)
+      if (e.isMainFrame !== false) {
+        setCrashState({ kind: 'failed', code: e.errorCode, desc: e.errorDescription, url: e.validatedURL })
+      }
+    }
+    // A crashed/gone renderer keeps painting its last frame but ignores all
+    // input — the "can't click anything" symptom. reload() can't revive it;
+    // only recreating the element does. Flag it so the overlay offers recovery.
+    const onRenderGone: EventListener = (evt) => {
+      const reason = (evt as Event & { reason?: string; details?: { reason?: string } }).reason
+        ?? (evt as Event & { details?: { reason?: string } }).details?.reason
+      setIsLoading(false)
+      setCrashState({ kind: 'crashed', reason })
+    }
+    const onUnresponsive: EventListener = () => {
+      setCrashState(prev => prev ?? { kind: 'unresponsive' })
+    }
+    const onResponsive: EventListener = () => {
+      setCrashState(prev => (prev?.kind === 'unresponsive' ? null : prev))
     }
     const onDomReady: EventListener = () => {
       try {
@@ -336,6 +372,10 @@ export function BrowserPane({
     webview.addEventListener('page-title-updated', onTitleUpdated)
     webview.addEventListener('page-favicon-updated', onFaviconUpdated)
     webview.addEventListener('did-fail-load', onFailLoad)
+    webview.addEventListener('render-process-gone', onRenderGone)
+    webview.addEventListener('crashed', onRenderGone) // legacy fallback (pre-Electron render-process-gone)
+    webview.addEventListener('unresponsive', onUnresponsive)
+    webview.addEventListener('responsive', onResponsive)
     webview.addEventListener('dom-ready', onDomReady)
     webview.addEventListener('found-in-page', onFoundInPage)
 
@@ -347,6 +387,10 @@ export function BrowserPane({
       webview.removeEventListener('page-title-updated', onTitleUpdated)
       webview.removeEventListener('page-favicon-updated', onFaviconUpdated)
       webview.removeEventListener('did-fail-load', onFailLoad)
+      webview.removeEventListener('render-process-gone', onRenderGone)
+      webview.removeEventListener('crashed', onRenderGone)
+      webview.removeEventListener('unresponsive', onUnresponsive)
+      webview.removeEventListener('responsive', onResponsive)
       webview.removeEventListener('dom-ready', onDomReady)
       webview.removeEventListener('found-in-page', onFoundInPage)
       // NOTE: registration is handled in its own effect keyed on config.id —
@@ -354,7 +398,9 @@ export function BrowserPane({
       // (favicon updates, parent re-renders changing onUpdateConfig identity)
       // would briefly clear the registry.
     }
-  }, [config.id, favicon, updateActiveTabMeta])
+    // webviewKey is in deps so these listeners rebind to the recreated element
+    // after a recovery (recreateWebview bumps the key).
+  }, [config.id, favicon, updateActiveTabMeta, webviewKey])
 
   // Registration lifecycle — keyed only on config.id so it survives the
   // navigation/event effect re-running.
@@ -381,7 +427,9 @@ export function BrowserPane({
       webview.removeEventListener('did-attach', onAttach)
       if (registered) window.electronAPI.unregisterBrowserPane(config.id)
     }
-  }, [config.id])
+    // webviewKey is in deps so a recovery recreate re-registers the new guest's
+    // webContentsId (cleanup unregisters the old, dead one first).
+  }, [config.id, webviewKey])
 
   // ---- Downloads subscription ----
   useEffect(() => {
@@ -408,7 +456,29 @@ export function BrowserPane({
   const handleForward = useCallback(() => {
     if (webviewRef.current?.canGoForward()) webviewRef.current.goForward()
   }, [])
-  const handleReload = useCallback(() => { webviewRef.current?.reload() }, [])
+  // Destroy and recreate the <webview> element → fresh guest WebContents.
+  // The only reliable recovery from a crashed/wedged renderer. Revives on the
+  // current page rather than the original mount URL.
+  const recreateWebview = useCallback(() => {
+    setMountUrl(currentUrl || activeTab.url)
+    webContentsIdRef.current = null
+    setCrashState(null)
+    setIsLoading(true)
+    setWebviewKey(k => k + 1)
+  }, [currentUrl, activeTab.url])
+
+  const handleReload = useCallback(() => {
+    // A dead/hung guest can't be revived by reload() — recreate instead.
+    if (crashState && crashState.kind !== 'failed') {
+      recreateWebview()
+      return
+    }
+    try {
+      webviewRef.current?.reload()
+    } catch {
+      recreateWebview()
+    }
+  }, [crashState, recreateWebview])
 
   const focusUrlBar = useCallback(() => {
     urlInputRef.current?.focus()
@@ -768,15 +838,47 @@ export function BrowserPane({
           {isLoading && <div className="chrome-progress" />}
         </div>
 
-        {/* Webview */}
-        <webview
-          ref={webviewRef as React.RefObject<HTMLElement>}
-          src={initialUrl}
-          partition="persist:browser-pane"
-          allowpopups={true}
-          webpreferences="contextIsolation=yes,nodeIntegration=no,sandbox=yes"
-          style={{ flex: '1 1 auto', width: '100%' }}
-        />
+        {/* Webview region. The wrapper is the flex child; the webview fills it.
+            key={webviewKey} lets a recovery recreate the element (and thus the
+            guest renderer) from scratch. */}
+        <div className="browser-webview-wrap">
+          <webview
+            key={webviewKey}
+            ref={webviewRef as React.RefObject<HTMLElement>}
+            src={mountUrl}
+            partition="persist:browser-pane"
+            allowpopups={true}
+            webpreferences="contextIsolation=yes,nodeIntegration=no,sandbox=yes"
+            style={{ flex: '1 1 auto', width: '100%', height: '100%' }}
+          />
+
+          {/* Recovery overlay — shown when the guest crashed, hung, or failed a
+              main-frame load. A crashed guest stops compositing, so this covers
+              the (blank) webview region while leaving the chrome/address bar
+              usable. */}
+          {crashState && (
+            <div className="browser-crash-overlay">
+              <div className="browser-crash-card">
+                <div className="browser-crash-icon">{crashState.kind === 'failed' ? '⚠️' : '💥'}</div>
+                <div className="browser-crash-title">
+                  {crashState.kind === 'crashed' && 'This page crashed'}
+                  {crashState.kind === 'unresponsive' && 'This page is unresponsive'}
+                  {crashState.kind === 'failed' && "This page didn't load"}
+                </div>
+                <div className="browser-crash-detail">
+                  {crashState.kind === 'failed'
+                    ? `${crashState.desc ?? 'Load failed'}${crashState.url ? ` — ${hostnameOf(crashState.url)}` : ''}`
+                    : crashState.reason
+                      ? `Reason: ${crashState.reason}`
+                      : hostnameOf(currentUrl)}
+                </div>
+                <button className="btn btn-primary" onClick={handleReload}>
+                  Reload
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
 
         {/* Find-in-page overlay (top-right) */}
         {showFind && (
@@ -940,7 +1042,7 @@ export function BrowserPane({
           position={contextMenu}
           onClose={() => setContextMenu(null)}
           onUpdateConfig={onUpdateConfig}
-          onRestart={() => {/* no-op for browser */}}
+          onRestart={recreateWebview}
           onKill={() => {/* browser has no PTY */}}
           onManageSSH={onManageSSH}
         />
