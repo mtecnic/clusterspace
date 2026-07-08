@@ -52,6 +52,9 @@ export function PaneGrid({
   const [colSizes, setColSizes] = useState<number[]>(() =>
     defaultSizes(workspace.grid.cols, workspace.grid.colSizes)
   )
+  // Non-null while a resize drag is in progress. Drives the transparent
+  // full-window overlay that keeps pointer events flowing over <webview> panes.
+  const [dragAxis, setDragAxis] = useState<'col' | 'row' | null>(null)
 
   // Re-sync from workspace when the workspace changes or its grid shape
   // changes externally (e.g. switching workspaces, resizing the grid via
@@ -201,6 +204,9 @@ export function PaneGrid({
   ) => {
     if (!gridRef.current) return
     e.preventDefault()
+    // Show the drag shield so a fast cursor crossing a <webview> pane doesn't
+    // starve the window pointermove listener below.
+    setDragAxis(axis)
     const rect = gridRef.current.getBoundingClientRect()
     const startSizes = axis === 'col' ? [...colSizes] : [...rowSizes]
     const total = startSizes.reduce((a, b) => a + b, 0)
@@ -229,6 +235,7 @@ export function PaneGrid({
     const onUp = () => {
       window.removeEventListener('pointermove', onMove)
       window.removeEventListener('pointerup', onUp)
+      setDragAxis(null)
       if (onUpdateGrid) {
         const nextGrid: GridConfig = {
           ...workspace.grid,
@@ -335,6 +342,15 @@ export function PaneGrid({
           title="Drag to resize · double-click to reset"
         />
       ))}
+
+      {/* Transparent shield during a drag — keeps pointer events reaching the
+          host renderer even when the cursor flies over a <webview> pane. */}
+      {dragAxis && (
+        <div
+          className="resize-drag-overlay"
+          style={{ cursor: dragAxis === 'col' ? 'col-resize' : 'row-resize' }}
+        />
+      )}
     </div>
   )
 }

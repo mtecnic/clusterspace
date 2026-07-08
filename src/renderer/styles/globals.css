@@ -1284,6 +1284,16 @@ img.ac-favicon { object-fit: contain; }
   background-color: var(--cs-accent);
 }
 
+/* Transparent shield shown only during an active resize drag. Sits above
+   browser-pane <webview>s so their guest WebContents can't swallow the
+   pointermove/up events that drive the drag (the "fast drag drops the
+   handle" bug). Cursor is set inline to match the drag axis. */
+.resize-drag-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+}
+
 /* Drag and drop */
 .dragging {
   opacity: 0.4;
