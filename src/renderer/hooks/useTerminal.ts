@@ -494,6 +494,12 @@ export function useTerminal({
     if (terminalInstanceRef.current) {
       terminalInstanceRef.current.clear()
     }
+    // A restart is a brand-new SSH connection that will prompt for the password
+    // again. The auto-send guard is otherwise only cleared on config.command
+    // change (which doesn't happen on restart), so reset it here — without this,
+    // reconnect/restart hangs at the password prompt and the PTY never gets a
+    // working shell.
+    sshPasswordSentRef.current = false
     setIsConnected(false)
     await spawnPty({ ...overrides, forceFresh: true })
   }, [spawnPty])

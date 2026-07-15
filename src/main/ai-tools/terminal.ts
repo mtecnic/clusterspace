@@ -109,7 +109,7 @@ export function registerTerminalTools(): void {
       const waitTimeoutMs = args.wait_timeout_ms ?? 3000
       const terminalType: TerminalType = args.terminal_type ?? 'shell'
       const ptyId = ptyManager.getPtyIdForPane(resolvePtyKey(args.pane_id, args.tab_id))
-      if (!ptyId) throw new Error(`No terminal found for pane ${args.pane_id}${args.tab_id ? ` tab ${args.tab_id}` : ''}`)
+      if (!ptyId) throw new Error(`No terminal found for pane ${args.pane_id}${args.tab_id ? ` tab ${args.tab_id}` : ''}. The session may have disconnected — call reconnect_pane (or restart_terminal) to re-establish it, then retry.`)
 
       const data = pressEnter ? args.text + '\r' : args.text
       ptyManager.write(ptyId, data)
@@ -139,7 +139,7 @@ export function registerTerminalTools(): void {
     run: async ({ pane_id, tab_id, lines, cursor }, { ptyManager }) => {
       const cappedLines = Math.min(lines ?? 50, 500)
       const ptyId = ptyManager.getPtyIdForPane(resolvePtyKey(pane_id, tab_id))
-      if (!ptyId) throw new Error(`No terminal found for pane ${pane_id}${tab_id ? ` tab ${tab_id}` : ''}`)
+      if (!ptyId) throw new Error(`No terminal found for pane ${pane_id}${tab_id ? ` tab ${tab_id}` : ''}. The session may have disconnected — call reconnect_pane (or restart_terminal) to re-establish it, then retry.`)
       const scrollback = ptyManager.getScrollbackBuffer(ptyId)
       const totalBytes = scrollback.length
 
@@ -188,7 +188,7 @@ export function registerTerminalTools(): void {
     },
     run: async ({ pane_id, tab_id }, { ptyManager }) => {
       const ptyId = ptyManager.getPtyIdForPane(resolvePtyKey(pane_id, tab_id))
-      if (!ptyId) throw new Error(`No terminal found for pane ${pane_id}${tab_id ? ` tab ${tab_id}` : ''}`)
+      if (!ptyId) throw new Error(`No terminal found for pane ${pane_id}${tab_id ? ` tab ${tab_id}` : ''}. The session may have disconnected — call reconnect_pane (or restart_terminal) to re-establish it, then retry.`)
       const status = ptyManager.getActivityStatus(ptyId)
       if (!status) throw new Error(`Could not get status for pane ${pane_id}`)
       const scrollback = ptyManager.getScrollbackBuffer(ptyId)
@@ -230,7 +230,7 @@ export function registerTerminalTools(): void {
     },
     run: async ({ pane_id, tab_id, timeout_ms, until_pattern, terminal_type }, { ptyManager }) => {
       const ptyId = ptyManager.getPtyIdForPane(resolvePtyKey(pane_id, tab_id))
-      if (!ptyId) throw new Error(`No terminal found for pane ${pane_id}${tab_id ? ` tab ${tab_id}` : ''}`)
+      if (!ptyId) throw new Error(`No terminal found for pane ${pane_id}${tab_id ? ` tab ${tab_id}` : ''}. The session may have disconnected — call reconnect_pane (or restart_terminal) to re-establish it, then retry.`)
 
       const terminalType: TerminalType = terminal_type ?? 'shell'
       const startTime = Date.now()
