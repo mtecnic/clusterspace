@@ -6,6 +6,53 @@ interface AIChatPanelProps {
   onOpenSettings: () => void
 }
 
+// Lets any nested bubble/chip open the full-size image viewer without prop drilling.
+const ImageViewerContext = React.createContext<(src: string) => void>(() => {})
+const useImageViewer = () => React.useContext(ImageViewerContext)
+
+function isImageData(s: string): boolean {
+  return s.startsWith('data:image/')
+}
+
+// A clickable screenshot thumbnail. Click opens the full-size lightbox.
+function ScreenshotThumbnail({ src, label }: { src: string; label?: string }) {
+  const openViewer = useImageViewer()
+  return (
+    <button
+      type="button"
+      onClick={() => openViewer(src)}
+      className="block rounded border border-white/20 overflow-hidden hover:border-cs-accent transition-colors"
+      title={label || 'Click to view full size'}
+    >
+      <img src={src} alt={label || 'Screenshot'} className="max-w-[200px] max-h-[150px] object-contain" />
+    </button>
+  )
+}
+
+// Full-size image overlay. Esc or click-out to close.
+function ImageLightbox({ src, onClose }: { src: string | null; onClose: () => void }) {
+  useEffect(() => {
+    if (!src) return
+    const onKey = (e: globalThis.KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [src, onClose])
+  if (!src) return null
+  return (
+    <div
+      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 p-6"
+      onClick={onClose}
+    >
+      <img
+        src={src}
+        alt="Screenshot full size"
+        className="max-w-full max-h-full object-contain rounded shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      />
+    </div>
+  )
+}
+
 export function AIChatPanel({ onOpenSettings }: AIChatPanelProps) {
   const {
     isEnabled,
@@ -30,6 +77,7 @@ export function AIChatPanel({ onOpenSettings }: AIChatPanelProps) {
 
   const [input, setInput] = useState('')
   const [showHistory, setShowHistory] = useState(false)
+  const [lightboxSrc, setLightboxSrc] = useState<string | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const historyRef = useRef<HTMLDivElement>(null)
@@ -183,6 +231,7 @@ export function AIChatPanel({ onOpenSettings }: AIChatPanelProps) {
 
   // Full panel
   return (
+    <ImageViewerContext.Provider value={setLightboxSrc}>
     <div className="fixed top-0 left-1/2 -translate-x-1/2 z-50 w-[600px] max-w-[90vw]">
       <div className={`bg-cs-surface rounded-b-lg shadow-2xl border border-cs-border border-t-0 flex flex-col max-h-[70vh] ${isStreaming ? 'ai-panel-active' : ''}`}>
         {/* Header */}
@@ -382,6 +431,8 @@ export function AIChatPanel({ onOpenSettings }: AIChatPanelProps) {
         )}
       </div>
     </div>
+    <ImageLightbox src={lightboxSrc} onClose={() => setLightboxSrc(null)} />
+    </ImageViewerContext.Provider>
   )
 }
 
@@ -564,6 +615,20 @@ function ToolCallCard({ toolCall }: { toolCall: AIToolCall }) {
 // Tool result chip — small, centered, color-tinted by the tool category.
 function ToolResultChip({ toolName, content }: { toolName: string; content: string }) {
   const style = toolStyle(toolName)
+
+  // Screenshot tool results come back as a data:image URL — show a clickable
+  // thumbnail instead of a truncated base64 blob.
+  if (isImageData(content)) {
+    return (
+      <div className="flex flex-col items-center gap-1">
+        <span className="text-[10px] font-mono" style={{ color: style.color }}>
+          {style.icon} {toolName}
+        </span>
+        <ScreenshotThumbnail src={content} label={`${toolName} result`} />
+      </div>
+    )
+  }
+
   const preview = truncate(content.replace(/\s+/g, ' '), 60)
   return (
     <div className="flex justify-center">
@@ -625,16 +690,11 @@ function MessageBubble({ message }: { message: AIMessage }) {
           </div>
         )}
 
-        {/* Images */}
+        {/* Images — clickable thumbnails (open full-size in the lightbox) */}
         {message.images && message.images.length > 0 && (
           <div className="mt-2 flex gap-2 flex-wrap">
             {message.images.map((img, i) => (
-              <img
-                key={i}
-                src={img}
-                alt="Attached"
-                className="max-w-[200px] max-h-[150px] rounded border border-white/20"
-              />
+              <ScreenshotThumbnail key={i} src={img} label={message.autoScreenshot ? 'Auto screenshot' : 'Attached image'} />
             ))}
           </div>
         )}
