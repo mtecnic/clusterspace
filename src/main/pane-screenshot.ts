@@ -15,28 +15,37 @@ import { getBrowserWebContents } from './browser-pane-registry'
  *
  * Returns a data URL, or null if capture fails.
  */
-export async function capturePaneImage(window: BrowserWindow, paneId?: string): Promise<string | null> {
+export async function capturePaneImage(
+  window: BrowserWindow,
+  paneId?: string,
+  opts?: { maxWidth?: number }
+): Promise<string | null> {
   if (!window || window.isDestroyed()) return null
   try {
     if (paneId) {
       const wc = getBrowserWebContents(paneId)
       if (wc && !wc.isDestroyed()) {
-        const img = await wc.capturePage()
-        return img.toDataURL()
+        return toDataUrl(await wc.capturePage(), opts?.maxWidth)
       }
       const rect = await getPaneRect(window, paneId)
       if (rect) {
-        const img = await window.webContents.capturePage(rect)
-        return img.toDataURL()
+        return toDataUrl(await window.webContents.capturePage(rect), opts?.maxWidth)
       }
       // else: fall through to full-window capture
     }
-    const img = await window.webContents.capturePage()
-    return img.toDataURL()
+    return toDataUrl(await window.webContents.capturePage(), opts?.maxWidth)
   } catch (err) {
     console.error('[AI] capturePaneImage failed:', err)
     return null
   }
+}
+
+// Downscale wide captures to bound the token cost of vision requests.
+function toDataUrl(image: Electron.NativeImage, maxWidth?: number): string {
+  if (maxWidth && image.getSize().width > maxWidth) {
+    return image.resize({ width: maxWidth }).toDataURL()
+  }
+  return image.toDataURL()
 }
 
 async function getPaneRect(window: BrowserWindow, paneId: string): Promise<Rectangle | null> {

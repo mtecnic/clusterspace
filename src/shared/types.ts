@@ -136,6 +136,9 @@ export interface AIMessage {
   toolCalls?: AIToolCall[]
   toolCallId?: string        // For tool results
   images?: string[]          // Base64 for vision
+  autoScreenshot?: boolean   // Auto-captured perceive/verify screenshot; its image is
+                             // evicted from context once a newer one arrives (only the
+                             // latest screenshot is kept as current state)
   finishReason?: string      // API finish_reason for the turn (stop/length/tool_calls/...)
   stallReason?: string       // Set when a turn ended with no actionable tool call for a
                              // diagnosable reason (truncation, unparseable/text tool call,

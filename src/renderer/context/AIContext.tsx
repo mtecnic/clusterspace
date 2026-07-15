@@ -15,6 +15,16 @@ import {
   dispatchBrowserTabAction,
   dispatchReconnect
 } from '../lib/pane-controls'
+import { screenshotTargetFor } from '@shared/vision-loop'
+
+// Immutable version of evictPriorScreenshots: returns a new array where prior
+// auto-screenshot messages have their (heavy) image stripped, keeping only the
+// latest screenshot in context. React-safe (no in-place mutation).
+function stripStaleScreenshots(msgs: AIMessage[]): AIMessage[] {
+  return msgs.map(m =>
+    m.autoScreenshot && m.images && m.images.length > 0 ? { ...m, images: undefined } : m
+  )
+}
 
 interface AIContextValue {
   // State
@@ -208,6 +218,7 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
   const handleToolCalls = useCallback(async (toolCalls: AIToolCall[], assistantMessage: AIMessage) => {
     const toolResults: AIMessage[] = []
     let hasErrors = false
+    let shotPaneAfterBatch: string | null = null
 
     for (const toolCall of toolCalls) {
       try {
@@ -226,6 +237,8 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
             toolCallId: toolCall.id,
             timestamp: Date.now()
           })
+          const t = screenshotTargetFor(toolCall, true)
+          if (t) shotPaneAfterBatch = t
         } else {
           toolResults.push({
             id: uuidv4(),
@@ -234,6 +247,8 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
             toolCallId: toolCall.id,
             timestamp: Date.now()
           })
+          const t = screenshotTargetFor(toolCall, false)
+          if (t) shotPaneAfterBatch = t
         }
       } catch (err) {
         hasErrors = true
@@ -247,6 +262,8 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
           toolCallId: toolCall.id,
           timestamp: Date.now()
         })
+        const t = screenshotTargetFor(toolCall, true)
+        if (t) shotPaneAfterBatch = t
       }
     }
 
@@ -265,14 +282,37 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
       toolRetryCountRef.current = 0
     }
 
-    // Add tool results to messages
-    setMessages(prev => [...prev, ...toolResults])
+    // Vision grounding: after the batch, capture the pane state (browser actions
+    // always; other tools only on error) and feed it back as the current state.
+    let screenshotMsg: AIMessage | null = null
+    if (shotPaneAfterBatch) {
+      try {
+        const img = await window.electronAPI.aiScreenshot(shotPaneAfterBatch)
+        if (img) {
+          screenshotMsg = {
+            id: uuidv4(),
+            role: 'user',
+            content: `[Screenshot of pane ${shotPaneAfterBatch} — current state after the last action. Use it to decide the next step.]`,
+            images: [img],
+            autoScreenshot: true,
+            timestamp: Date.now()
+          }
+        }
+      } catch {
+        // Screenshot is best-effort; continue without it.
+      }
+    }
+    const appended = screenshotMsg ? [...toolResults, screenshotMsg] : toolResults
+
+    // Add tool results (+ screenshot) to messages, evicting older auto-screenshots
+    // so only the latest image stays in context.
+    setMessages(prev => [...stripStaleScreenshots(prev), ...appended])
 
     // Build conversation: use ref for current messages (excludes placeholder),
     // add the assistant message with tool_calls, then tool results
     // The messagesRef.current should have the assistant message at this point
-    const currentMessages = messagesRef.current
-    const allMessages = [...currentMessages, ...toolResults]
+    const currentMessages = stripStaleScreenshots(messagesRef.current)
+    const allMessages = [...currentMessages, ...appended]
 
     // Check auto turn limit to prevent runaway loops
     autoTurnCountRef.current++

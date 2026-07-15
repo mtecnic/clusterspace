@@ -2,6 +2,7 @@ import { spawn } from 'child_process'
 import type { BrowserWindow } from 'electron'
 import { v4 as uuidv4 } from 'uuid'
 import type { AIMessage } from '../shared/types'
+import { screenshotTargetFor, evictPriorScreenshots } from '../shared/vision-loop'
 import type { AIManager } from './ai-manager'
 import type { AIMemoryStore } from './ai-memory-store'
 import type { AIStore } from './ai-store'
@@ -301,6 +302,7 @@ export class GoalRunner {
 
         // Dispatch each tool call (executeTool handles policy + action log).
         let nonTransientStepsThisBatch = 0
+        let shotPaneAfterBatch: string | null = null
         for (const tc of toolCalls) {
           const result = await this.aiManager.executeTool(tc)
           const resultPreview = this.previewResult(result.result)
@@ -326,6 +328,11 @@ export class GoalRunner {
             toolCallId: result.toolCallId,
             timestamp: Date.now()
           })
+          // Vision grounding: browser actions always warrant a fresh look; other
+          // tools only when they errored (fallback state for a retry). Captured
+          // once after the batch so tool results stay contiguous.
+          const target = screenshotTargetFor(tc, !ok)
+          if (target) shotPaneAfterBatch = target
           // claim_complete / abort_with_report are flow-control, not work —
           // don't count them toward critic firing.
           if (tc.name !== 'claim_complete' && tc.name !== 'abort_with_report') {
@@ -333,6 +340,23 @@ export class GoalRunner {
           }
         }
         runtime.stepsSinceLastCritic += nonTransientStepsThisBatch
+
+        // Attach the post-action screenshot as the agent's current state. Only
+        // the latest one is kept in context (older images are evicted).
+        if (shotPaneAfterBatch) {
+          const img = await this.aiManager.capturePaneImage(shotPaneAfterBatch)
+          if (img) {
+            evictPriorScreenshots(messages)
+            messages.push({
+              id: uuidv4(),
+              role: 'user',
+              content: `[Screenshot of pane ${shotPaneAfterBatch} — current state after the last action. Use it to decide the next step.]`,
+              images: [img],
+              autoScreenshot: true,
+              timestamp: Date.now()
+            })
+          }
+        }
 
         // Handle runner-driven exits surfaced by the transient tools.
         if (runtime.pendingAbort) {

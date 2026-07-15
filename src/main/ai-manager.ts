@@ -22,6 +22,7 @@ import { ConfigLoader } from './config-loader'
 import { AIStore } from './ai-store'
 import { promises as fs } from 'fs'
 import { getBrowserWebContents } from './browser-pane-registry'
+import { capturePaneImage as capturePaneImageHelper } from './pane-screenshot'
 import { appendActionLog } from './browser-action-log'
 import { requestApproval, selectorLooksLikePassword } from './browser-approval'
 import { registerAllTools, toolRegistry, type ToolContext, type ToolRuntimeState } from './ai-tools'
@@ -1025,6 +1026,12 @@ export class AIManager {
     }
 
     return request
+  }
+
+  // Capture a (downscaled) screenshot of a pane for the vision-grounded loop.
+  // Returns a data URL, or null if capture isn't possible.
+  async capturePaneImage(paneId?: string, maxWidth = 1024): Promise<string | null> {
+    return capturePaneImageHelper(this.window, paneId, { maxWidth })
   }
 
   // Get terminal output for a specific pane (exposed for IPC)
