@@ -3,6 +3,7 @@ import { PaneConfig } from '@shared/types'
 import { useTerminal } from '../hooks/useTerminal'
 import { PaneContextMenu } from './PaneContextMenu'
 import { TmuxSessionPicker } from './TmuxSessionPicker'
+import { registerReconnect } from '../lib/pane-controls'
 
 interface TerminalTabContentProps {
   config: PaneConfig
@@ -92,6 +93,12 @@ export function TerminalTabContent({
     }, 30)
     return () => clearTimeout(t)
   }, [isActive])
+
+  // Expose reconnect to AI tools (reconnect_pane / restart_terminal). restart()
+  // force-kills any live PTY and respawns fresh, reattaching to the tmux session.
+  useEffect(() => {
+    return registerReconnect(tabKey, () => { void restart() })
+  }, [tabKey, restart])
 
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
     e.preventDefault()

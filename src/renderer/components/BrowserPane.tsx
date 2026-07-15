@@ -10,6 +10,7 @@ import {
   HistoryEntry,
   PaneConfig
 } from '@shared/types'
+import { registerBrowserTabAction, registerReconnect } from './../lib/pane-controls'
 
 // Resolve tabs from a pane config. If `tabs` is absent we synthesize a single
 // implicit tab from `config.url`, so legacy panes keep working unchanged.
@@ -479,6 +480,17 @@ export function BrowserPane({
       recreateWebview()
     }
   }, [crashState, recreateWebview])
+
+  // Expose tab actions + reconnect (webview recovery) to AI tools.
+  useEffect(() => {
+    const unTabs = registerBrowserTabAction(config.id, (a) => {
+      if (a.action === 'open') void handleOpenNewTab(a.url)
+      else if (a.action === 'switch') handleSwitchTab(a.tabId)
+      else if (a.action === 'close') handleCloseTab(a.tabId)
+    })
+    const unReconnect = registerReconnect(config.id, () => recreateWebview())
+    return () => { unTabs(); unReconnect() }
+  }, [config.id, handleOpenNewTab, handleSwitchTab, handleCloseTab, recreateWebview])
 
   const focusUrlBar = useCallback(() => {
     urlInputRef.current?.focus()

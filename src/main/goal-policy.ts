@@ -108,6 +108,14 @@ const BUILTIN_PERMISSIONS: Record<string, ToolPermissions> = {
   create_workspace: { risk: 'write_local' },
   restart_terminal: { risk: 'write_local' },
 
+  // Pane/tab control — switch tabs, open/close browser tabs, reconnect panes.
+  // Local UI/session mutations; safe to run without approval.
+  switch_terminal_tab: { risk: 'write_local' },
+  open_browser_tab: { risk: 'write_local' },
+  switch_browser_tab: { risk: 'write_local' },
+  close_browser_tab: { risk: 'write_local' },
+  reconnect_pane: { risk: 'write_local' },
+
   // Terminal — write_to_terminal is the high-impact one; it can do anything.
   read_terminal_output: { risk: 'read_only' },
   poll_terminal_status: { risk: 'read_only' },

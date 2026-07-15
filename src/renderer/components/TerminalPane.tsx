@@ -4,6 +4,7 @@ import { PaneConfig, TerminalTab } from '@shared/types'
 import { PaneLabelWithAgent } from './PaneLabelWithAgent'
 import { TerminalTabContent } from './TerminalTabContent'
 import { useAgent } from '../context/AgentContext'
+import { registerTerminalTabSwitch } from '../lib/pane-controls'
 
 interface TerminalPaneProps {
   config: PaneConfig
@@ -86,6 +87,11 @@ export function TerminalPane({
     if (!tabs.some(t => t.id === tabId)) return
     onUpdateConfig({ activeTerminalTabId: tabId })
   }, [activeTabId, tabs, onUpdateConfig])
+
+  // Expose tab switching to AI tools (switch_terminal_tab).
+  useEffect(() => {
+    return registerTerminalTabSwitch(config.id, handleSwitchTab)
+  }, [config.id, handleSwitchTab])
 
   const handleNewTab = useCallback(() => {
     if (!config.sshServerId) return

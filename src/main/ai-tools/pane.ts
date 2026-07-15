@@ -1,6 +1,49 @@
-import { IPC_CHANNELS, AIPaneInfo } from '../../shared/types'
+import { IPC_CHANNELS, AIPaneInfo, AIPaneTab } from '../../shared/types'
 import { getBrowserWebContents } from '../browser-pane-registry'
 import { toolRegistry } from './registry'
+import { resolvePtyKey } from './tab-util'
+import type { PtyManager } from '../pty-manager'
+import type { PaneConfig } from '../../shared/types'
+
+// Build the tab inventory for a pane (tmux tabs for terminals, browser tabs for
+// browser panes), including per-tab connection status so the agent knows which
+// tabs are live vs. need reconnecting.
+function buildPaneTabs(pane: PaneConfig, ptyManager: PtyManager): { tabs: AIPaneTab[]; activeTabId?: string } {
+  const type = pane.type ?? 'terminal'
+  if (type === 'browser') {
+    const activeTabId = pane.activeTabId
+    const wc = getBrowserWebContents(pane.id)
+    const list = pane.tabs && pane.tabs.length > 0
+      ? pane.tabs
+      : [{ id: 'tab-initial', url: pane.url ?? '' }]
+    const tabs: AIPaneTab[] = list.map(t => {
+      const active = t.id === (activeTabId ?? list[0].id)
+      return {
+        id: t.id,
+        label: (t as { title?: string }).title || t.url || t.id,
+        url: t.url,
+        // Only the active tab has a live webview; background tabs are metadata.
+        connected: active && !!wc,
+        active
+      }
+    })
+    return { tabs, activeTabId: activeTabId ?? list[0].id }
+  }
+  // terminal
+  const activeTabId = pane.activeTerminalTabId
+  const list = pane.terminalTabs && pane.terminalTabs.length > 0
+    ? pane.terminalTabs
+    : [{ id: 'tab-initial', sessionName: pane.tmuxSessionName ?? '' }]
+  const resolvedActive = activeTabId && list.some(t => t.id === activeTabId) ? activeTabId : list[0].id
+  const tabs: AIPaneTab[] = list.map(t => ({
+    id: t.id,
+    label: (t as { label?: string }).label || (t as { sessionName?: string }).sessionName || t.id,
+    sessionName: (t as { sessionName?: string }).sessionName,
+    connected: !!ptyManager.getPtyIdForPane(resolvePtyKey(pane.id, t.id)),
+    active: t.id === resolvedActive
+  }))
+  return { tabs, activeTabId: resolvedActive }
+}
 
 /**
  * Pane / window / screenshot tools — the renderer-facing controls and the
@@ -9,7 +52,7 @@ import { toolRegistry } from './registry'
 export function registerPaneTools(): void {
   toolRegistry.register<Record<string, never>, AIPaneInfo[]>({
     name: 'list_panes',
-    description: 'List all terminal panes in the current workspace with their IDs, labels, and status',
+    description: 'List all panes in the current workspace with their IDs, labels, status, and tabs. Each pane lists its tabs (tmux tabs for terminals, browser tabs) with per-tab connection status — use a tab id with the terminal tools or switch_terminal_tab / switch_browser_tab.',
     parameters: { type: 'object', properties: {} },
     run: async (_args, { workspaceStore, ptyManager }) => {
       const settings = workspaceStore.getSettings()
@@ -17,17 +60,21 @@ export function registerPaneTools(): void {
       const workspace = workspaceStore.get(settings.activeWorkspaceId)
       if (!workspace) return []
       return workspace.panes.map(pane => {
-        const ptyId = ptyManager.getPtyIdForPane(pane.id)
         const type = pane.type ?? 'terminal'
+        const { tabs, activeTabId } = buildPaneTabs(pane, ptyManager)
+        // A pane is "connected" if any of its tabs has a live backend.
+        const isConnected = tabs.some(t => t.connected)
         return {
           id: pane.id,
           label: pane.label,
           command: pane.command,
-          isConnected: type === 'browser' ? !!getBrowserWebContents(pane.id) : !!ptyId,
+          isConnected,
           workspaceId: workspace.id,
           type,
           url: pane.url,
-          position: pane.position
+          position: pane.position,
+          tabs,
+          activeTabId
         }
       })
     }
@@ -106,21 +153,24 @@ export function registerPaneTools(): void {
     }
   })
 
-  toolRegistry.register<{ pane_id: string }, string>({
+  toolRegistry.register<{ pane_id: string; tab_id?: string }, string>({
     name: 'restart_terminal',
-    description: 'Restart a terminal pane (kills and respawns the process)',
+    description: 'Restart a terminal pane/tab: kills the current session and respawns a fresh one (reattaching to its tmux session).',
     parameters: {
       type: 'object',
       properties: {
-        pane_id: { type: 'string', description: 'The ID of the pane to restart' }
+        pane_id: { type: 'string', description: 'The ID of the pane to restart' },
+        tab_id: { type: 'string', description: 'Optional tab ID within the pane (from list_panes). Defaults to the active/initial tab.' }
       },
       required: ['pane_id']
     },
-    run: async ({ pane_id }, { ptyManager }) => {
-      const ptyId = ptyManager.getPtyIdForPane(pane_id)
-      if (ptyId) ptyManager.kill(ptyId, true)
-      // Renderer respawns automatically when it sees the exit.
-      return `Restarted terminal in pane ${pane_id}`
+    run: async ({ pane_id, tab_id }, { window }) => {
+      // Drive the renderer to kill + respawn (it owns the SSH/tmux command build
+      // and xterm wiring). Same path as reconnect_pane.
+      if (!window.isDestroyed()) {
+        window.webContents.send(IPC_CHANNELS.AI_RECONNECT_PANE, { paneId: pane_id, tabId: tab_id })
+      }
+      return `Restarting terminal in pane ${pane_id}${tab_id ? ` tab ${tab_id}` : ''}`
     }
   })
 }

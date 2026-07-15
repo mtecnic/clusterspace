@@ -10,6 +10,11 @@ import {
   DEFAULT_AI_SETTINGS,
   DEFAULT_MAX_AUTO_TURNS
 } from '@shared/types'
+import {
+  dispatchSwitchTerminalTab,
+  dispatchBrowserTabAction,
+  dispatchReconnect
+} from '../lib/pane-controls'
 
 interface AIContextValue {
   // State
@@ -176,9 +181,25 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
       onMaximizePane?.(paneId)
     })
 
+    // Tab/reconnect control — dispatch to the target pane's registered handlers.
+    const unsubSwitchTab = window.electronAPI.onAISwitchTerminalTab(({ paneId, tabId }) => {
+      dispatchSwitchTerminalTab(paneId, tabId)
+    })
+    const unsubBrowserTab = window.electronAPI.onAIBrowserTabAction(({ paneId, action, url, tabId }) => {
+      if (action === 'open') dispatchBrowserTabAction(paneId, { action: 'open', url })
+      else if (action === 'switch' && tabId) dispatchBrowserTabAction(paneId, { action: 'switch', tabId })
+      else if (action === 'close' && tabId) dispatchBrowserTabAction(paneId, { action: 'close', tabId })
+    })
+    const unsubReconnect = window.electronAPI.onAIReconnectPane(({ paneId, tabId }) => {
+      dispatchReconnect(paneId, tabId)
+    })
+
     return () => {
       unsubFocus()
       unsubMaximize()
+      unsubSwitchTab()
+      unsubBrowserTab()
+      unsubReconnect()
     }
   }, [onFocusPane, onMaximizePane])
 

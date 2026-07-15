@@ -1,6 +1,14 @@
 import type { PtyManager } from '../pty-manager'
 import type { PagedTextResult } from '../../shared/types'
 import { toolRegistry } from './registry'
+import { resolvePtyKey } from './tab-util'
+
+// Shared schema fragment: every terminal tool accepts an optional tab_id so the
+// agent can address a specific tmux tab within a pane (from list_panes). Absent
+// = the pane's active/initial tab.
+const TAB_ID_PARAM = {
+  tab_id: { type: 'string', description: 'Optional tab ID within the pane (from list_panes). Defaults to the active/initial tab.' }
+} as const
 
 /**
  * Completion-pattern regexes for the three terminal modes we know how to
@@ -76,6 +84,7 @@ async function waitForCommandCompletion(
 export function registerTerminalTools(): void {
   toolRegistry.register<{
     pane_id: string
+    tab_id?: string
     text: string
     press_enter?: boolean
     wait_timeout_ms?: number
@@ -87,6 +96,7 @@ export function registerTerminalTools(): void {
       type: 'object',
       properties: {
         pane_id: { type: 'string', description: 'The ID of the pane to write to' },
+        ...TAB_ID_PARAM,
         text: { type: 'string', description: 'The text or command to write' },
         press_enter: { type: 'boolean', description: 'Whether to press Enter after writing (default: true)' },
         wait_timeout_ms: { type: 'number', description: 'Max time to wait for completion in ms (default: 3000, max: 120000). Use 60000+ for Claude Code.' },
@@ -98,8 +108,8 @@ export function registerTerminalTools(): void {
       const pressEnter = args.press_enter !== false
       const waitTimeoutMs = args.wait_timeout_ms ?? 3000
       const terminalType: TerminalType = args.terminal_type ?? 'shell'
-      const ptyId = ptyManager.getPtyIdForPane(args.pane_id)
-      if (!ptyId) throw new Error(`No terminal found for pane ${args.pane_id}`)
+      const ptyId = ptyManager.getPtyIdForPane(resolvePtyKey(args.pane_id, args.tab_id))
+      if (!ptyId) throw new Error(`No terminal found for pane ${args.pane_id}${args.tab_id ? ` tab ${args.tab_id}` : ''}`)
 
       const data = pressEnter ? args.text + '\r' : args.text
       ptyManager.write(ptyId, data)
@@ -113,22 +123,23 @@ export function registerTerminalTools(): void {
     }
   })
 
-  toolRegistry.register<{ pane_id: string; lines?: number; cursor?: number }, PagedTextResult>({
+  toolRegistry.register<{ pane_id: string; tab_id?: string; lines?: number; cursor?: number }, PagedTextResult>({
     name: 'read_terminal_output',
     description: 'Read terminal scrollback. Default: returns the last N lines (lines=50, max 500). For long-tailed output, pass `cursor` (line offset from the start of scrollback) to page forward; the result includes `hasMore` + `nextCursor`. `totalBytes` is the total line count.',
     parameters: {
       type: 'object',
       properties: {
         pane_id: { type: 'string', description: 'The ID of the pane to read from' },
+        ...TAB_ID_PARAM,
         lines: { type: 'number', description: 'Number of lines to return (default 50, max 500)' },
         cursor: { type: 'number', description: 'Line offset to start reading from. Omit to get the most recent `lines` lines. Pass `nextCursor` from a previous call to continue paging.' }
       },
       required: ['pane_id']
     },
-    run: async ({ pane_id, lines, cursor }, { ptyManager }) => {
+    run: async ({ pane_id, tab_id, lines, cursor }, { ptyManager }) => {
       const cappedLines = Math.min(lines ?? 50, 500)
-      const ptyId = ptyManager.getPtyIdForPane(pane_id)
-      if (!ptyId) throw new Error(`No terminal found for pane ${pane_id}`)
+      const ptyId = ptyManager.getPtyIdForPane(resolvePtyKey(pane_id, tab_id))
+      if (!ptyId) throw new Error(`No terminal found for pane ${pane_id}${tab_id ? ` tab ${tab_id}` : ''}`)
       const scrollback = ptyManager.getScrollbackBuffer(ptyId)
       const totalBytes = scrollback.length
 
@@ -159,7 +170,7 @@ export function registerTerminalTools(): void {
     }
   })
 
-  toolRegistry.register<{ pane_id: string }, {
+  toolRegistry.register<{ pane_id: string; tab_id?: string }, {
     pane_id: string
     is_busy: boolean
     idle_ms: number
@@ -170,13 +181,14 @@ export function registerTerminalTools(): void {
     parameters: {
       type: 'object',
       properties: {
-        pane_id: { type: 'string', description: 'The ID of the pane to check' }
+        pane_id: { type: 'string', description: 'The ID of the pane to check' },
+        ...TAB_ID_PARAM
       },
       required: ['pane_id']
     },
-    run: async ({ pane_id }, { ptyManager }) => {
-      const ptyId = ptyManager.getPtyIdForPane(pane_id)
-      if (!ptyId) throw new Error(`No terminal found for pane ${pane_id}`)
+    run: async ({ pane_id, tab_id }, { ptyManager }) => {
+      const ptyId = ptyManager.getPtyIdForPane(resolvePtyKey(pane_id, tab_id))
+      if (!ptyId) throw new Error(`No terminal found for pane ${pane_id}${tab_id ? ` tab ${tab_id}` : ''}`)
       const status = ptyManager.getActivityStatus(ptyId)
       if (!status) throw new Error(`Could not get status for pane ${pane_id}`)
       const scrollback = ptyManager.getScrollbackBuffer(ptyId)
@@ -192,6 +204,7 @@ export function registerTerminalTools(): void {
 
   toolRegistry.register<{
     pane_id: string
+    tab_id?: string
     timeout_ms?: number
     until_pattern?: string
     terminal_type?: TerminalType
@@ -208,15 +221,16 @@ export function registerTerminalTools(): void {
       type: 'object',
       properties: {
         pane_id: { type: 'string', description: 'The ID of the pane to monitor' },
+        ...TAB_ID_PARAM,
         timeout_ms: { type: 'number', description: 'Maximum time to wait in ms (default: 30000, max: 120000)' },
         until_pattern: { type: 'string', description: 'Optional regex pattern to wait for (e.g., "error|success|complete")' },
         terminal_type: { type: 'string', enum: ['shell', 'claude_code', 'interactive'], description: 'Terminal type for smart completion detection (default: shell)' }
       },
       required: ['pane_id']
     },
-    run: async ({ pane_id, timeout_ms, until_pattern, terminal_type }, { ptyManager }) => {
-      const ptyId = ptyManager.getPtyIdForPane(pane_id)
-      if (!ptyId) throw new Error(`No terminal found for pane ${pane_id}`)
+    run: async ({ pane_id, tab_id, timeout_ms, until_pattern, terminal_type }, { ptyManager }) => {
+      const ptyId = ptyManager.getPtyIdForPane(resolvePtyKey(pane_id, tab_id))
+      if (!ptyId) throw new Error(`No terminal found for pane ${pane_id}${tab_id ? ` tab ${tab_id}` : ''}`)
 
       const terminalType: TerminalType = terminal_type ?? 'shell'
       const startTime = Date.now()

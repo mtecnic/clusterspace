@@ -8,6 +8,7 @@
  */
 import { registerStepProtocolTools } from './step-protocol'
 import { registerPaneTools } from './pane'
+import { registerControlTools } from './controls'
 import { registerOrchestrationTools } from './orchestration'
 import { registerTerminalTools } from './terminal'
 import { registerBrowserNavigationTools } from './browser/navigation'
@@ -27,6 +28,7 @@ export function registerAllTools(): void {
   registered = true
   registerStepProtocolTools()
   registerPaneTools()
+  registerControlTools()
   registerOrchestrationTools()
   registerTerminalTools()
   registerBrowserNavigationTools()

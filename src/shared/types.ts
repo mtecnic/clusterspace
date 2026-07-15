@@ -427,6 +427,20 @@ export interface AIPaneInfo {
   type?: PaneType        // 'terminal' | 'browser' — absent => 'terminal'
   url?: string           // Current URL when type === 'browser'
   position?: GridPosition // {row, col} — layout slot. Changes when user swaps panes.
+  tabs?: AIPaneTab[]     // Tabs within this pane (tmux sessions for terminals, browser tabs)
+  activeTabId?: string   // Which tab is currently active/visible
+}
+
+// A tab inside a pane, as exposed to the AI agent. `connected` reflects whether
+// that specific tab has a live backend (PTY for terminals; the active browser
+// webview for browser panes).
+export interface AIPaneTab {
+  id: string
+  label: string
+  connected: boolean
+  url?: string           // browser tabs
+  sessionName?: string   // terminal tabs (tmux session on the host)
+  active: boolean
 }
 
 // AI Provider Discovery Result
@@ -551,6 +565,9 @@ export const IPC_CHANNELS = {
   AI_WRITE_TERMINAL: 'ai:write:terminal',
   AI_FOCUS_PANE: 'ai:focus:pane',
   AI_MAXIMIZE_PANE: 'ai:maximize:pane',
+  AI_SWITCH_TERMINAL_TAB: 'ai:switch:terminal-tab',
+  AI_BROWSER_TAB_ACTION: 'ai:browser:tab-action',
+  AI_RECONNECT_PANE: 'ai:reconnect:pane',
 
   // AI Memory channels
   AI_MEMORY_GET_CONVERSATIONS: 'ai:memory:get-conversations',
