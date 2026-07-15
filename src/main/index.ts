@@ -19,6 +19,7 @@ import {
   unregisterBrowserPane,
   getBrowserWebContents
 } from './browser-pane-registry'
+import { capturePaneImage } from './pane-screenshot'
 import { getActionLog, subscribeActionLog } from './browser-action-log'
 import { resolveApproval } from './browser-approval'
 import { RecipeStore } from './browser-recipes'
@@ -799,8 +800,7 @@ function registerIpcHandlers() {
       if (!mainWindow || mainWindow.isDestroyed()) {
         return null
       }
-      const image = await mainWindow.webContents.capturePage()
-      return image.toDataURL()
+      return await capturePaneImage(mainWindow, paneId)
     } catch (error) {
       console.error('AI screenshot error:', error)
       return null

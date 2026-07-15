@@ -272,7 +272,7 @@ export function PaneGrid({
     const pane = workspace.panes.find(p => p.id === maximizedPaneId)
     if (pane) {
       return (
-        <div className="h-full w-full relative">
+        <div className="h-full w-full relative" data-pane-id={pane.id}>
           {renderPane(pane, true, true, () => setMaximizedPaneId(null))}
         </div>
       )
@@ -300,6 +300,7 @@ export function PaneGrid({
         return (
           <div
             key={pane.id}
+            data-pane-id={pane.id}
             className={cellClass}
             style={{
               gridRow: pane.position.row + 1,

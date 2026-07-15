@@ -2,6 +2,7 @@ import { IPC_CHANNELS, AIPaneInfo, AIPaneTab } from '../../shared/types'
 import { getBrowserWebContents } from '../browser-pane-registry'
 import { toolRegistry } from './registry'
 import { resolvePtyKey } from './tab-util'
+import { capturePaneImage } from '../pane-screenshot'
 import type { PtyManager } from '../pty-manager'
 import type { PaneConfig } from '../../shared/types'
 
@@ -82,17 +83,18 @@ export function registerPaneTools(): void {
 
   toolRegistry.register<{ pane_id?: string }, string>({
     name: 'capture_screenshot',
-    description: 'Capture a screenshot of a terminal pane or the entire workspace for visual analysis',
+    description: 'Capture a screenshot of a specific pane (cropped to that pane) or the entire workspace for visual analysis. Pass pane_id to see just one pane.',
     parameters: {
       type: 'object',
       properties: {
-        pane_id: { type: 'string', description: 'Optional: specific pane ID. If not provided, captures entire workspace' }
+        pane_id: { type: 'string', description: 'Optional: specific pane ID to capture (cropped). If not provided, captures the entire workspace' }
       }
     },
-    run: async (_args, { window }) => {
+    run: async (args, { window }) => {
       if (window.isDestroyed()) throw new Error('Window not available')
-      const image = await window.webContents.capturePage()
-      return image.toDataURL()
+      const dataUrl = await capturePaneImage(window, args.pane_id)
+      if (!dataUrl) throw new Error(`Failed to capture screenshot${args.pane_id ? ` for pane ${args.pane_id}` : ''}`)
+      return dataUrl
     }
   })
 
