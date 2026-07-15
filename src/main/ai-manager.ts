@@ -73,6 +73,10 @@ interface StreamChunk {
     delta: {
       role?: string
       content?: string
+      // vLLM/SGLang reasoning parsers stream a model's thinking here instead of
+      // in `content`. Qwen3.5 with enable_thinking can route its ENTIRE output
+      // into this channel, leaving `content` empty (vLLM issue #38894).
+      reasoning_content?: string
       tool_calls?: Array<{
         index: number
         id?: string
@@ -667,6 +671,7 @@ export class AIManager {
       const decoder = new TextDecoder()
       let buffer = ''
       let fullContent = ''
+      let reasoningContent = ''
       let finishReason: string | null = null
       const toolCalls: Map<number, { id: string; name: string; arguments: string }> = new Map()
 
@@ -692,6 +697,12 @@ export class AIManager {
               if (!this.window.isDestroyed()) {
                 this.window.webContents.send(IPC_CHANNELS.AI_STREAM_CHUNK, delta.content)
               }
+            }
+
+            // Accumulate reasoning-channel output separately so it isn't lost
+            // when a model streams everything there and leaves content empty.
+            if (delta?.reasoning_content) {
+              reasoningContent += delta.reasoning_content
             }
 
             // Handle tool calls in streaming
@@ -746,7 +757,15 @@ export class AIManager {
         } else if (finishReason === 'length') {
           stallReason = 'The response was cut off at the max_tokens limit before the model finished. Increase Max Tokens, or turn Thinking off for this provider.'
         } else if (!content) {
-          stallReason = 'The model returned an empty response — no text and no tool call.'
+          // Some models (Qwen3.5 + enable_thinking) route their whole answer
+          // into the reasoning channel and leave content empty. If we captured
+          // reasoning text, surface it instead of reporting an empty stall.
+          const reasoning = this.stripThinkTags(reasoningContent)
+          if (reasoning) {
+            content = reasoning
+          } else {
+            stallReason = 'The model returned an empty response — no text and no tool call. If this provider has Thinking on, its output may be going to the reasoning channel; try turning Thinking off.'
+          }
         }
         // else: a normal text answer (finish_reason "stop" with content) — not a stall.
       } else if (droppedToolCalls > 0) {

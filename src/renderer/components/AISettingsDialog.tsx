@@ -66,7 +66,7 @@ export function AISettingsDialog({ isOpen, onClose }: AISettingsDialogProps) {
     setSystemPrompt(DEFAULT_AI_SYSTEM_PROMPT)
     setTemperature(0.7)
     setMaxTokens(4096)
-    setEnableThinking(undefined)
+    setEnableThinking(false)  // New providers default to thinking off (faster; avoids Qwen empty-response stalls)
     setTestResult(null)
     setQuickAddIp('')
     setDiscoveredModels([])
