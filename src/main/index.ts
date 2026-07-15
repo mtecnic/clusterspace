@@ -670,13 +670,14 @@ function registerIpcHandlers() {
     apiKey?: string,
     systemPrompt?: string,
     temperature?: number,
-    maxTokens?: number
+    maxTokens?: number,
+    enableThinking?: boolean
   ) => {
     try {
       if (!aiStore) {
         throw new Error('AI store not initialized')
       }
-      return aiStore.createProvider(name, endpoint, model, visionModel, apiKey, systemPrompt, temperature, maxTokens)
+      return aiStore.createProvider(name, endpoint, model, visionModel, apiKey, systemPrompt, temperature, maxTokens, enableThinking)
     } catch (error) {
       console.error('AI provider create error:', error)
       throw error

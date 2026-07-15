@@ -39,6 +39,10 @@ interface ChatCompletionRequest {
   stream?: boolean
   temperature?: number
   max_tokens?: number
+  reasoning_effort?: 'minimal' | 'low' | 'medium' | 'high'
+  // vLLM/SGLang chat-template passthrough. Qwen3/Qwen3.5 read
+  // enable_thinking here to toggle their reasoning mode.
+  chat_template_kwargs?: { enable_thinking?: boolean }
 }
 
 interface ChatCompletionChoice {
@@ -236,6 +240,55 @@ export class AIManager {
       .trim()
   }
 
+  // Parse streamed tool-call arguments into an object, with salvage passes for
+  // the malformed JSON local models commonly emit. Returns null if nothing
+  // parseable can be recovered (so the caller can count it as a dropped call
+  // rather than silently losing it).
+  private parseToolArguments(raw: string): Record<string, unknown> | null {
+    const attempt = (s: string): Record<string, unknown> | null => {
+      try {
+        const parsed = JSON.parse(s)
+        return parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : null
+      } catch {
+        return null
+      }
+    }
+
+    // Direct parse (empty args are a valid no-arg call)
+    const direct = attempt(raw || '{}')
+    if (direct) return direct
+
+    let salvaged = raw.trim()
+
+    // Salvage 1: trim extra closing braces (common streaming artifact)
+    const openBraces = (salvaged.match(/\{/g) || []).length
+    const closeBraces = (salvaged.match(/\}/g) || []).length
+    if (closeBraces > openBraces) {
+      let fixed = salvaged
+      for (let i = 0; i < closeBraces - openBraces; i++) {
+        fixed = fixed.replace(/\}([^}]*)$/, '$1')
+      }
+      const parsed = attempt(fixed)
+      if (parsed) {
+        console.log('[AI] Salvaged tool call arguments by fixing brace imbalance')
+        return parsed
+      }
+      salvaged = fixed
+    }
+
+    // Salvage 2: extract the first simple {...} object
+    const jsonMatch = salvaged.match(/\{[^{}]*\}/)
+    if (jsonMatch) {
+      const parsed = attempt(jsonMatch[0])
+      if (parsed) {
+        console.log('[AI] Salvaged tool call with simple object extraction')
+        return parsed
+      }
+    }
+
+    return null
+  }
+
   // ============= TOKEN MANAGEMENT =============
 
   // Rough token estimation (~4 chars per token for English)
@@ -269,13 +322,14 @@ export class AIManager {
   private trimMessagesToFit(
     messages: AIMessage[],
     maxTokens: number = 16000
-  ): AIMessage[] {
+  ): { messages: AIMessage[]; elidedNotice: string | null } {
     const availableForMessages = maxTokens - 4000  // system + tools reserve
 
-    if (messages.length === 0) return messages
+    if (messages.length === 0) return { messages, elidedNotice: null }
 
     let totalTokens = 0
     const messagesToKeep: AIMessage[] = []
+    let elidedNotice: string | null = null
 
     for (let i = messages.length - 1; i >= 0; i--) {
       const msg = messages[i]
@@ -284,18 +338,18 @@ export class AIManager {
         messagesToKeep.unshift(msg)
         totalTokens += msgTokens
       } else {
-        // Budget reached — note how many we elided so the model can ask
-        // for them (and so debugging is obvious in transcripts).
+        // Budget reached — record how many we elided so the model can ask
+        // for them (and so debugging is obvious in transcripts). This is
+        // returned as a notice string, NOT injected as a `system` message:
+        // buildRequest folds it into the single leading system message.
+        // Injecting a second `system` message mid-list makes strict
+        // OpenAI-compatible servers reject the request ("System message
+        // must be at the beginning").
         const elidedCount = i + 1
         const elidedUser = messages.slice(0, elidedCount).filter(m => m.role === 'user').length
         const elidedAssistant = messages.slice(0, elidedCount).filter(m => m.role === 'assistant').length
         const elidedTools = messages.slice(0, elidedCount).filter(m => m.role === 'tool').length
-        messagesToKeep.unshift({
-          id: 'context-elided-marker',
-          role: 'system',
-          content: `[CONTEXT TRIMMED: ${elidedCount} earlier message(s) were omitted to fit the token budget (${elidedUser} user, ${elidedAssistant} assistant, ${elidedTools} tool). If you need them, ask the user to recap or re-share relevant prior context.]`,
-          timestamp: Date.now()
-        })
+        elidedNotice = `[CONTEXT TRIMMED: ${elidedCount} earlier message(s) were omitted to fit the token budget (${elidedUser} user, ${elidedAssistant} assistant, ${elidedTools} tool). If you need them, ask the user to recap or re-share relevant prior context.]`
         console.log(`[AI] Trimming ${elidedCount} old messages to fit token budget (${totalTokens} tokens kept)`)
         break
       }
@@ -304,21 +358,17 @@ export class AIManager {
     // Some OpenAI-compatible endpoints (notably Anthropic's compat shim)
     // reject requests with no `user` role. After trimming, if every user
     // message got elided — the original goal/prompt is too old — re-anchor
-    // by re-inserting the FIRST user message from the full history. The
-    // elided-marker stays so the model still knows context was dropped.
+    // by re-inserting the FIRST user message from the full history.
     const hasUser = messagesToKeep.some(m => m.role === 'user')
     if (!hasUser) {
       const firstUser = messages.find(m => m.role === 'user')
       if (firstUser) {
-        // Insert just after the elided marker (if present) so the order is:
-        //   [elided-marker], original-user-goal, ...recent messages
-        const insertAt = messagesToKeep[0]?.id === 'context-elided-marker' ? 1 : 0
-        messagesToKeep.splice(insertAt, 0, firstUser)
+        messagesToKeep.unshift(firstUser)
         console.log('[AI] Re-anchored trimmed conversation with original user goal')
       }
     }
 
-    return messagesToKeep
+    return { messages: messagesToKeep, elidedNotice }
   }
 
   // Get tool definitions for the AI model
@@ -617,6 +667,7 @@ export class AIManager {
       const decoder = new TextDecoder()
       let buffer = ''
       let fullContent = ''
+      let finishReason: string | null = null
       const toolCalls: Map<number, { id: string; name: string; arguments: string }> = new Map()
 
       while (true) {
@@ -655,75 +706,62 @@ export class AIManager {
                 if (tc.function?.arguments) existing.arguments += tc.function.arguments
               }
             }
+
+            // Capture why the model stopped (last non-null wins)
+            if (chunk.choices[0]?.finish_reason) {
+              finishReason = chunk.choices[0].finish_reason
+            }
           } catch {
             // Skip invalid JSON
           }
         }
       }
 
-      // Build final message (strip think tags from content)
-      // Parse tool call arguments with error handling
+      // Parse streamed tool calls; count any that can't be recovered instead
+      // of silently dropping them (a dropped call is a common silent-stall cause).
       const parsedToolCalls: AIToolCall[] = []
-      if (toolCalls.size > 0) {
-        for (const tc of toolCalls.values()) {
-          try {
-            parsedToolCalls.push({
-              id: tc.id,
-              name: tc.name,
-              arguments: JSON.parse(tc.arguments || '{}')
-            })
-          } catch (parseError) {
-            console.error('[AI] Failed to parse tool call arguments:', {
-              name: tc.name,
-              arguments: tc.arguments,
-              error: parseError
-            })
-            // Try to salvage - common issue is extra closing braces
-            let salvaged = tc.arguments.trim()
-            // Count braces and fix imbalance
-            const openBraces = (salvaged.match(/\{/g) || []).length
-            const closeBraces = (salvaged.match(/\}/g) || []).length
-            if (closeBraces > openBraces) {
-              // Remove extra closing braces from end
-              const excess = closeBraces - openBraces
-              for (let i = 0; i < excess; i++) {
-                salvaged = salvaged.replace(/\}([^}]*)$/, '$1')
-              }
-            }
-            try {
-              parsedToolCalls.push({
-                id: tc.id,
-                name: tc.name,
-                arguments: JSON.parse(salvaged)
-              })
-              console.log('[AI] Salvaged tool call arguments by fixing brace imbalance')
-            } catch {
-              // Try extracting just the inner JSON object
-              const jsonMatch = salvaged.match(/\{[^{}]*\}/)
-              if (jsonMatch) {
-                try {
-                  parsedToolCalls.push({
-                    id: tc.id,
-                    name: tc.name,
-                    arguments: JSON.parse(jsonMatch[0])
-                  })
-                  console.log('[AI] Salvaged tool call with simple object extraction')
-                } catch {
-                  console.error('[AI] Could not salvage tool call arguments')
-                }
-              } else {
-                console.error('[AI] Could not salvage tool call arguments')
-              }
-            }
-          }
+      let droppedToolCalls = 0
+      for (const tc of toolCalls.values()) {
+        const args = this.parseToolArguments(tc.arguments)
+        if (args) {
+          parsedToolCalls.push({ id: tc.id, name: tc.name, arguments: args })
+        } else {
+          droppedToolCalls++
+          console.error('[AI] Dropped unparseable tool call:', { name: tc.name, arguments: tc.arguments })
         }
+      }
+
+      let content = this.stripThinkTags(fullContent)
+
+      // Diagnose degenerate turns. When a turn produces no actionable tool call
+      // AND isn't a normal text answer, flag WHY so the renderer can surface it
+      // rather than letting the agent loop stop silently ("stalls without
+      // hitting max turns").
+      let stallReason: string | undefined
+      if (parsedToolCalls.length === 0) {
+        if (droppedToolCalls > 0) {
+          stallReason = `The model tried to call ${droppedToolCalls} tool(s) but the arguments were malformed and could not be parsed.`
+        } else if (/<tool_call>/i.test(fullContent)) {
+          stallReason = 'The model wrote a tool call as plain text instead of a structured tool_call. Start vLLM with "--enable-auto-tool-choice --tool-call-parser hermes" (Qwen3) so tool calls are parsed.'
+        } else if (finishReason === 'length') {
+          stallReason = 'The response was cut off at the max_tokens limit before the model finished. Increase Max Tokens, or turn Thinking off for this provider.'
+        } else if (!content) {
+          stallReason = 'The model returned an empty response — no text and no tool call.'
+        }
+        // else: a normal text answer (finish_reason "stop" with content) — not a stall.
+      } else if (droppedToolCalls > 0) {
+        // Some calls parsed, some didn't: the loop can continue, but make the
+        // loss visible in the message rather than hiding it in the console.
+        content = `${content}${content ? '\n\n' : ''}⚠️ ${droppedToolCalls} additional tool call(s) were dropped due to malformed arguments.`
       }
 
       const finalMessage: AIMessage = {
         id: uuidv4(),
         role: 'assistant',
-        content: this.stripThinkTags(fullContent),
+        content,
         toolCalls: parsedToolCalls.length > 0 ? parsedToolCalls : undefined,
+        finishReason: finishReason ?? undefined,
+        stallReason,
         timestamp: Date.now()
       }
 
@@ -883,18 +921,35 @@ export class AIManager {
     const systemPrompt = config.systemPrompt || ''
 
     // Trim messages to fit within token budget
-    const trimmedMessages = this.trimMessagesToFit(messages)
+    const { messages: trimmedMessages, elidedNotice } = this.trimMessagesToFit(messages)
 
     const formattedMessages: ChatCompletionRequest['messages'] = []
 
-    // Add system prompt if present
-    if (systemPrompt) {
-      formattedMessages.push({ role: 'system', content: systemPrompt })
+    // Build a SINGLE leading system message. Strict OpenAI-compatible servers
+    // require exactly one system message and it must be at index 0, so every
+    // source of system-level content is folded together here rather than
+    // pushed into the body:
+    //   - the configured system prompt
+    //   - the context-trimmed notice (if messages were elided)
+    //   - any stray `system`-role messages that slipped into the history
+    // This is the durable invariant: no `system` message is ever emitted at a
+    // position other than index 0.
+    const systemParts: string[] = []
+    if (systemPrompt) systemParts.push(systemPrompt)
+    if (elidedNotice) systemParts.push(elidedNotice)
+    for (const msg of trimmedMessages) {
+      if (msg.role === 'system' && msg.content) systemParts.push(msg.content)
+    }
+    if (systemParts.length > 0) {
+      formattedMessages.push({ role: 'system', content: systemParts.join('\n\n') })
     }
 
-    // Convert our messages to OpenAI format
+    // Convert our messages to OpenAI format. System-role messages are skipped
+    // here because they were already folded into the leading system message.
     for (const msg of trimmedMessages) {
-      if (msg.role === 'tool') {
+      if (msg.role === 'system') {
+        continue
+      } else if (msg.role === 'tool') {
         formattedMessages.push({
           role: 'tool',
           content: msg.content,
@@ -934,7 +989,7 @@ export class AIManager {
       }
     }
 
-    return {
+    const request: ChatCompletionRequest = {
       model: config.model,
       messages: formattedMessages,
       tools: this.getToolDefinitions(),
@@ -942,6 +997,15 @@ export class AIManager {
       temperature: config.temperature ?? 0.7,
       max_tokens: config.maxTokens ?? 4096
     }
+
+    // Only send the thinking toggle when explicitly configured. Leaving it
+    // unset means "use the model/server default", which avoids sending
+    // enable_thinking to models that don't understand it.
+    if (config.enableThinking !== undefined) {
+      request.chat_template_kwargs = { enable_thinking: config.enableThinking }
+    }
+
+    return request
   }
 
   // Get terminal output for a specific pane (exposed for IPC)

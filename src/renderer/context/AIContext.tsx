@@ -7,7 +7,8 @@ import {
   AIToolCall,
   AIPaneInfo,
   AIConversation,
-  DEFAULT_AI_SETTINGS
+  DEFAULT_AI_SETTINGS,
+  DEFAULT_MAX_AUTO_TURNS
 } from '@shared/types'
 
 interface AIContextValue {
@@ -77,11 +78,17 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
 
   // Track auto turns to prevent runaway loops
   const autoTurnCountRef = useRef(0)
-  const MAX_AUTO_TURNS = 20  // Max tool-call loops before requiring user input
 
   // Track messages in a ref to avoid stale closure issues
   const messagesRef = useRef<AIMessage[]>([])
   messagesRef.current = messages
+
+  // Configurable max tool-call loops before requiring user input.
+  // Held in a ref (like messagesRef) so the tool-results callback reads the
+  // current value without a stale closure. Fall back for settings persisted
+  // before maxAutoTurns existed.
+  const maxAutoTurnsRef = useRef(DEFAULT_MAX_AUTO_TURNS)
+  maxAutoTurnsRef.current = settings.maxAutoTurns ?? DEFAULT_MAX_AUTO_TURNS
 
   // Load settings on mount
   useEffect(() => {
@@ -125,7 +132,13 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
       // Handle tool calls - pass the assistant message to include in conversation
       if (message.toolCalls && message.toolCalls.length > 0) {
         await handleToolCalls(message.toolCalls, message)
+      } else if (message.stallReason) {
+        // The turn ended with no actionable tool call for a diagnosable reason.
+        // Surface it instead of letting the auto-loop stop silently (which looks
+        // like a stall that never reaches max turns).
+        setError(`Agent stalled: ${message.stallReason}`)
       }
+      // else: normal completion — the model answered with text. Nothing to do.
     })
 
     const unsubError = window.electronAPI.onAIStreamError((err) => {
@@ -242,12 +255,12 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
 
     // Check auto turn limit to prevent runaway loops
     autoTurnCountRef.current++
-    if (autoTurnCountRef.current >= MAX_AUTO_TURNS) {
+    if (autoTurnCountRef.current >= maxAutoTurnsRef.current) {
       // Add a message asking user to review and continue
       const pauseMessage: AIMessage = {
         id: uuidv4(),
         role: 'assistant',
-        content: `Reached ${MAX_AUTO_TURNS} automatic turns. Please review progress and provide guidance to continue.`,
+        content: `Reached ${maxAutoTurnsRef.current} automatic turns. Please review progress and provide guidance to continue.`,
         timestamp: Date.now()
       }
       setMessages(prev => [...prev, pauseMessage])

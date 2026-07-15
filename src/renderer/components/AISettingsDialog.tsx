@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { AIProviderConfig, DEFAULT_AI_SYSTEM_PROMPT } from '@shared/types'
+import { AIProviderConfig, DEFAULT_AI_SYSTEM_PROMPT, DEFAULT_MAX_AUTO_TURNS } from '@shared/types'
 import { useAI } from '../context/AIContext'
 
 interface AISettingsDialogProps {
@@ -34,6 +34,7 @@ export function AISettingsDialog({ isOpen, onClose }: AISettingsDialogProps) {
   const [systemPrompt, setSystemPrompt] = useState(DEFAULT_AI_SYSTEM_PROMPT)
   const [temperature, setTemperature] = useState(0.7)
   const [maxTokens, setMaxTokens] = useState(4096)
+  const [enableThinking, setEnableThinking] = useState<boolean | undefined>(undefined)
 
   // Quick Add state
   const [quickAddIp, setQuickAddIp] = useState('')
@@ -65,6 +66,7 @@ export function AISettingsDialog({ isOpen, onClose }: AISettingsDialogProps) {
     setSystemPrompt(DEFAULT_AI_SYSTEM_PROMPT)
     setTemperature(0.7)
     setMaxTokens(4096)
+    setEnableThinking(undefined)
     setTestResult(null)
     setQuickAddIp('')
     setDiscoveredModels([])
@@ -119,6 +121,7 @@ export function AISettingsDialog({ isOpen, onClose }: AISettingsDialogProps) {
     setSystemPrompt(provider.systemPrompt || DEFAULT_AI_SYSTEM_PROMPT)
     setTemperature(provider.temperature ?? 0.7)
     setMaxTokens(provider.maxTokens ?? 4096)
+    setEnableThinking(provider.enableThinking)
     setTestResult(null)
     setMode('edit')
   }
@@ -169,7 +172,8 @@ export function AISettingsDialog({ isOpen, onClose }: AISettingsDialogProps) {
           apiKey || undefined,
           systemPrompt,
           temperature,
-          maxTokens
+          maxTokens,
+          enableThinking
         )
       } else if (mode === 'edit' && editingProvider) {
         await window.electronAPI.updateAIProvider(
@@ -181,7 +185,8 @@ export function AISettingsDialog({ isOpen, onClose }: AISettingsDialogProps) {
             visionModel: visionModel || undefined,
             systemPrompt,
             temperature,
-            maxTokens
+            maxTokens,
+            enableThinking
           },
           apiKey || undefined
         )
@@ -312,6 +317,28 @@ export function AISettingsDialog({ isOpen, onClose }: AISettingsDialogProps) {
               >
                 + Add Provider
               </button>
+
+              {/* Global agent behavior settings */}
+              <div className="border-t border-cs-border pt-4">
+                <div className="form-group">
+                  <label className="form-label">Max Auto Turns</label>
+                  <input
+                    type="number"
+                    value={settings.maxAutoTurns ?? DEFAULT_MAX_AUTO_TURNS}
+                    onChange={(e) => {
+                      const parsed = parseInt(e.target.value)
+                      const next = Number.isNaN(parsed) ? DEFAULT_MAX_AUTO_TURNS : Math.max(1, Math.min(100, parsed))
+                      updateSettings({ maxAutoTurns: next })
+                    }}
+                    min="1"
+                    max="100"
+                    className="form-input"
+                  />
+                  <p className="text-xs text-cs-text-secondary mt-1">
+                    How many tool-call loops the agent runs before pausing for your input.
+                  </p>
+                </div>
+              </div>
             </div>
           ) : (
             /* Add/Edit form */
@@ -477,6 +504,27 @@ export function AISettingsDialog({ isOpen, onClose }: AISettingsDialogProps) {
                   max="128000"
                   className="form-input"
                 />
+              </div>
+
+              {/* Thinking mode (Qwen3/Qwen3.5 via vLLM/SGLang) */}
+              <div className="form-group">
+                <label className="form-label">Thinking Mode</label>
+                <select
+                  value={enableThinking === undefined ? 'default' : enableThinking ? 'on' : 'off'}
+                  onChange={(e) => {
+                    const v = e.target.value
+                    setEnableThinking(v === 'default' ? undefined : v === 'on')
+                  }}
+                  className="form-input"
+                >
+                  <option value="default">Model default</option>
+                  <option value="on">On (enable reasoning)</option>
+                  <option value="off">Off (faster responses)</option>
+                </select>
+                <p className="text-xs text-cs-text-secondary mt-1">
+                  Sends chat_template_kwargs.enable_thinking. Works with Qwen3/Qwen3.5 on
+                  vLLM/SGLang; ignored by models that don't support it.
+                </p>
               </div>
 
               {/* System Prompt */}

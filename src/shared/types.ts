@@ -108,6 +108,10 @@ export interface AIProviderConfig {
   systemPrompt?: string
   temperature?: number
   maxTokens?: number
+  // Qwen3/Qwen3.5 thinking toggle. undefined = leave at model/server default;
+  // true/false = send chat_template_kwargs.enable_thinking. No-op on models
+  // that don't read it (e.g. non-Qwen), so it's safe to leave unset.
+  enableThinking?: boolean
   createdAt: number
   updatedAt: number
 }
@@ -118,7 +122,11 @@ export interface AISettings {
   activeProviderId: string | null
   providers: AIProviderConfig[]
   panelMinimized: boolean
+  maxAutoTurns: number  // Max agentic tool-call loops before pausing for user input
 }
+
+// Fallback for AISettings persisted before maxAutoTurns existed
+export const DEFAULT_MAX_AUTO_TURNS = 20
 
 // AI Message Types
 export interface AIMessage {
@@ -128,6 +136,10 @@ export interface AIMessage {
   toolCalls?: AIToolCall[]
   toolCallId?: string        // For tool results
   images?: string[]          // Base64 for vision
+  finishReason?: string      // API finish_reason for the turn (stop/length/tool_calls/...)
+  stallReason?: string       // Set when a turn ended with no actionable tool call for a
+                             // diagnosable reason (truncation, unparseable/text tool call,
+                             // empty output) so the UI can surface it instead of stalling silently
   timestamp: number
 }
 
@@ -793,7 +805,8 @@ export const DEFAULT_AI_SETTINGS: AISettings = {
   enabled: false,
   activeProviderId: null,
   providers: [],
-  panelMinimized: false
+  panelMinimized: false,
+  maxAutoTurns: DEFAULT_MAX_AUTO_TURNS
 }
 
 // Default AI system prompt
