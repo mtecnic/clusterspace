@@ -503,22 +503,50 @@ export function useTerminal({
   // so the new connection isn't held hostage by stale React closures.
   // forceFresh ensures we don't accidentally reattach to a half-dead PTY
   // for the same paneId — restart means start fresh, every time.
+  //
+  // In-flight guard: reconnect_pane and restart_terminal (two differently
+  // named AI tools) both end up calling this, so an agent retrying after a
+  // failure can trigger two overlapping restarts. Without a guard, both
+  // would kill+spawn concurrently and could orphan a PTY. A second call
+  // while one is running just awaits the same in-flight restart instead of
+  // starting a duplicate one.
+  const isRestartingRef = useRef(false)
+  const restartPromiseRef = useRef<Promise<void> | null>(null)
   const restart = useCallback(async (overrides?: { tmuxSessionName?: string | null }) => {
-    if (ptyIdRef.current) {
-      window.electronAPI.killPty(ptyIdRef.current)
-      ptyIdRef.current = null
+    if (isRestartingRef.current && restartPromiseRef.current) {
+      return restartPromiseRef.current
     }
-    if (terminalInstanceRef.current) {
-      terminalInstanceRef.current.clear()
+    isRestartingRef.current = true
+    const run = (async () => {
+      const staleId = ptyIdRef.current
+      if (staleId) {
+        // Await the actual process death (not just "signal sent") before
+        // spawning a replacement — otherwise a slow-to-die ssh process
+        // (e.g. stuck on a dead TCP connection) can be orphaned, still
+        // holding its remote tmux/session slot, while a new one spawns on
+        // top of it.
+        await window.electronAPI.killPty(staleId)
+        if (ptyIdRef.current === staleId) ptyIdRef.current = null
+      }
+      if (terminalInstanceRef.current) {
+        terminalInstanceRef.current.clear()
+      }
+      // A restart is a brand-new SSH connection that will prompt for the password
+      // again. The auto-send guard is otherwise only cleared on config.command
+      // change (which doesn't happen on restart), so reset it here — without this,
+      // reconnect/restart hangs at the password prompt and the PTY never gets a
+      // working shell.
+      sshPasswordSentRef.current = false
+      setIsConnected(false)
+      await spawnPty({ ...overrides, forceFresh: true })
+    })()
+    restartPromiseRef.current = run
+    try {
+      await run
+    } finally {
+      isRestartingRef.current = false
+      restartPromiseRef.current = null
     }
-    // A restart is a brand-new SSH connection that will prompt for the password
-    // again. The auto-send guard is otherwise only cleared on config.command
-    // change (which doesn't happen on restart), so reset it here — without this,
-    // reconnect/restart hangs at the password prompt and the PTY never gets a
-    // working shell.
-    sshPasswordSentRef.current = false
-    setIsConnected(false)
-    await spawnPty({ ...overrides, forceFresh: true })
   }, [spawnPty])
 
   // Kill function (kill without respawn)

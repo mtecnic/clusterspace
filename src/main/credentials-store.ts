@@ -180,6 +180,15 @@ export class CredentialsStore {
     // Force pseudo-terminal allocation for tmux
     args.push('-t')
 
+    // Detect a dead connection (sleep, wifi drop, silently dropped NAT
+    // mapping) instead of hanging forever with no signal. Without this, ssh
+    // just sits there while the app still reports the pane as "connected"
+    // (isConnected only reflects "does a local PTY object exist"), so a
+    // reconnect never happens until something actually notices. This makes
+    // ssh itself detect the drop and exit within ~45s, which the existing
+    // onExit → hasExited path already surfaces to the user/AI.
+    args.push('-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=3')
+
     // Add port if not default
     if (server.port !== 22) {
       args.push('-p', String(server.port))

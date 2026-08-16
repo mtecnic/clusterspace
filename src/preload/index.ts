@@ -55,7 +55,7 @@ export interface ElectronAPI {
   spawnPty: (config: PtySpawnConfig) => Promise<{ success: boolean; ptyId?: string; error?: string }>
   writePty: (ptyId: string, data: string) => void
   resizePty: (ptyId: string, cols: number, rows: number) => void
-  killPty: (ptyId: string) => void
+  killPty: (ptyId: string) => Promise<void>
   killAllPtys: () => void
   onPtyData: (callback: (ptyId: string, data: string) => void) => () => void
   onPtyExit: (callback: (ptyId: string, exitCode: number, signal?: number) => void) => () => void
@@ -278,7 +278,7 @@ const electronAPI: ElectronAPI = {
   },
 
   killPty: (ptyId: string) => {
-    ipcRenderer.send(IPC_CHANNELS.PTY_KILL, ptyId)
+    return ipcRenderer.invoke(IPC_CHANNELS.PTY_KILL, ptyId)
   },
 
   killAllPtys: () => {

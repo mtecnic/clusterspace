@@ -204,9 +204,12 @@ function registerIpcHandlers() {
     }
   })
 
-  ipcMain.on(IPC_CHANNELS.PTY_KILL, (_event, ptyId: string) => {
+  // Awaited so callers (notably restart()) know the old process actually
+  // exited — not just that a signal was sent — before spawning a
+  // replacement. See PtyManager.kill().
+  ipcMain.handle(IPC_CHANNELS.PTY_KILL, async (_event, ptyId: string) => {
     try {
-      ptyManager?.kill(ptyId)
+      await ptyManager?.kill(ptyId)
     } catch (error) {
       console.error('PTY kill error:', error)
     }

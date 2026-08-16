@@ -130,21 +130,51 @@ export class PtyManager {
     }
   }
 
-  kill(ptyId: string, force: boolean = false): void {
+  // Resolves once the process has actually exited (or been force-killed after
+  // a timeout) — not just once a signal has been sent. Callers that need to
+  // spawn a replacement (e.g. restart) must await this, otherwise the old
+  // process (still holding a remote tmux/session slot over SSH) can be
+  // orphaned while a new one spawns on top of it.
+  kill(ptyId: string, force: boolean = false): Promise<void> {
     const instance = this.ptys.get(ptyId)
-    if (instance) {
-      // Don't kill backgrounded PTYs unless forced (e.g., workspace deletion)
-      // This preserves sessions when switching workspaces
-      if (instance.isBackground && !force) {
-        return
+    if (!instance) return Promise.resolve()
+    // Don't kill backgrounded PTYs unless forced (e.g., workspace deletion)
+    // This preserves sessions when switching workspaces
+    if (instance.isBackground && !force) {
+      return Promise.resolve()
+    }
+    return new Promise<void>((resolve) => {
+      let settled = false
+      const finish = () => {
+        if (settled) return
+        settled = true
+        clearTimeout(escalateTimer)
+        resolve()
       }
+      // spawn() already registers an onExit that deletes this.ptys and
+      // notifies the renderer — node-pty supports multiple onExit
+      // subscribers, so this just piggybacks to resolve the promise.
+      instance.pty.onExit(() => finish())
       try {
         instance.pty.kill()
       } catch (error) {
         console.error('Failed to kill PTY:', error)
+        finish()
+        return
       }
-      this.ptys.delete(ptyId)
-    }
+      // Safety net: a hung ssh process (e.g. blocked on a dead TCP
+      // connection) may not react to the initial kill. Escalate to SIGKILL
+      // and resolve regardless so a stuck process can never block a restart
+      // forever.
+      const escalateTimer = setTimeout(() => {
+        try {
+          instance.pty.kill('SIGKILL')
+        } catch (error) {
+          console.error('Failed to force-kill PTY:', error)
+        }
+        finish()
+      }, 3000)
+    })
   }
 
   // Move workspace PTYs to background instead of killing them
@@ -195,13 +225,13 @@ export class PtyManager {
       }
     }
     for (const ptyId of toKill) {
-      this.kill(ptyId, true)  // Force kill for workspace deletion
+      void this.kill(ptyId, true)  // Force kill for workspace deletion
     }
   }
 
   killAll(): void {
     for (const [ptyId] of this.ptys) {
-      this.kill(ptyId, true)  // Force kill all
+      void this.kill(ptyId, true)  // Force kill all
     }
   }
 
