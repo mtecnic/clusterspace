@@ -13,6 +13,10 @@ interface UseTerminalOptions {
   config: PaneConfig
   fontSize?: number
   onActivity?: () => void
+  // Called when the user clicks a link detected in terminal output.
+  // `external` is true when the click was Ctrl/Cmd-modified (explicit
+  // "open in OS browser" escape hatch); false means "open in-app if possible".
+  onOpenLink?: (url: string, external: boolean) => void
 }
 
 interface UseTerminalReturn {
@@ -50,7 +54,8 @@ export function useTerminal({
   workspaceId,
   config,
   fontSize = 14,
-  onActivity
+  onActivity,
+  onOpenLink
 }: UseTerminalOptions): UseTerminalReturn {
   const terminalRef = useRef<HTMLDivElement>(null)
   const terminalInstanceRef = useRef<Terminal | null>(null)
@@ -78,6 +83,11 @@ export function useTerminal({
   // Use ref for onActivity to avoid effect re-runs
   const onActivityRef = useRef(onActivity)
   onActivityRef.current = onActivity
+
+  // Use ref for onOpenLink so the WebLinksAddon (created once at mount)
+  // always calls the latest handler without needing to re-create itself.
+  const onOpenLinkRef = useRef(onOpenLink)
+  onOpenLinkRef.current = onOpenLink
 
   // Debounced fit function
   const fitDebounceRef = useRef<NodeJS.Timeout | null>(null)
@@ -227,7 +237,14 @@ export function useTerminal({
     })
 
     const fitAddon = new FitAddon()
-    const webLinksAddon = new WebLinksAddon()
+    // Plain click opens the link in-app (via onOpenLink, resolved by the
+    // caller to an existing browser pane's new tab, falling back to the OS
+    // browser if none exists). Ctrl/Cmd+click is the explicit escape hatch
+    // straight to the OS browser, matching the "open in new context" modifier
+    // convention used elsewhere (browsers, VS Code, etc.).
+    const webLinksAddon = new WebLinksAddon((event, uri) => {
+      onOpenLinkRef.current?.(uri, event.ctrlKey || event.metaKey)
+    })
     const searchAddon = new SearchAddon()
 
     terminal.loadAddon(fitAddon)

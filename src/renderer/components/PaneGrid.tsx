@@ -13,6 +13,7 @@ interface PaneGridProps {
   broadcastEnabled?: boolean
   onManageSSH?: () => void
   onManageBrowserCredentials?: () => void
+  onOpenLink?: (url: string, external: boolean) => void
 }
 
 const DRAG_MIME = 'application/x-clusterspace-pane'
@@ -35,7 +36,8 @@ export function PaneGrid({
   onPaneFocus,
   broadcastEnabled: _broadcastEnabled,
   onManageSSH,
-  onManageBrowserCredentials
+  onManageBrowserCredentials,
+  onOpenLink
 }: PaneGridProps) {
   const [maximizedPaneId, setMaximizedPaneId] = useState<string | null>(null)
   const [dragSourceId, setDragSourceId] = useState<string | null>(null)
@@ -132,10 +134,11 @@ export function PaneGrid({
         onUpdateConfig={(updates) => onUpdatePane(pane.id, updates)}
         onRestart={handlePaneRestart}
         onManageSSH={onManageSSH}
+        onOpenLink={onOpenLink}
         labelDragHandle={labelDragHandle}
       />
     )
-  }, [workspace.id, onPaneFocus, onUpdatePane, onManageSSH, handlePaneRestart, dragHandleFor])
+  }, [workspace.id, onPaneFocus, onUpdatePane, onManageSSH, onOpenLink, handlePaneRestart, dragHandleFor])
 
   // Cell-level drop handlers. A drop target is any pane other than the source.
   const handleCellDragEnter = useCallback((paneId: string, e: React.DragEvent<HTMLDivElement>) => {

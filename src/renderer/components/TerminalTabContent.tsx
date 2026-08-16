@@ -27,6 +27,7 @@ interface TerminalTabContentProps {
   onTabSessionChange?: (sessionName: string | null) => void
   onManageSSH?: () => void
   onActivity?: () => void
+  onOpenLink?: (url: string, external: boolean) => void
 }
 
 export function TerminalTabContent({
@@ -40,7 +41,8 @@ export function TerminalTabContent({
   onUpdateConfig,
   onTabSessionChange,
   onManageSSH,
-  onActivity
+  onActivity,
+  onOpenLink
 }: TerminalTabContentProps) {
   void isFocused  // reserved for future per-tab focus styling
   // Synthesize a config for this specific tab: same pane settings, but with
@@ -74,7 +76,8 @@ export function TerminalTabContent({
     paneId: tabKey,
     workspaceId,
     config: tabConfig,
-    onActivity
+    onActivity,
+    onOpenLink
   })
 
   // When this tab becomes visible, give the terminal a moment to re-fit

@@ -18,6 +18,7 @@ import { FleetDashboard } from './components/FleetDashboard'
 import { GoalDashboard } from './components/GoalDashboard'
 import { BrowserApprovalModal } from './components/BrowserApprovalModal'
 import { GridConfig, PaneConfig } from '@shared/types'
+import { dispatchBrowserTabAction } from './lib/pane-controls'
 
 interface AppContentProps {
   onRegisterFocusPane?: (cb: (id: string) => void) => void
@@ -111,6 +112,25 @@ function AppContent({ onRegisterFocusPane, onRegisterMaximizePane }: AppContentP
     })
     await updateWorkspace(activeWorkspace.id, { panes: nextPanes })
   }, [activeWorkspace, updateWorkspace])
+
+  // A link was clicked in a terminal pane. `external` (Ctrl/Cmd+click) always
+  // goes to the OS browser. Otherwise, open it as a new tab in an existing
+  // browser pane in the active workspace (preferring the focused one if it's
+  // a browser pane) — falling back to the OS browser if the workspace has no
+  // browser pane, since there's no way to insert a single new pane into the
+  // grid without a full rows×cols regeneration.
+  const handleOpenLink = useCallback((url: string, external: boolean) => {
+    if (!external && activeWorkspace) {
+      const browserPanes = activeWorkspace.panes.filter(p => p.type === 'browser')
+      const focused = browserPanes.find(p => p.id === focusedPaneId)
+      const target = focused ?? browserPanes[0]
+      if (target) {
+        dispatchBrowserTabAction(target.id, { action: 'open', url })
+        return
+      }
+    }
+    window.electronAPI.openExternal(url)
+  }, [activeWorkspace, focusedPaneId])
 
   // Handle workspace import
   const handleImportWorkspace = useCallback(() => {
@@ -336,6 +356,7 @@ function AppContent({ onRegisterFocusPane, onRegisterMaximizePane }: AppContentP
                     broadcastEnabled={isActive ? broadcastEnabled : false}
                     onManageSSH={() => setShowSSHServersDialog(true)}
                     onManageBrowserCredentials={() => setShowBrowserCredentialsDialog(true)}
+                    onOpenLink={handleOpenLink}
                   />
                 </div>
               )
