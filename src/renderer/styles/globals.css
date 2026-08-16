@@ -585,11 +585,22 @@ html, body, #root {
   100% { left: 100%; }
 }
 
-/* Webview region: flex child holding the <webview> + recovery overlay. */
+/* Webview region: flex child holding all tabs' webview slots stacked. */
 .browser-webview-wrap {
   position: relative;
   flex: 1 1 auto;
   min-height: 0;
+  display: flex;
+}
+
+/* One per open tab, absolutely stacked inside .browser-webview-wrap. Only
+   the active tab's slot is visible/interactive (visibility, not
+   display:none — display:none detaches/wedges Electron <webview> guests),
+   so switching tabs is a pure CSS toggle and every tab keeps its own live
+   guest (scroll position, in-page state) instead of reloading. */
+.browser-tab-webview-slot {
+  position: absolute;
+  inset: 0;
   display: flex;
 }
 

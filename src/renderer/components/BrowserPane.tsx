@@ -11,6 +11,7 @@ import {
   PaneConfig
 } from '@shared/types'
 import { registerBrowserTabAction, registerReconnect } from './../lib/pane-controls'
+import { BrowserTabWebview, BrowserTabWebviewHandle, BrowserTabStatus } from './BrowserTabWebview'
 
 // Resolve tabs from a pane config. If `tabs` is absent we synthesize a single
 // implicit tab from `config.url`, so legacy panes keep working unchanged.
@@ -43,33 +44,15 @@ interface BrowserPaneProps {
   }
 }
 
-// Subset of the Electron <webview> instance methods we use.
-interface WebviewElement extends HTMLElement {
-  src: string
-  loadURL: (url: string) => Promise<void>
-  reload: () => void
-  goBack: () => void
-  goForward: () => void
-  canGoBack: () => boolean
-  canGoForward: () => boolean
-  stop: () => void
-  getURL: () => string
-  getTitle: () => string
-  openDevTools: () => void
-  closeDevTools: () => void
-  isDevToolsOpened: () => boolean
-  getWebContentsId: () => number
-  findInPage: (text: string, options?: { forward?: boolean; findNext?: boolean; matchCase?: boolean }) => number
-  stopFindInPage: (action: 'clearSelection' | 'keepSelection' | 'activateSelection') => void
-  focus: () => void
-  copy: () => void
-  cut: () => void
-  paste: () => void
-  selectAll: () => void
-  inspectElement: (x: number, y: number) => void
-}
-
 const FALLBACK_URL = 'https://www.google.com'
+
+const EMPTY_STATUS: BrowserTabStatus = {
+  isLoading: true,
+  canGoBack: false,
+  canGoForward: false,
+  crashState: null,
+  findMatches: { active: 0, total: 0 }
+}
 
 function normalizeUrl(input: string): string {
   const trimmed = input.trim()
@@ -112,27 +95,22 @@ export function BrowserPane({
   const [activeTabId, setActiveTabId] = useState<string>(initialResolved.activeId)
   const activeTab = tabs.find(t => t.id === activeTabId) ?? tabs[0]
 
-  // The URL the <webview> mounts with. Snapshotted at mount so the src isn't
-  // re-set on every re-render (which would cause reload loops) — tab switches
-  // call webview.loadURL() explicitly instead. A recovery recreate updates this
-  // to the current page so a revived webview lands back where the user was.
-  const [mountUrl, setMountUrl] = useState(activeTab.url)
-  // Bumping this key destroys and recreates the <webview> element, giving a
-  // brand-new guest WebContents — the only reliable way to revive a crashed or
-  // wedged renderer (reload() can't resurrect a dead guest).
-  const [webviewKey, setWebviewKey] = useState(0)
-  // Non-null when the guest has crashed, hung, or failed a main-frame load.
-  // Drives the recovery overlay.
-  const [crashState, setCrashState] = useState<
-    { kind: 'crashed' | 'unresponsive' | 'failed'; code?: number; desc?: string; url?: string; reason?: string } | null
-  >(null)
-  const [currentUrl, setCurrentUrl] = useState(activeTab.url)
+  // Every open tab keeps its own live <webview> guest (mounted via
+  // BrowserTabWebview below) so switching tabs never reloads the page —
+  // only the active one is visible/interactive. These maps hold what each
+  // tab's guest reports back: live navigation status and its WebContents id.
+  const [statusByTab, setStatusByTab] = useState<Record<string, BrowserTabStatus>>({})
+  const [webContentsIds, setWebContentsIds] = useState<Record<string, number>>({})
+  const tabHandles = useRef<Map<string, BrowserTabWebviewHandle>>(new Map())
+
+  const activeStatus = statusByTab[activeTabId] ?? EMPTY_STATUS
+  const activeWebContentsId = webContentsIds[activeTabId] ?? null
+  const currentUrl = activeTab.url
+  const pageTitle = activeTab.title ?? ''
+  const favicon = activeTab.favicon
+  const { isLoading, canGoBack, canGoForward, findMatches } = activeStatus
+
   const [urlInput, setUrlInput] = useState(activeTab.url)
-  const [pageTitle, setPageTitle] = useState(activeTab.title ?? '')
-  const [favicon, setFavicon] = useState<string | undefined>(activeTab.favicon)
-  const [isLoading, setIsLoading] = useState(true)
-  const [canGoBack, setCanGoBack] = useState(false)
-  const [canGoForward, setCanGoForward] = useState(false)
 
   const [bookmarks, setBookmarks] = useState<Bookmark[]>([])
   const [showBookmarks, setShowBookmarks] = useState(false)
@@ -143,7 +121,6 @@ export function BrowserPane({
 
   const [showFind, setShowFind] = useState(false)
   const [findQuery, setFindQuery] = useState('')
-  const [findMatches, setFindMatches] = useState({ active: 0, total: 0 })
 
   const [downloads, setDownloads] = useState<DownloadInfo[]>([])
   const [showDownloads, setShowDownloads] = useState(false)
@@ -180,10 +157,8 @@ export function BrowserPane({
     }
   }, [config.id])
 
-  const webviewRef = useRef<WebviewElement | null>(null)
   const urlInputRef = useRef<HTMLInputElement>(null)
   const findInputRef = useRef<HTMLInputElement>(null)
-  const webContentsIdRef = useRef<number | null>(null)
 
   const isBookmarked = useMemo(
     () => bookmarks.some(b => b.url === currentUrl),
@@ -202,19 +177,50 @@ export function BrowserPane({
     })
   }, [onUpdateConfig])
 
-  // Update the active tab's metadata (url/title/favicon) after a navigation.
-  const updateActiveTabMeta = useCallback((patch: Partial<BrowserTab>) => {
+  // Called by any tab's BrowserTabWebview when its url/title/favicon changes
+  // (not just the active one — a background tab can finish loading too).
+  const handleTabNavigated = useCallback((tabId: string, patch: Partial<Pick<BrowserTab, 'url' | 'title' | 'favicon'>>) => {
     setTabs(prev => {
-      const next = prev.map(t => t.id === activeTabId ? { ...t, ...patch } : t)
-      // Only persist if something actually changed (avoids effect-cascade loops).
-      const before = prev.find(t => t.id === activeTabId)
-      const after = next.find(t => t.id === activeTabId)
-      if (before && after && (before.url !== after.url || before.title !== after.title || before.favicon !== after.favicon)) {
-        persistTabs(next, activeTabId)
+      const before = prev.find(t => t.id === tabId)
+      if (!before) return prev
+      const after = { ...before, ...patch }
+      if (before.url === after.url && before.title === after.title && before.favicon === after.favicon) {
+        return prev
       }
+      const next = prev.map(t => t.id === tabId ? after : t)
+      persistTabs(next, activeTabId)
       return next
     })
+    if (tabId === activeTabId && patch.url && document.activeElement !== urlInputRef.current) {
+      setUrlInput(patch.url)
+    }
   }, [activeTabId, persistTabs])
+
+  const handleWebContentsId = useCallback((tabId: string, id: number | null) => {
+    setWebContentsIds(prev => {
+      if (id == null) {
+        if (!(tabId in prev)) return prev
+        const next = { ...prev }
+        delete next[tabId]
+        return next
+      }
+      if (prev[tabId] === id) return prev
+      return { ...prev, [tabId]: id }
+    })
+  }, [])
+
+  const handleTabStatus = useCallback((tabId: string, status: BrowserTabStatus) => {
+    setStatusByTab(prev => ({ ...prev, [tabId]: status }))
+  }, [])
+
+  const registerTabHandle = useCallback((tabId: string, handle: BrowserTabWebviewHandle | null) => {
+    if (handle) tabHandles.current.set(tabId, handle)
+    else tabHandles.current.delete(tabId)
+  }, [])
+
+  const activeHandle = useCallback((): BrowserTabWebviewHandle | null => {
+    return tabHandles.current.get(activeTabId) ?? null
+  }, [activeTabId])
 
   const handleOpenNewTab = useCallback(async (url?: string) => {
     let defaultUrl = url
@@ -233,8 +239,9 @@ export function BrowserPane({
       return next
     })
     setActiveTabId(newTab.id)
-    // Trigger navigation in the (single) webview.
-    setTimeout(() => webviewRef.current?.loadURL(defaultUrl!).catch(() => {}), 0)
+    setUrlInput(defaultUrl)
+    // No loadURL call needed — the new tab's BrowserTabWebview mounts with
+    // this url and loads it itself.
   }, [persistTabs])
 
   const handleSwitchTab = useCallback((tabId: string) => {
@@ -244,11 +251,7 @@ export function BrowserPane({
     setActiveTabId(tabId)
     persistTabs(tabs, tabId)
     // Optimistically reflect the destination in the URL bar.
-    setCurrentUrl(target.url)
     setUrlInput(target.url)
-    setPageTitle(target.title ?? '')
-    setFavicon(target.favicon)
-    webviewRef.current?.loadURL(target.url).catch(() => {})
   }, [activeTabId, tabs, persistTabs])
 
   const handleCloseTab = useCallback((tabId: string) => {
@@ -258,7 +261,7 @@ export function BrowserPane({
         const fallback: BrowserTab = { id: uuidv4(), url: FALLBACK_URL }
         persistTabs([fallback], fallback.id)
         setActiveTabId(fallback.id)
-        webviewRef.current?.loadURL(FALLBACK_URL).catch(() => {})
+        setUrlInput(FALLBACK_URL)
         return [fallback]
       }
       const idx = prev.findIndex(t => t.id === tabId)
@@ -270,9 +273,21 @@ export function BrowserPane({
         const newIdx = Math.max(0, idx - 1)
         nextActive = next[newIdx].id
         setActiveTabId(nextActive)
-        webviewRef.current?.loadURL(next[newIdx].url).catch(() => {})
+        setUrlInput(next[newIdx].url)
       }
       persistTabs(next, nextActive)
+      return next
+    })
+    setStatusByTab(prev => {
+      if (!(tabId in prev)) return prev
+      const next = { ...prev }
+      delete next[tabId]
+      return next
+    })
+    setWebContentsIds(prev => {
+      if (!(tabId in prev)) return prev
+      const next = { ...prev }
+      delete next[tabId]
       return next
     })
   }, [activeTabId, persistTabs])
@@ -281,156 +296,6 @@ export function BrowserPane({
   useEffect(() => {
     window.electronAPI.getBookmarks().then(setBookmarks).catch(() => {})
   }, [])
-
-  // ---- Webview navigation events ----
-  useEffect(() => {
-    const webview = webviewRef.current
-    if (!webview) return
-
-    const onStartLoading: EventListener = () => {
-      setIsLoading(true)
-      // A new load starting means the guest is alive again — dismiss any
-      // crash/fail overlay so a successful recovery hides it.
-      setCrashState(null)
-    }
-    const onStopLoading: EventListener = () => {
-      setIsLoading(false)
-      try {
-        setCanGoBack(webview.canGoBack())
-        setCanGoForward(webview.canGoForward())
-        const url = webview.getURL()
-        if (url) {
-          setCurrentUrl(url)
-          if (document.activeElement !== urlInputRef.current) setUrlInput(url)
-          // Persist navigation onto the *active* tab. updateActiveTabMeta
-          // also mirrors `url` into config.url for back-compat.
-          updateActiveTabMeta({ url, title: webview.getTitle() || undefined, favicon })
-          window.electronAPI.addBrowserHistory(url, webview.getTitle() || url, favicon).catch(() => {})
-        }
-      } catch { /* webview may have detached */ }
-    }
-    const onNavigate: EventListener = (evt) => {
-      const url = (evt as Event & { url?: string }).url
-      if (url) {
-        setCurrentUrl(url)
-        if (document.activeElement !== urlInputRef.current) setUrlInput(url)
-      }
-    }
-    const onTitleUpdated: EventListener = (evt) => {
-      const title = (evt as Event & { title?: string }).title
-      if (title !== undefined) {
-        setPageTitle(title)
-        updateActiveTabMeta({ title })
-      }
-    }
-    const onFaviconUpdated: EventListener = (evt) => {
-      const favicons = (evt as Event & { favicons?: string[] }).favicons
-      if (favicons && favicons[0]) {
-        setFavicon(favicons[0])
-        updateActiveTabMeta({ favicon: favicons[0] })
-      }
-    }
-    const onFailLoad: EventListener = (evt) => {
-      const e = evt as Event & { errorCode?: number; errorDescription?: string; validatedURL?: string; isMainFrame?: boolean }
-      if (e.errorCode === -3) return // ERR_ABORTED (user navigated away mid-load)
-      console.warn('Webview failed to load:', e.errorDescription, e.validatedURL)
-      // Only surface a recovery overlay for main-frame failures — subframe/asset
-      // errors shouldn't block the whole page. Clear the spinner either way.
-      setIsLoading(false)
-      if (e.isMainFrame !== false) {
-        setCrashState({ kind: 'failed', code: e.errorCode, desc: e.errorDescription, url: e.validatedURL })
-      }
-    }
-    // A crashed/gone renderer keeps painting its last frame but ignores all
-    // input — the "can't click anything" symptom. reload() can't revive it;
-    // only recreating the element does. Flag it so the overlay offers recovery.
-    const onRenderGone: EventListener = (evt) => {
-      const reason = (evt as Event & { reason?: string; details?: { reason?: string } }).reason
-        ?? (evt as Event & { details?: { reason?: string } }).details?.reason
-      setIsLoading(false)
-      setCrashState({ kind: 'crashed', reason })
-    }
-    const onUnresponsive: EventListener = () => {
-      setCrashState(prev => prev ?? { kind: 'unresponsive' })
-    }
-    const onResponsive: EventListener = () => {
-      setCrashState(prev => (prev?.kind === 'unresponsive' ? null : prev))
-    }
-    const onDomReady: EventListener = () => {
-      try {
-        webContentsIdRef.current = webview.getWebContentsId()
-      } catch { /* ignore */ }
-    }
-    const onFoundInPage: EventListener = (evt) => {
-      const r = (evt as Event & { result?: { activeMatchOrdinal: number; matches: number; finalUpdate: boolean } }).result
-      if (r) setFindMatches({ active: r.activeMatchOrdinal, total: r.matches })
-    }
-
-    webview.addEventListener('did-start-loading', onStartLoading)
-    webview.addEventListener('did-stop-loading', onStopLoading)
-    webview.addEventListener('did-navigate', onNavigate)
-    webview.addEventListener('did-navigate-in-page', onNavigate)
-    webview.addEventListener('page-title-updated', onTitleUpdated)
-    webview.addEventListener('page-favicon-updated', onFaviconUpdated)
-    webview.addEventListener('did-fail-load', onFailLoad)
-    webview.addEventListener('render-process-gone', onRenderGone)
-    webview.addEventListener('crashed', onRenderGone) // legacy fallback (pre-Electron render-process-gone)
-    webview.addEventListener('unresponsive', onUnresponsive)
-    webview.addEventListener('responsive', onResponsive)
-    webview.addEventListener('dom-ready', onDomReady)
-    webview.addEventListener('found-in-page', onFoundInPage)
-
-    return () => {
-      webview.removeEventListener('did-start-loading', onStartLoading)
-      webview.removeEventListener('did-stop-loading', onStopLoading)
-      webview.removeEventListener('did-navigate', onNavigate)
-      webview.removeEventListener('did-navigate-in-page', onNavigate)
-      webview.removeEventListener('page-title-updated', onTitleUpdated)
-      webview.removeEventListener('page-favicon-updated', onFaviconUpdated)
-      webview.removeEventListener('did-fail-load', onFailLoad)
-      webview.removeEventListener('render-process-gone', onRenderGone)
-      webview.removeEventListener('crashed', onRenderGone)
-      webview.removeEventListener('unresponsive', onUnresponsive)
-      webview.removeEventListener('responsive', onResponsive)
-      webview.removeEventListener('dom-ready', onDomReady)
-      webview.removeEventListener('found-in-page', onFoundInPage)
-      // NOTE: registration is handled in its own effect keyed on config.id —
-      // we do NOT unregister here, otherwise unrelated re-runs of this effect
-      // (favicon updates, parent re-renders changing onUpdateConfig identity)
-      // would briefly clear the registry.
-    }
-    // webviewKey is in deps so these listeners rebind to the recreated element
-    // after a recovery (recreateWebview bumps the key).
-  }, [config.id, favicon, updateActiveTabMeta, webviewKey])
-
-  // Registration lifecycle — keyed only on config.id so it survives the
-  // navigation/event effect re-running.
-  useEffect(() => {
-    const webview = webviewRef.current
-    if (!webview) return
-    let registered = false
-    const tryRegister = () => {
-      try {
-        const id = webview.getWebContentsId()
-        if (id) {
-          webContentsIdRef.current = id
-          window.electronAPI.registerBrowserPane(config.id, id)
-          registered = true
-        }
-      } catch { /* attach hasn't happened yet */ }
-    }
-    // Try immediately in case the webview is already attached (e.g., after HMR
-    // where the DOM node was preserved).
-    tryRegister()
-    const onAttach = () => tryRegister()
-    webview.addEventListener('did-attach', onAttach)
-    return () => {
-      webview.removeEventListener('did-attach', onAttach)
-      if (registered) window.electronAPI.unregisterBrowserPane(config.id)
-    }
-    // webviewKey is in deps so a recovery recreate re-registers the new guest's
-    // webContentsId (cleanup unregisters the old, dead one first).
-  }, [config.id, webviewKey])
 
   // ---- Downloads subscription ----
   useEffect(() => {
@@ -445,41 +310,16 @@ export function BrowserPane({
     })
   }, [])
 
-  // ---- Navigation ----
+  // ---- Navigation (dispatches to the active tab's webview) ----
   const navigate = useCallback((rawUrl: string) => {
     const url = normalizeUrl(rawUrl)
-    webviewRef.current?.loadURL(url).catch(() => {})
-  }, [])
+    activeHandle()?.navigate(url)
+  }, [activeHandle])
 
-  const handleBack = useCallback(() => {
-    if (webviewRef.current?.canGoBack()) webviewRef.current.goBack()
-  }, [])
-  const handleForward = useCallback(() => {
-    if (webviewRef.current?.canGoForward()) webviewRef.current.goForward()
-  }, [])
-  // Destroy and recreate the <webview> element → fresh guest WebContents.
-  // The only reliable recovery from a crashed/wedged renderer. Revives on the
-  // current page rather than the original mount URL.
-  const recreateWebview = useCallback(() => {
-    setMountUrl(currentUrl || activeTab.url)
-    webContentsIdRef.current = null
-    setCrashState(null)
-    setIsLoading(true)
-    setWebviewKey(k => k + 1)
-  }, [currentUrl, activeTab.url])
-
-  const handleReload = useCallback(() => {
-    // A dead/hung guest can't be revived by reload() — recreate instead.
-    if (crashState && crashState.kind !== 'failed') {
-      recreateWebview()
-      return
-    }
-    try {
-      webviewRef.current?.reload()
-    } catch {
-      recreateWebview()
-    }
-  }, [crashState, recreateWebview])
+  const handleBack = useCallback(() => { activeHandle()?.back() }, [activeHandle])
+  const handleForward = useCallback(() => { activeHandle()?.forward() }, [activeHandle])
+  const handleReload = useCallback(() => { activeHandle()?.reload() }, [activeHandle])
+  const recreateActive = useCallback(() => { activeHandle()?.recreate() }, [activeHandle])
 
   // Expose tab actions + reconnect (webview recovery) to AI tools.
   useEffect(() => {
@@ -488,9 +328,18 @@ export function BrowserPane({
       else if (a.action === 'switch') handleSwitchTab(a.tabId)
       else if (a.action === 'close') handleCloseTab(a.tabId)
     })
-    const unReconnect = registerReconnect(config.id, () => recreateWebview())
+    const unReconnect = registerReconnect(config.id, () => recreateActive())
     return () => { unTabs(); unReconnect() }
-  }, [config.id, handleOpenNewTab, handleSwitchTab, handleCloseTab, recreateWebview])
+  }, [config.id, handleOpenNewTab, handleSwitchTab, handleCloseTab, recreateActive])
+
+  // Keep the main-process registry (paneId → webContentsId) pointed at
+  // whichever tab is currently active, so AI tools that address this pane
+  // (screenshot, click, execute-js, ...) always drive the visible tab.
+  useEffect(() => {
+    if (activeWebContentsId == null) return
+    window.electronAPI.registerBrowserPane(config.id, activeWebContentsId)
+    return () => { window.electronAPI.unregisterBrowserPane(config.id) }
+  }, [config.id, activeWebContentsId])
 
   const focusUrlBar = useCallback(() => {
     urlInputRef.current?.focus()
@@ -501,18 +350,12 @@ export function BrowserPane({
   const closeFind = useCallback(() => {
     setShowFind(false)
     setFindQuery('')
-    setFindMatches({ active: 0, total: 0 })
-    webviewRef.current?.stopFindInPage('clearSelection')
-  }, [])
+    activeHandle()?.stopFindInPage('clearSelection')
+  }, [activeHandle])
 
   const runFind = useCallback((query: string, opts?: { forward?: boolean; findNext?: boolean }) => {
-    if (!query) {
-      webviewRef.current?.stopFindInPage('clearSelection')
-      setFindMatches({ active: 0, total: 0 })
-      return
-    }
-    webviewRef.current?.findInPage(query, { forward: opts?.forward ?? true, findNext: opts?.findNext ?? false })
-  }, [])
+    activeHandle()?.findInPage(query, opts)
+  }, [activeHandle])
 
   // ---- Bookmarks ----
   const toggleBookmark = useCallback(async () => {
@@ -552,20 +395,20 @@ export function BrowserPane({
   // ---- Webview context-menu bridge from main ----
   useEffect(() => {
     return window.electronAPI.onBrowserContextMenu((params) => {
-      if (params.webContentsId !== webContentsIdRef.current) return
+      if (params.webContentsId !== activeWebContentsId) return
       setWebviewMenu(params)
     })
-  }, [])
+  }, [activeWebContentsId])
 
   // ---- Shortcut bridge from main ----
   useEffect(() => {
     return window.electronAPI.onBrowserShortcut((msg) => {
-      if (msg.webContentsId !== webContentsIdRef.current) return
+      if (msg.webContentsId !== activeWebContentsId) return
       handleShortcut(msg.shortcut)
     })
     // handleShortcut is defined inline below; deps captured via state setters
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showFind])
+  }, [showFind, activeWebContentsId])
 
   const handleShortcut = useCallback((sc: BrowserShortcut) => {
     switch (sc) {
@@ -576,13 +419,7 @@ export function BrowserPane({
         setTimeout(() => findInputRef.current?.focus(), 0)
         break
       case 'reload': handleReload(); break
-      case 'toggleDevTools': {
-        const w = webviewRef.current
-        if (!w) return
-        if (w.isDevToolsOpened()) w.closeDevTools()
-        else w.openDevTools()
-        break
-      }
+      case 'toggleDevTools': activeHandle()?.toggleDevTools(); break
       case 'back': handleBack(); break
       case 'forward': handleForward(); break
       case 'escape':
@@ -596,7 +433,7 @@ export function BrowserPane({
         onUpdateConfig({ type: 'terminal', url: undefined })
         break
     }
-  }, [focusUrlBar, handleReload, handleBack, handleForward, showFind, showOverflow, showBookmarks, showDownloads, closeFind, onUpdateConfig])
+  }, [focusUrlBar, handleReload, handleBack, handleForward, activeHandle, showFind, showOverflow, showBookmarks, showDownloads, closeFind, onUpdateConfig])
 
   // ---- URL input handlers ----
   const handleUrlSubmit = useCallback((e: React.FormEvent) => {
@@ -850,46 +687,22 @@ export function BrowserPane({
           {isLoading && <div className="chrome-progress" />}
         </div>
 
-        {/* Webview region. The wrapper is the flex child; the webview fills it.
-            key={webviewKey} lets a recovery recreate the element (and thus the
-            guest renderer) from scratch. */}
+        {/* Webview region. Every open tab keeps its own <BrowserTabWebview>
+            mounted (stacked, only the active one visible) so switching tabs
+            never reloads the page. */}
         <div className="browser-webview-wrap">
-          <webview
-            key={webviewKey}
-            ref={webviewRef as React.RefObject<HTMLElement>}
-            src={mountUrl}
-            partition="persist:browser-pane"
-            allowpopups={true}
-            webpreferences="contextIsolation=yes,nodeIntegration=no,sandbox=yes"
-            style={{ flex: '1 1 auto', width: '100%', height: '100%' }}
-          />
-
-          {/* Recovery overlay — shown when the guest crashed, hung, or failed a
-              main-frame load. A crashed guest stops compositing, so this covers
-              the (blank) webview region while leaving the chrome/address bar
-              usable. */}
-          {crashState && (
-            <div className="browser-crash-overlay">
-              <div className="browser-crash-card">
-                <div className="browser-crash-icon">{crashState.kind === 'failed' ? '⚠️' : '💥'}</div>
-                <div className="browser-crash-title">
-                  {crashState.kind === 'crashed' && 'This page crashed'}
-                  {crashState.kind === 'unresponsive' && 'This page is unresponsive'}
-                  {crashState.kind === 'failed' && "This page didn't load"}
-                </div>
-                <div className="browser-crash-detail">
-                  {crashState.kind === 'failed'
-                    ? `${crashState.desc ?? 'Load failed'}${crashState.url ? ` — ${hostnameOf(crashState.url)}` : ''}`
-                    : crashState.reason
-                      ? `Reason: ${crashState.reason}`
-                      : hostnameOf(currentUrl)}
-                </div>
-                <button className="btn btn-primary" onClick={handleReload}>
-                  Reload
-                </button>
-              </div>
-            </div>
-          )}
+          {tabs.map(tab => (
+            <BrowserTabWebview
+              key={tab.id}
+              ref={(h) => registerTabHandle(tab.id, h)}
+              tabId={tab.id}
+              initialUrl={tab.url}
+              isActive={tab.id === activeTabId}
+              onNavigated={handleTabNavigated}
+              onWebContentsId={handleWebContentsId}
+              onStatus={handleTabStatus}
+            />
+          ))}
         </div>
 
         {/* Find-in-page overlay (top-right) */}
@@ -996,8 +809,7 @@ export function BrowserPane({
               <span>Find in page</span><span className="kbd">Ctrl+F</span>
             </div>
             <div className="context-menu-item" onClick={() => {
-              const w = webviewRef.current; if (!w) return
-              if (w.isDevToolsOpened()) w.closeDevTools(); else w.openDevTools()
+              activeHandle()?.toggleDevTools()
               setShowOverflow(false)
             }}>
               <span>Toggle DevTools</span><span className="kbd">F12</span>
@@ -1054,19 +866,19 @@ export function BrowserPane({
           position={contextMenu}
           onClose={() => setContextMenu(null)}
           onUpdateConfig={onUpdateConfig}
-          onRestart={recreateWebview}
+          onRestart={recreateActive}
           onKill={() => {/* browser has no PTY */}}
           onManageSSH={onManageSSH}
         />
       )}
 
       {webviewMenu && (() => {
-        const wv = webviewRef.current
-        const rect = wv?.getBoundingClientRect()
+        const rect = activeHandle()?.getBoundingClientRect()
         const left = (rect?.left ?? 0) + webviewMenu.x
         const top = (rect?.top ?? 0) + webviewMenu.y
         const close = () => setWebviewMenu(null)
         const params = webviewMenu
+        const handle = activeHandle()
 
         const items: Array<{ label: string; onClick: () => void; danger?: boolean } | 'divider'> = []
 
@@ -1104,13 +916,13 @@ export function BrowserPane({
         }
 
         if (params.isEditable) {
-          if (params.editFlags?.canCut) items.push({ label: 'Cut', onClick: () => { wv?.cut(); close() } })
-          if (params.editFlags?.canCopy) items.push({ label: 'Copy', onClick: () => { wv?.copy(); close() } })
-          if (params.editFlags?.canPaste) items.push({ label: 'Paste', onClick: () => { wv?.paste(); close() } })
-          if (params.editFlags?.canSelectAll) items.push({ label: 'Select all', onClick: () => { wv?.selectAll(); close() } })
+          if (params.editFlags?.canCut) items.push({ label: 'Cut', onClick: () => { handle?.cut(); close() } })
+          if (params.editFlags?.canCopy) items.push({ label: 'Copy', onClick: () => { handle?.copy(); close() } })
+          if (params.editFlags?.canPaste) items.push({ label: 'Paste', onClick: () => { handle?.paste(); close() } })
+          if (params.editFlags?.canSelectAll) items.push({ label: 'Select all', onClick: () => { handle?.selectAll(); close() } })
           items.push('divider')
         } else if (params.selectionText) {
-          items.push({ label: 'Copy', onClick: () => { wv?.copy(); close() } })
+          items.push({ label: 'Copy', onClick: () => { handle?.copy(); close() } })
           items.push('divider')
         }
 
@@ -1120,7 +932,7 @@ export function BrowserPane({
         items.push('divider')
         items.push({
           label: 'Inspect element',
-          onClick: () => { wv?.inspectElement(params.x, params.y); close() }
+          onClick: () => { handle?.inspectElement(params.x, params.y); close() }
         })
 
         // Clamp to viewport
