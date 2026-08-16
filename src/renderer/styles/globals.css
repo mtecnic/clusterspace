@@ -303,6 +303,14 @@ html, body, #root {
   text-overflow: ellipsis;
 }
 
+.terminal-tab-rename-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: 100%;
+  font: inherit;
+  padding: 0;
+}
+
 .terminal-tab-close {
   flex-shrink: 0;
   width: 16px;

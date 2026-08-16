@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { v4 as uuidv4 } from 'uuid'
 import { PaneConfig, TerminalTab } from '@shared/types'
 import { PaneLabelWithAgent } from './PaneLabelWithAgent'
@@ -16,6 +16,7 @@ interface TerminalPaneProps {
   onUpdateConfig: (updates: Partial<PaneConfig>) => void
   onRestart: () => void
   onManageSSH?: () => void
+  onOpenLink?: (url: string, external: boolean) => void
   labelDragHandle?: {
     draggable: boolean
     onDragStart: (e: React.DragEvent<HTMLElement>) => void
@@ -40,11 +41,16 @@ export function TerminalPane({
   onUpdateConfig,
   onRestart: _onRestart,
   onManageSSH,
+  onOpenLink,
   labelDragHandle
 }: TerminalPaneProps) {
   const [hasActivity, setHasActivity] = useState(false)
   const [newTabPrompt, setNewTabPrompt] = useState<{ defaultName: string } | null>(null)
   const [newTabNameInput, setNewTabNameInput] = useState('')
+  const [tabContextMenu, setTabContextMenu] = useState<{ x: number; y: number; tabId: string } | null>(null)
+  const [editingTabId, setEditingTabId] = useState<string | null>(null)
+  const [editingName, setEditingName] = useState('')
+  const renameInputRef = useRef<HTMLInputElement>(null)
   const { initializeAgent, getAgent } = useAgent()
   const agent = getAgent(config.id)
   const aiWorking = agent?.status === 'working'
@@ -92,6 +98,60 @@ export function TerminalPane({
   useEffect(() => {
     return registerTerminalTabSwitch(config.id, handleSwitchTab)
   }, [config.id, handleSwitchTab])
+
+  // === Tab rename (right-click context menu) ===
+  useEffect(() => {
+    if (editingTabId && renameInputRef.current) {
+      renameInputRef.current.focus()
+      renameInputRef.current.select()
+    }
+  }, [editingTabId])
+
+  const handleTabContextMenu = useCallback((e: React.MouseEvent, tabId: string) => {
+    e.preventDefault()
+    setTabContextMenu({ x: e.clientX, y: e.clientY, tabId })
+  }, [])
+
+  const handleStartRename = useCallback((tab: TerminalTab) => {
+    setEditingTabId(tab.id)
+    setEditingName(tab.label || tab.sessionName)
+    setTabContextMenu(null)
+  }, [])
+
+  const handleRenameSubmit = useCallback(() => {
+    const name = editingName.trim()
+    if (editingTabId && name) {
+      onUpdateConfig({
+        terminalTabs: tabs.map(t => t.id === editingTabId ? { ...t, label: name } : t)
+      })
+    }
+    setEditingTabId(null)
+    setEditingName('')
+  }, [editingTabId, editingName, tabs, onUpdateConfig])
+
+  const handleRenameKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') {
+      handleRenameSubmit()
+    } else if (e.key === 'Escape') {
+      setEditingTabId(null)
+      setEditingName('')
+    }
+  }, [handleRenameSubmit])
+
+  // Close the tab context menu on outside click / Escape.
+  useEffect(() => {
+    if (!tabContextMenu) return
+    const handleClickOutside = () => setTabContextMenu(null)
+    const handleEscape = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setTabContextMenu(null)
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    document.addEventListener('keydown', handleEscape)
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside)
+      document.removeEventListener('keydown', handleEscape)
+    }
+  }, [tabContextMenu])
 
   const handleNewTab = useCallback(() => {
     if (!config.sshServerId) return
@@ -206,11 +266,26 @@ export function TerminalPane({
                     handleCloseTab(tab.id)
                   }
                 }}
+                onContextMenu={(e) => handleTabContextMenu(e, tab.id)}
+                onDoubleClick={(e) => { e.stopPropagation(); handleStartRename(tab) }}
                 title={tab.sessionName}
               >
-                <span className="terminal-tab-label">
-                  {tab.label || tab.sessionName}
-                </span>
+                {editingTabId === tab.id ? (
+                  <input
+                    ref={renameInputRef}
+                    type="text"
+                    value={editingName}
+                    onChange={(e) => setEditingName(e.target.value)}
+                    onBlur={handleRenameSubmit}
+                    onKeyDown={handleRenameKeyDown}
+                    onClick={(e) => e.stopPropagation()}
+                    className="terminal-tab-rename-input bg-transparent border-none outline-none text-cs-text"
+                  />
+                ) : (
+                  <span className="terminal-tab-label">
+                    {tab.label || tab.sessionName}
+                  </span>
+                )}
                 {tabs.length > 1 && (
                   <button
                     type="button"
@@ -251,6 +326,7 @@ export function TerminalPane({
           onTabSessionChange={(newName) => handleTabSessionChange(tab.id, newName)}
           onManageSSH={onManageSSH}
           onActivity={handleActivity}
+          onOpenLink={onOpenLink}
         />
       ))}
 
@@ -294,6 +370,33 @@ export function TerminalPane({
           </div>
         </div>
       )}
+
+      {tabContextMenu && (() => {
+        const tab = tabs.find(t => t.id === tabContextMenu.tabId)
+        if (!tab) return null
+        return (
+          <div
+            className="context-menu"
+            style={{
+              left: Math.min(tabContextMenu.x, window.innerWidth - 180),
+              top: Math.min(tabContextMenu.y, window.innerHeight - 100)
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="context-menu-item" onClick={() => handleStartRename(tab)}>
+              <span>Rename</span>
+            </div>
+            {tabs.length > 1 && (
+              <div
+                className="context-menu-item danger"
+                onClick={() => { handleCloseTab(tab.id); setTabContextMenu(null) }}
+              >
+                <span>Close tab</span>
+              </div>
+            )}
+          </div>
+        )
+      })()}
     </div>
   )
 }
