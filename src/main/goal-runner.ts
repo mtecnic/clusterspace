@@ -326,6 +326,7 @@ export class GoalRunner {
             role: 'tool',
             content: typeof result.result === 'string' ? result.result : JSON.stringify(result.result),
             toolCallId: result.toolCallId,
+            toolName: tc.name,
             timestamp: Date.now()
           })
           // Vision grounding: browser actions always warrant a fresh look; other

@@ -235,6 +235,7 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
               suggestion: 'Try a different approach or use list_panes first to see available panes.'
             }),
             toolCallId: toolCall.id,
+            toolName: toolCall.name,
             timestamp: Date.now()
           })
           const t = screenshotTargetFor(toolCall, true)
@@ -245,6 +246,7 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
             role: 'tool',
             content: JSON.stringify(result.result),
             toolCallId: toolCall.id,
+            toolName: toolCall.name,
             timestamp: Date.now()
           })
           const t = screenshotTargetFor(toolCall, false)
@@ -260,6 +262,7 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
             suggestion: 'The tool failed to execute. Please try a different approach.'
           }),
           toolCallId: toolCall.id,
+          toolName: toolCall.name,
           timestamp: Date.now()
         })
         const t = screenshotTargetFor(toolCall, true)

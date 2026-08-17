@@ -135,6 +135,9 @@ export interface AIMessage {
   content: string
   toolCalls?: AIToolCall[]
   toolCallId?: string        // For tool results
+  toolName?: string          // For tool results — the name of the tool that produced this
+                             // result, so the UI can categorize/color it (resolved from the
+                             // original AIToolCall.name, not sent by the model)
   images?: string[]          // Base64 for vision
   autoScreenshot?: boolean   // Auto-captured perceive/verify screenshot; its image is
                              // evicted from context once a newer one arrives (only the
