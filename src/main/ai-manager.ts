@@ -24,7 +24,7 @@ import { promises as fs } from 'fs'
 import { getBrowserWebContents } from './browser-pane-registry'
 import { capturePaneImage as capturePaneImageHelper } from './pane-screenshot'
 import { appendActionLog } from './browser-action-log'
-import { requestApproval, selectorLooksLikePassword } from './browser-approval'
+import { requestApproval, selectorLooksLikePassword, urlIsSensitive } from './browser-approval'
 import { registerAllTools, toolRegistry, type ToolContext, type ToolRuntimeState } from './ai-tools'
 
 // OpenAI-compatible request/response types
@@ -851,20 +851,45 @@ export class AIManager {
       }
 
       // 1b. Legacy regex gate for chat-from-the-AI-panel (no active policy).
-      //     File uploads and password-field typing prompt regardless.
-      const needsGate =
+      //     File uploads, password-field typing, and actions targeting a
+      //     payment/checkout/banking-looking URL prompt regardless.
+      let needsGate =
         !this.activePolicy && (
           toolCall.name === 'browser_set_files' ||
           (toolCall.name === 'browser_type' && typeof args.selector === 'string' && selectorLooksLikePassword(args.selector as string))
         )
+      let sensitiveUrl: string | undefined
+      if (!needsGate && !this.activePolicy && toolCall.name.startsWith('browser_')) {
+        if (toolCall.name === 'browser_navigate' && urlIsSensitive(args.url as string | undefined)) {
+          needsGate = true
+          sensitiveUrl = args.url as string
+        } else if (typeof args.pane_id === 'string') {
+          // Only gate mutating actions (network_write in goal-policy's risk
+          // tiers) on the pane's *current* page — reads (get_content,
+          // screenshot, query, ...) don't need a prompt just for being on a
+          // sensitive page.
+          const { getPermissions } = await import('./goal-policy')
+          if (getPermissions(toolCall.name, args as Record<string, unknown>).risk === 'network_write') {
+            const currentUrl = getBrowserWebContents(args.pane_id)?.getURL()
+            if (urlIsSensitive(currentUrl)) {
+              needsGate = true
+              sensitiveUrl = currentUrl
+            }
+          }
+        }
+      }
       if (needsGate) {
         const approved = await requestApproval(this.window, {
           paneId: args.pane_id as string,
           tool: toolCall.name,
-          description: toolCall.name === 'browser_set_files'
-            ? `Upload files: ${args.paths}`
-            : `Type into password field ${args.selector}`,
-          reason: toolCall.name === 'browser_set_files' ? 'File upload (sensitive)' : 'Password field interaction',
+          description: sensitiveUrl
+            ? `${toolCall.name} on a payment/checkout/banking-looking page: ${sensitiveUrl}`
+            : toolCall.name === 'browser_set_files'
+              ? `Upload files: ${args.paths}`
+              : `Type into password field ${args.selector}`,
+          reason: sensitiveUrl
+            ? 'Sensitive URL (payment/checkout/banking)'
+            : toolCall.name === 'browser_set_files' ? 'File upload (sensitive)' : 'Password field interaction',
           args: args as Record<string, unknown>
         })
         if (!approved) {
