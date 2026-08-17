@@ -523,6 +523,11 @@ export const IPC_CHANNELS = {
   WORKSPACE_CREATE: 'workspace:create',
   WORKSPACE_UPDATE: 'workspace:update',
   WORKSPACE_DELETE: 'workspace:delete',
+  // Pushed main -> renderer when a workspace/pane mutates via a path that
+  // doesn't round-trip through the renderer's own WorkspaceContext actions
+  // (e.g. an AI tool calling workspaceStore.updatePane/create directly) —
+  // WorkspaceContext has no other way to learn about those changes.
+  WORKSPACE_EXTERNAL_UPDATE: 'workspace:external-update',
 
   // Settings channels
   SETTINGS_GET: 'settings:get',

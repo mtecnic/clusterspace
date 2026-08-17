@@ -5,6 +5,20 @@ import { getActionLog } from '../../browser-action-log'
 import { getRecipeStore, runRecipe, type Recipe } from '../../browser-recipes'
 import { toolRegistry } from '../registry'
 import { cdpClickAt } from './_helpers'
+import { IPC_CHANNELS } from '../../../shared/types'
+
+// Tells the renderer's WorkspaceContext to refetch — needed whenever a tool
+// mutates workspaceStore directly (bypassing the renderer's own update
+// actions), since WorkspaceContext otherwise has no way to learn about it.
+// Without this, e.g. converting a pane to a browser updates the persisted
+// config (list_panes sees it) but the renderer never mounts the actual
+// BrowserPane/webview, so every subsequent browser_* call on it fails with
+// "No browser pane with id ..." no matter how many times it's retried.
+export function notifyWorkspaceChanged(window: BrowserWindow, workspaceId: string): void {
+  if (!window.isDestroyed()) {
+    window.webContents.send(IPC_CHANNELS.WORKSPACE_EXTERNAL_UPDATE, workspaceId)
+  }
+}
 
 /**
  * Tier 3 (smart click + recipes + action log) + advanced (cookies / save) +
@@ -265,7 +279,7 @@ export function registerBrowserAdvancedTools(): void {
       },
       required: ['pane_id']
     },
-    run: async ({ pane_id, url }, { workspaceStore, ptyManager }) => {
+    run: async ({ pane_id, url }, { workspaceStore, ptyManager, window }) => {
       const settings = workspaceStore.getSettings()
       if (!settings.activeWorkspaceId) return { success: false, error: 'No active workspace' }
       const workspace = workspaceStore.get(settings.activeWorkspaceId)
@@ -286,11 +300,18 @@ export function registerBrowserAdvancedTools(): void {
         }
         return { success: true, pane_id, url: pane.url }
       }
-      // Tear down the PTY first so we don't leak a shell process.
+      // Tear down the PTY first so we don't leak a shell process. Await it —
+      // otherwise the old process can still be dying while the pane flips to
+      // browser type underneath it.
       const ptyId = ptyManager.getPtyIdForPane(pane_id)
-      if (ptyId) ptyManager.kill(ptyId)
+      if (ptyId) await ptyManager.kill(ptyId)
       const fallbackUrl = url ?? settings.defaultBrowserUrl ?? 'https://www.google.com'
       workspaceStore.updatePane(workspace.id, pane_id, { type: 'browser', url: fallbackUrl })
+      // The renderer's WorkspaceContext doesn't know this pane changed until
+      // told — without this, the actual <BrowserPane>/webview never mounts,
+      // and every browser_* call on pane_id fails "No browser pane with id
+      // ..." indefinitely regardless of retries.
+      notifyWorkspaceChanged(window, workspace.id)
       return { success: true, pane_id, url: fallbackUrl }
     }
   })
@@ -305,7 +326,7 @@ export function registerBrowserAdvancedTools(): void {
       },
       required: ['pane_id']
     },
-    run: async ({ pane_id }, { workspaceStore }) => {
+    run: async ({ pane_id }, { workspaceStore, window }) => {
       const settings = workspaceStore.getSettings()
       if (!settings.activeWorkspaceId) return { success: false, error: 'No active workspace' }
       const workspace = workspaceStore.get(settings.activeWorkspaceId)
@@ -313,6 +334,7 @@ export function registerBrowserAdvancedTools(): void {
       const pane = workspace.panes.find(p => p.id === pane_id)
       if (!pane) return { success: false, error: `Pane ${pane_id} not found` }
       workspaceStore.updatePane(workspace.id, pane_id, { type: 'terminal', url: undefined })
+      notifyWorkspaceChanged(window, workspace.id)
       return { success: true, pane_id }
     }
   })

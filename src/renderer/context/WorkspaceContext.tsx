@@ -72,6 +72,19 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     }
   }, [activeWorkspace])
 
+  // Some workspace/pane mutations happen main-process-side, outside this
+  // context's own actions (e.g. an AI tool converting a pane's type via
+  // convert_pane_to_browser, or creating a workspace via create_workspace).
+  // Without this, list_panes/getWorkspaces would report the new state but
+  // the live UI never re-renders to match it — e.g. a pane the AI just
+  // converted to type "browser" never actually mounts a BrowserPane/webview,
+  // so every subsequent browser_* tool call on it fails indefinitely.
+  useEffect(() => {
+    return window.electronAPI.onWorkspaceExternalUpdate(() => {
+      reloadWorkspaces()
+    })
+  }, [reloadWorkspaces])
+
   const createWorkspace = useCallback(async (name: string, grid: GridConfig): Promise<WorkspaceConfig> => {
     const workspace = await window.electronAPI.createWorkspace(name, grid)
     setWorkspaces(prev => [...prev, workspace])

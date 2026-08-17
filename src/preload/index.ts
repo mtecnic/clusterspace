@@ -73,6 +73,10 @@ export interface ElectronAPI {
   createWorkspace: (name: string, grid: GridConfig) => Promise<WorkspaceConfig>
   updateWorkspace: (id: string, updates: Partial<WorkspaceConfig>) => Promise<WorkspaceConfig | null>
   deleteWorkspace: (id: string) => Promise<boolean>
+  // Fired when a workspace/pane changed via a path that didn't go through
+  // this renderer's own action (e.g. an AI tool converting a pane's type
+  // directly in main). Payload is the affected workspace id.
+  onWorkspaceExternalUpdate: (callback: (workspaceId: string) => void) => () => void
 
   // Settings operations
   getSettings: () => Promise<AppSettings>
@@ -337,6 +341,12 @@ const electronAPI: ElectronAPI = {
 
   deleteWorkspace: (id: string) => {
     return ipcRenderer.invoke(IPC_CHANNELS.WORKSPACE_DELETE, id)
+  },
+
+  onWorkspaceExternalUpdate: (callback: (workspaceId: string) => void) => {
+    const handler = (_event: IpcRendererEvent, workspaceId: string) => callback(workspaceId)
+    ipcRenderer.on(IPC_CHANNELS.WORKSPACE_EXTERNAL_UPDATE, handler)
+    return () => { ipcRenderer.removeListener(IPC_CHANNELS.WORKSPACE_EXTERNAL_UPDATE, handler) }
   },
 
   // Settings operations

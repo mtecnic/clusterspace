@@ -4,6 +4,7 @@ import { toolRegistry } from './registry'
 import { resolvePtyKey } from './tab-util'
 import { capturePaneImageBuffer } from '../pane-screenshot'
 import { saveScreenshotToDisk } from './browser/_helpers'
+import { notifyWorkspaceChanged } from './browser/advanced'
 import type { PtyManager } from '../pty-manager'
 import type { PaneConfig } from '../../shared/types'
 
@@ -150,11 +151,14 @@ export function registerPaneTools(): void {
       },
       required: ['name', 'rows', 'cols']
     },
-    run: async ({ name, rows, cols }, { workspaceStore }) => {
+    run: async ({ name, rows, cols }, { workspaceStore, window }) => {
       const workspace = workspaceStore.create(name, {
         rows: Math.max(1, Math.min(6, rows)),
         cols: Math.max(1, Math.min(6, cols))
       })
+      // The renderer's workspace list doesn't know this exists until told —
+      // same issue as convert_pane_to_browser/terminal (see notifyWorkspaceChanged).
+      notifyWorkspaceChanged(window, workspace.id)
       return `Created workspace "${workspace.name}" with ${rows}x${cols} grid`
     }
   })
