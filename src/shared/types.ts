@@ -642,16 +642,6 @@ export const IPC_CHANNELS = {
   BROWSER_PANE_REGISTER: 'browser:pane:register',
   BROWSER_PANE_UNREGISTER: 'browser:pane:unregister',
 
-  // AI-callable browser-control verbs
-  AI_BROWSER_NAVIGATE: 'ai:browser:navigate',
-  AI_BROWSER_GET_CONTENT: 'ai:browser:get-content',
-  AI_BROWSER_SCREENSHOT: 'ai:browser:screenshot',
-  AI_BROWSER_EXECUTE_JS: 'ai:browser:execute-js',
-  AI_BROWSER_CLICK: 'ai:browser:click',
-  AI_BROWSER_TYPE: 'ai:browser:type',
-  AI_BROWSER_BACK: 'ai:browser:back',
-  AI_BROWSER_FORWARD: 'ai:browser:forward',
-  AI_BROWSER_RELOAD: 'ai:browser:reload',
 } as const
 
 // AI tool result shapes for browser control

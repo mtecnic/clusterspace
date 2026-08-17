@@ -241,18 +241,6 @@ export interface ElectronAPI {
   registerBrowserPane: (paneId: string, webContentsId: number) => void
   unregisterBrowserPane: (paneId: string) => void
 
-  // AI-driven browser control (called by AIManager from main, but also exposed
-  // here so renderer-side code can introspect / debug if needed)
-  aiBrowserNavigate: (paneId: string, url: string) => Promise<{ success: boolean; error?: string }>
-  aiBrowserGetContent: (paneId: string) => Promise<{ success: boolean; url?: string; title?: string; text?: string; error?: string }>
-  aiBrowserScreenshot: (paneId: string) => Promise<string | null>
-  aiBrowserExecuteJs: (paneId: string, code: string) => Promise<{ success: boolean; result?: unknown; error?: string }>
-  aiBrowserClick: (paneId: string, selector: string) => Promise<{ success: boolean; found?: boolean; error?: string }>
-  aiBrowserType: (paneId: string, selector: string, text: string, submit?: boolean) => Promise<{ success: boolean; found?: boolean; error?: string }>
-  aiBrowserBack: (paneId: string) => Promise<boolean>
-  aiBrowserForward: (paneId: string) => Promise<boolean>
-  aiBrowserReload: (paneId: string) => Promise<boolean>
-
   // Tier 3: action log + approval gates + recipes
   getBrowserActionLog: (paneId?: string, limit?: number) => Promise<Array<{ id: number; paneId: string; tool: string; args: Record<string, unknown>; ok: boolean; durationMs: number; error?: string; timestamp: number }>>
   onBrowserActionLog: (callback: (entry: { id: number; paneId: string; tool: string; args: Record<string, unknown>; ok: boolean; durationMs: number; error?: string; timestamp: number }) => void) => () => void
@@ -807,16 +795,6 @@ const electronAPI: ElectronAPI = {
 
   registerBrowserPane: (paneId, webContentsId) => ipcRenderer.send(IPC_CHANNELS.BROWSER_PANE_REGISTER, paneId, webContentsId),
   unregisterBrowserPane: (paneId) => ipcRenderer.send(IPC_CHANNELS.BROWSER_PANE_UNREGISTER, paneId),
-
-  aiBrowserNavigate: (paneId, url) => ipcRenderer.invoke(IPC_CHANNELS.AI_BROWSER_NAVIGATE, paneId, url),
-  aiBrowserGetContent: (paneId) => ipcRenderer.invoke(IPC_CHANNELS.AI_BROWSER_GET_CONTENT, paneId),
-  aiBrowserScreenshot: (paneId) => ipcRenderer.invoke(IPC_CHANNELS.AI_BROWSER_SCREENSHOT, paneId),
-  aiBrowserExecuteJs: (paneId, code) => ipcRenderer.invoke(IPC_CHANNELS.AI_BROWSER_EXECUTE_JS, paneId, code),
-  aiBrowserClick: (paneId, selector) => ipcRenderer.invoke(IPC_CHANNELS.AI_BROWSER_CLICK, paneId, selector),
-  aiBrowserType: (paneId, selector, text, submit) => ipcRenderer.invoke(IPC_CHANNELS.AI_BROWSER_TYPE, paneId, selector, text, submit),
-  aiBrowserBack: (paneId) => ipcRenderer.invoke(IPC_CHANNELS.AI_BROWSER_BACK, paneId),
-  aiBrowserForward: (paneId) => ipcRenderer.invoke(IPC_CHANNELS.AI_BROWSER_FORWARD, paneId),
-  aiBrowserReload: (paneId) => ipcRenderer.invoke(IPC_CHANNELS.AI_BROWSER_RELOAD, paneId),
 
   getBrowserActionLog: (paneId, limit) => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_ACTION_LOG_GET, paneId, limit),
   onBrowserActionLog: (callback) => {
