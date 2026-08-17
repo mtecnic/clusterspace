@@ -164,6 +164,7 @@ const BUILTIN_PERMISSIONS: Record<string, ToolPermissions> = {
   browser_click: { risk: 'network_write' },
   browser_smart_click: { risk: 'network_write' },
   browser_click_at: { risk: 'network_write' },
+  browser_click_by_index: { risk: 'network_write' },
   browser_type: { risk: 'network_write' },
   browser_keypress: { risk: 'network_write' },
   browser_select_option: { risk: 'network_write' },

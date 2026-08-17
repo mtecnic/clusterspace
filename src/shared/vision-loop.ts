@@ -20,9 +20,10 @@ export const MAX_CONTEXT_SCREENSHOTS = 3
 // Browser tools whose visible/DOM result is the ground truth — re-observe after each.
 export const BROWSER_ACTION_TOOLS: ReadonlySet<string> = new Set([
   'browser_navigate', 'browser_click', 'browser_click_at', 'browser_smart_click',
-  'browser_type', 'browser_keypress', 'browser_scroll', 'browser_select_option',
-  'browser_check', 'browser_hover', 'browser_drag', 'browser_set_files',
-  'browser_back', 'browser_forward', 'browser_reload', 'browser_run_recipe'
+  'browser_click_by_index', 'browser_type', 'browser_keypress', 'browser_scroll',
+  'browser_select_option', 'browser_check', 'browser_hover', 'browser_drag',
+  'browser_set_files', 'browser_back', 'browser_forward', 'browser_reload',
+  'browser_run_recipe'
 ])
 
 export function isBrowserActionTool(name: string): boolean {

@@ -865,10 +865,11 @@ Some tools return a paged envelope: \`{success, content, hasMore, nextCursor, to
 Core (Tier 1-2):
 - browser_navigate: Load a URL
 - browser_get_content: Get visible text + url + title
-- browser_screenshot / browser_screenshot_full_page / browser_screenshot_annotated: Visual capture (annotated overlays numbered red boxes on selectors for "click box N" decisions)
-- browser_get_axtree: Page accessibility tree — PREFER THIS over HTML for understanding structure. Compact, semantic, stable across redesigns.
-- browser_click / browser_smart_click: Click an element. smart_click tries selector → aria-label → role+text → visible text fallbacks.
-- browser_click_at(x,y): Coordinate click for canvas / shadow DOM / vision-driven flows.
+- browser_screenshot / browser_screenshot_full_page: Visual capture (metadata only — you cannot see these)
+- browser_screenshot_annotated: Visual capture with numbered red boxes overlaid. Pass \`selectors\` to label specific elements you already found, or omit \`selectors\` entirely to auto-detect interactive elements on the page (links, buttons, inputs, etc.) — this is the Set-of-Mark mode for when you don't have selectors yet, e.g. a purely visual/unfamiliar page. Follow up with **browser_click_by_index(pane_id, index)** to click by the number you see in the image instead of guessing coordinates or transcribing a selector. Prefer this index-based flow over browser_click_at when you're grounding purely from a screenshot.
+- browser_get_axtree: Page accessibility tree — PREFER THIS over a screenshot for understanding structure when selectors matter. Compact, semantic, stable across redesigns.
+- browser_click / browser_smart_click: Click an element by selector. smart_click tries selector → aria-label → role+text → visible text fallbacks.
+- browser_click_at(x,y): Coordinate click for canvas / shadow DOM when you already know exact pixel coordinates.
 - browser_type: Fill input/textarea (optionally submits form)
 - browser_keypress: Send Enter/Tab/Escape/Backspace/ArrowKeys with optional modifiers
 - browser_select_option, browser_check: <select> and checkbox/radio
