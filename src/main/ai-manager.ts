@@ -541,56 +541,16 @@ export class AIManager {
       const data = await response.json() as ChatCompletionResponse
       const choice = data.choices[0]
 
-      // Parse tool calls with error handling
+      // Parse tool calls, with the same salvage passes the streaming path uses
+      // for malformed JSON (see parseToolArguments).
       const parsedToolCalls: AIToolCall[] = []
       if (choice.message.tool_calls) {
         for (const tc of choice.message.tool_calls) {
-          try {
-            parsedToolCalls.push({
-              id: tc.id,
-              name: tc.function.name,
-              arguments: JSON.parse(tc.function.arguments)
-            })
-          } catch (parseError) {
-            console.error('[AI] Failed to parse tool call arguments:', {
-              name: tc.function.name,
-              arguments: tc.function.arguments,
-              error: parseError
-            })
-            // Try to salvage - common issue is extra closing braces
-            let salvaged = tc.function.arguments.trim()
-            const openBraces = (salvaged.match(/\{/g) || []).length
-            const closeBraces = (salvaged.match(/\}/g) || []).length
-            if (closeBraces > openBraces) {
-              const excess = closeBraces - openBraces
-              for (let i = 0; i < excess; i++) {
-                salvaged = salvaged.replace(/\}([^}]*)$/, '$1')
-              }
-            }
-            try {
-              parsedToolCalls.push({
-                id: tc.id,
-                name: tc.function.name,
-                arguments: JSON.parse(salvaged)
-              })
-              console.log('[AI] Salvaged tool call arguments by fixing brace imbalance')
-            } catch {
-              const jsonMatch = salvaged.match(/\{[^{}]*\}/)
-              if (jsonMatch) {
-                try {
-                  parsedToolCalls.push({
-                    id: tc.id,
-                    name: tc.function.name,
-                    arguments: JSON.parse(jsonMatch[0])
-                  })
-                  console.log('[AI] Salvaged tool call with simple object extraction')
-                } catch {
-                  console.error('[AI] Could not salvage tool call arguments')
-                }
-              } else {
-                console.error('[AI] Could not salvage tool call arguments')
-              }
-            }
+          const args = this.parseToolArguments(tc.function.arguments)
+          if (args) {
+            parsedToolCalls.push({ id: tc.id, name: tc.function.name, arguments: args })
+          } else {
+            console.error('[AI] Could not salvage tool call arguments:', { name: tc.function.name, arguments: tc.function.arguments })
           }
         }
       }
