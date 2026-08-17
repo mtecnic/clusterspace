@@ -255,6 +255,29 @@ export class GoalRunner {
     return true
   }
 
+  // runLoop already checks state.pauseRequested every iteration (sleeps in
+  // POLL_INTERVAL_MS*5 increments while true) — this was dead capability
+  // with no public method to actually set the flag. pause/resume just flip
+  // it and mirror the status onto the persisted checkpoint so GoalDashboard
+  // reflects it without waiting for the next step event.
+  pause(goalId: string): boolean {
+    const r = this.running.get(goalId)
+    if (!r || r.state.kind !== 'running' || r.state.pauseRequested) return false
+    r.state.pauseRequested = true
+    this.goalStore.update(goalId, { status: 'paused' })
+    this.emitEvent({ type: 'paused', goalId })
+    return true
+  }
+
+  resume(goalId: string): boolean {
+    const r = this.running.get(goalId)
+    if (!r || r.state.kind !== 'running' || !r.state.pauseRequested) return false
+    r.state.pauseRequested = false
+    this.goalStore.update(goalId, { status: 'running' })
+    this.emitEvent({ type: 'resumed', goalId })
+    return true
+  }
+
   status(goalId: string): { status: GoalCheckpoint['status']; step: number; lastStep?: GoalCheckpoint['steps'][number] } | null {
     const checkpoint = this.goalStore.get(goalId)
     if (!checkpoint) return null
@@ -757,4 +780,6 @@ export type GoalRunnerEvent =
   | { type: 'step'; goalId: string; tool: string; ok: boolean; preview: string }
   | { type: 'verification_failed'; goalId: string; detail: string }
   | { type: 'critic'; goalId: string; verdict: string; reason: string }
+  | { type: 'paused'; goalId: string }
+  | { type: 'resumed'; goalId: string }
   | { type: 'ended'; goalId: string; status: GoalCheckpoint['status']; finalReport: string }

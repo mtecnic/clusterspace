@@ -937,6 +937,16 @@ function registerIpcHandlers() {
     catch { return false }
   })
 
+  ipcMain.handle('goal:pause', async (_e, id: string) => {
+    try { return goalRunner?.pause(id) ?? false }
+    catch { return false }
+  })
+
+  ipcMain.handle('goal:resume', async (_e, id: string) => {
+    try { return goalRunner?.resume(id) ?? false }
+    catch { return false }
+  })
+
   ipcMain.handle('goal:status', async (_e, id: string) => {
     try { return goalRunner?.status(id) ?? null }
     catch { return null }

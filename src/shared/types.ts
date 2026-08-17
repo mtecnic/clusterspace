@@ -386,6 +386,8 @@ export type GoalRunnerEvent =
   | { type: 'step'; goalId: string; tool: string; ok: boolean; preview: string }
   | { type: 'verification_failed'; goalId: string; detail: string }
   | { type: 'critic'; goalId: string; verdict: string; reason: string }
+  | { type: 'paused'; goalId: string }
+  | { type: 'resumed'; goalId: string }
   | { type: 'ended'; goalId: string; status: GoalStatus; finalReport: string }
 
 // ============= End GoalRunner Types =============

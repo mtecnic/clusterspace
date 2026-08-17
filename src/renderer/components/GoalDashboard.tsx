@@ -79,6 +79,8 @@ export function GoalDashboard({ isOpen, onClose, panes }: GoalDashboardProps) {
       switch (event.type) {
         case 'started':
         case 'ended':
+        case 'paused':
+        case 'resumed':
           refresh()
           break
         case 'step':
@@ -142,6 +144,16 @@ export function GoalDashboard({ isOpen, onClose, panes }: GoalDashboardProps) {
     if (!window.confirm('Abort this goal? The runner will exit at the next checkpoint.')) return
     await window.electronAPI.abortGoal(id)
     setTimeout(refresh, 500)
+  }
+
+  const handlePause = async (id: string) => {
+    await window.electronAPI.pauseGoalRun(id)
+    refresh()
+  }
+
+  const handleResume = async (id: string) => {
+    await window.electronAPI.resumeGoalRun(id)
+    refresh()
   }
 
   const handleDelete = async (id: string) => {
@@ -271,6 +283,23 @@ export function GoalDashboard({ isOpen, onClose, panes }: GoalDashboardProps) {
                     </div>
                     <div className="flex flex-col gap-2 shrink-0">
                       {selectedGoal.status === 'running' && (
+                        <button
+                          onClick={() => handlePause(selectedGoal.id)}
+                          className="px-3 py-1 text-xs bg-yellow-600 hover:bg-yellow-500 text-white rounded transition-colors"
+                          title="Pause after the current step — the loop stops making tool calls until resumed"
+                        >
+                          Pause
+                        </button>
+                      )}
+                      {selectedGoal.status === 'paused' && (
+                        <button
+                          onClick={() => handleResume(selectedGoal.id)}
+                          className="px-3 py-1 text-xs bg-blue-600 hover:bg-blue-500 text-white rounded transition-colors"
+                        >
+                          Resume
+                        </button>
+                      )}
+                      {(selectedGoal.status === 'running' || selectedGoal.status === 'paused') && (
                         <button
                           onClick={() => handleAbort(selectedGoal.id)}
                           className="px-3 py-1 text-xs bg-red-600 hover:bg-red-500 text-white rounded transition-colors"
