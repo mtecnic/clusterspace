@@ -1,6 +1,17 @@
 import { BrowserWindow, Rectangle } from 'electron'
 import { getBrowserWebContents } from './browser-pane-registry'
 
+interface CaptureResult {
+  image: Electron.NativeImage
+  // True when no specific pane was requested, or a requested pane was
+  // actually found (browser webContents or a resolved DOM rect). False
+  // means paneId was given but couldn't be resolved (e.g. hidden behind a
+  // maximized sibling) and `image` is a full-window fallback — callers that
+  // need to guarantee "this is the pane you asked for" should treat false
+  // as a failure rather than silently handing back the wrong pane's pixels.
+  resolvedRequestedPane: boolean
+}
+
 /**
  * Capture a screenshot of a *specific pane* (cropped) or the whole window.
  *
@@ -11,7 +22,34 @@ import { getBrowserWebContents } from './browser-pane-registry'
  *   pixel bounds (only grid slots), so we ask the renderer for the pane cell's
  *   `getBoundingClientRect()` via `executeJavaScript`.
  * - No paneId, or the rect can't be resolved (e.g. another pane is maximized so
- *   the target isn't in the DOM), falls back to a full-window capture.
+ *   the target isn't in the DOM), falls back to a full-window capture and
+ *   reports `resolvedRequestedPane: false` (see CaptureResult).
+ */
+async function capturePaneNativeImage(window: BrowserWindow, paneId?: string): Promise<CaptureResult | null> {
+  if (!window || window.isDestroyed()) return null
+  try {
+    if (paneId) {
+      const wc = getBrowserWebContents(paneId)
+      if (wc && !wc.isDestroyed()) {
+        return { image: await wc.capturePage(), resolvedRequestedPane: true }
+      }
+      const rect = await getPaneRect(window, paneId)
+      if (rect) {
+        return { image: await window.webContents.capturePage(rect), resolvedRequestedPane: true }
+      }
+      return { image: await window.webContents.capturePage(), resolvedRequestedPane: false }
+    }
+    return { image: await window.webContents.capturePage(), resolvedRequestedPane: true }
+  } catch (err) {
+    console.error('[AI] capturePaneImage failed:', err)
+    return null
+  }
+}
+
+/**
+ * Data-URL variant, used by the vision loop (screenshots attached directly
+ * to a chat message as inline image content) — lenient about an unresolved
+ * pane falling back to a full-window shot, matching prior behavior.
  *
  * Returns a data URL, or null if capture fails.
  */
@@ -20,32 +58,41 @@ export async function capturePaneImage(
   paneId?: string,
   opts?: { maxWidth?: number }
 ): Promise<string | null> {
-  if (!window || window.isDestroyed()) return null
-  try {
-    if (paneId) {
-      const wc = getBrowserWebContents(paneId)
-      if (wc && !wc.isDestroyed()) {
-        return toDataUrl(await wc.capturePage(), opts?.maxWidth)
-      }
-      const rect = await getPaneRect(window, paneId)
-      if (rect) {
-        return toDataUrl(await window.webContents.capturePage(rect), opts?.maxWidth)
-      }
-      // else: fall through to full-window capture
-    }
-    return toDataUrl(await window.webContents.capturePage(), opts?.maxWidth)
-  } catch (err) {
-    console.error('[AI] capturePaneImage failed:', err)
-    return null
-  }
+  const result = await capturePaneNativeImage(window, paneId)
+  if (!result) return null
+  return toDataUrl(result.image, opts?.maxWidth)
+}
+
+/**
+ * PNG-buffer variant, for AI tools (capture_screenshot) that save the image
+ * to disk and return a small {path, width, height, bytes} envelope instead
+ * of inlining base64 — keeps large screenshots out of the tool-result JSON,
+ * where executeTool's blanket truncation could otherwise corrupt them.
+ * Unlike capturePaneImage, this reports resolvedRequestedPane so the tool
+ * can fail loudly instead of silently returning the wrong pane's image.
+ */
+export async function capturePaneImageBuffer(
+  window: BrowserWindow,
+  paneId?: string,
+  opts?: { maxWidth?: number }
+): Promise<{ buffer: Buffer; width: number; height: number; resolvedRequestedPane: boolean } | null> {
+  const result = await capturePaneNativeImage(window, paneId)
+  if (!result) return null
+  const resized = resizeIfNeeded(result.image, opts?.maxWidth)
+  const size = resized.getSize()
+  return { buffer: resized.toPNG(), width: size.width, height: size.height, resolvedRequestedPane: result.resolvedRequestedPane }
 }
 
 // Downscale wide captures to bound the token cost of vision requests.
-function toDataUrl(image: Electron.NativeImage, maxWidth?: number): string {
+function resizeIfNeeded(image: Electron.NativeImage, maxWidth?: number): Electron.NativeImage {
   if (maxWidth && image.getSize().width > maxWidth) {
-    return image.resize({ width: maxWidth }).toDataURL()
+    return image.resize({ width: maxWidth })
   }
-  return image.toDataURL()
+  return image
+}
+
+function toDataUrl(image: Electron.NativeImage, maxWidth?: number): string {
+  return resizeIfNeeded(image, maxWidth).toDataURL()
 }
 
 async function getPaneRect(window: BrowserWindow, paneId: string): Promise<Rectangle | null> {
