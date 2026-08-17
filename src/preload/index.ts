@@ -132,7 +132,8 @@ export interface ElectronAPI {
     systemPrompt?: string,
     temperature?: number,
     maxTokens?: number,
-    enableThinking?: boolean
+    enableThinking?: boolean,
+    toolChoice?: 'auto' | 'required'
   ) => Promise<AIProviderConfig>
   updateAIProvider: (
     id: string,
@@ -470,7 +471,8 @@ const electronAPI: ElectronAPI = {
     systemPrompt?: string,
     temperature?: number,
     maxTokens?: number,
-    enableThinking?: boolean
+    enableThinking?: boolean,
+    toolChoice?: 'auto' | 'required'
   ) => {
     return ipcRenderer.invoke(
       IPC_CHANNELS.AI_PROVIDERS_CREATE,
@@ -482,7 +484,8 @@ const electronAPI: ElectronAPI = {
       systemPrompt,
       temperature,
       maxTokens,
-      enableThinking
+      enableThinking,
+      toolChoice
     )
   },
 

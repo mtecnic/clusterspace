@@ -16,7 +16,7 @@ import {
   dispatchReconnect
 } from '../lib/pane-controls'
 import { screenshotTargetFor, MAX_CONTEXT_SCREENSHOTS } from '@shared/vision-loop'
-import { createLoopGuardState, checkBeforeCall, recordOutcome, checkNarrativeMismatch } from '@shared/loop-guard'
+import { createLoopGuardState, checkBeforeCall, recordOutcome, checkNarrativeMismatch, batchIsParallelSafe } from '@shared/loop-guard'
 
 // Immutable version of evictPriorScreenshots: returns a new array where all
 // but the newest (MAX_CONTEXT_SCREENSHOTS - 1) auto-screenshot messages have
@@ -262,40 +262,16 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
     let cancelled = false
     const dispatchedOks: boolean[] = []
 
-    for (const toolCall of toolCalls) {
-      // Mid-execution interrupt: stop dispatching further calls in this
-      // batch once the user hits Stop/Esc. Can't abort a call already in
-      // flight (no per-tool cancellation signal exists), but this stops the
-      // next one from starting and stops the loop from reaching another
-      // model turn — previously Stop only worked during token streaming.
-      if (cancelRequestedRef.current) { cancelled = true; break }
-
-      // Circuit breaker / duplicate-call guard — check before dispatch, skip
-      // the IPC round-trip entirely when blocked.
-      const block = checkBeforeCall(guardStateRef.current, toolCall.name, toolCall.arguments)
-      if (block) {
-        hasErrors = true
-        toolResults.push({
-          id: uuidv4(),
-          role: 'tool',
-          content: JSON.stringify({ success: false, blocked: true, error: block.reason }),
-          toolCallId: toolCall.id,
-          toolName: toolCall.name,
-          timestamp: Date.now()
-        })
-        if (block.haltLoop) { haltRequested = true; break }
-        continue
-      }
-
+    // Dispatch one already-guard-checked tool call and return its outcome
+    // without mutating any of the outer batch state — callers (sequential or
+    // parallel) merge the result themselves, in order, so message ordering
+    // stays deterministic regardless of dispatch strategy.
+    const dispatchOne = async (toolCall: AIToolCall): Promise<{ ok: boolean; messages: AIMessage[]; shotTarget: string | null }> => {
       try {
         const result = await window.electronAPI.aiExecuteTool(toolCall)
-
-        // Check if tool returned an error
         if (result.error) {
-          hasErrors = true
-          dispatchedOks.push(false)
           const disabledMsg = recordOutcome(guardStateRef.current, toolCall.name, false)
-          toolResults.push({
+          const msgs: AIMessage[] = [{
             id: uuidv4(),
             role: 'tool',
             content: JSON.stringify({
@@ -305,31 +281,26 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
             toolCallId: toolCall.id,
             toolName: toolCall.name,
             timestamp: Date.now()
-          })
-          if (disabledMsg) {
-            toolResults.push({ id: uuidv4(), role: 'system', content: disabledMsg, timestamp: Date.now() })
-          }
-          const t = screenshotTargetFor(toolCall, true)
-          if (t) shotPaneAfterBatch = t
-        } else {
-          dispatchedOks.push(true)
-          recordOutcome(guardStateRef.current, toolCall.name, true)
-          toolResults.push({
+          }]
+          if (disabledMsg) msgs.push({ id: uuidv4(), role: 'system', content: disabledMsg, timestamp: Date.now() })
+          return { ok: false, messages: msgs, shotTarget: screenshotTargetFor(toolCall, true) }
+        }
+        recordOutcome(guardStateRef.current, toolCall.name, true)
+        return {
+          ok: true,
+          messages: [{
             id: uuidv4(),
             role: 'tool',
             content: JSON.stringify(result.result),
             toolCallId: toolCall.id,
             toolName: toolCall.name,
             timestamp: Date.now()
-          })
-          const t = screenshotTargetFor(toolCall, false)
-          if (t) shotPaneAfterBatch = t
+          }],
+          shotTarget: screenshotTargetFor(toolCall, false)
         }
       } catch (err) {
-        hasErrors = true
-        dispatchedOks.push(false)
         const disabledMsg = recordOutcome(guardStateRef.current, toolCall.name, false)
-        toolResults.push({
+        const msgs: AIMessage[] = [{
           id: uuidv4(),
           role: 'tool',
           content: JSON.stringify({
@@ -339,12 +310,64 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
           toolCallId: toolCall.id,
           toolName: toolCall.name,
           timestamp: Date.now()
-        })
-        if (disabledMsg) {
-          toolResults.push({ id: uuidv4(), role: 'system', content: disabledMsg, timestamp: Date.now() })
+        }]
+        if (disabledMsg) msgs.push({ id: uuidv4(), role: 'system', content: disabledMsg, timestamp: Date.now() })
+        return { ok: false, messages: msgs, shotTarget: screenshotTargetFor(toolCall, true) }
+      }
+    }
+
+    const mergeOutcome = (r: { ok: boolean; messages: AIMessage[]; shotTarget: string | null }) => {
+      if (!r.ok) hasErrors = true
+      dispatchedOks.push(r.ok)
+      toolResults.push(...r.messages)
+      if (r.shotTarget) shotPaneAfterBatch = r.shotTarget
+    }
+
+    // Guard-check every call up front, sequentially — duplicate-call
+    // counting needs to see the whole batch in order (two identical calls
+    // in the same batch must count as a repeat), regardless of how the
+    // non-blocked ones are dispatched below.
+    const planned: Array<{ toolCall: AIToolCall; block: ReturnType<typeof checkBeforeCall> }> = []
+    for (const toolCall of toolCalls) {
+      planned.push({ toolCall, block: checkBeforeCall(guardStateRef.current, toolCall.name, toolCall.arguments) })
+    }
+    for (const { toolCall, block } of planned) {
+      if (!block) continue
+      hasErrors = true
+      toolResults.push({
+        id: uuidv4(),
+        role: 'tool',
+        content: JSON.stringify({ success: false, blocked: true, error: block.reason }),
+        toolCallId: toolCall.id,
+        toolName: toolCall.name,
+        timestamp: Date.now()
+      })
+      if (block.haltLoop) haltRequested = true
+    }
+
+    if (!haltRequested) {
+      const toDispatch = planned.filter(p => !p.block).map(p => p.toolCall)
+      // Only a batch of exclusively read-only/observational calls (see
+      // isParallelSafeTool) gets parallelized — mutating calls, and any
+      // batch mixing the two, stay strictly sequential so ordering/side-
+      // effect assumptions the model may be relying on aren't broken.
+      if (batchIsParallelSafe(toDispatch)) {
+        if (!cancelRequestedRef.current) {
+          const results = await Promise.all(toDispatch.map(dispatchOne))
+          for (const r of results) mergeOutcome(r)
+        } else {
+          cancelled = true
         }
-        const t = screenshotTargetFor(toolCall, true)
-        if (t) shotPaneAfterBatch = t
+      } else {
+        for (const toolCall of toDispatch) {
+          // Mid-execution interrupt: stop dispatching further calls in this
+          // batch once the user hits Stop/Esc. Can't abort a call already in
+          // flight (no per-tool cancellation signal exists), but this stops
+          // the next one from starting and stops the loop from reaching
+          // another model turn — previously Stop only worked mid-stream.
+          if (cancelRequestedRef.current) { cancelled = true; break }
+          mergeOutcome(await dispatchOne(toolCall))
+        }
       }
     }
 

@@ -35,6 +35,7 @@ export function AISettingsDialog({ isOpen, onClose }: AISettingsDialogProps) {
   const [temperature, setTemperature] = useState(0.7)
   const [maxTokens, setMaxTokens] = useState(4096)
   const [enableThinking, setEnableThinking] = useState<boolean | undefined>(undefined)
+  const [toolChoice, setToolChoice] = useState<'auto' | 'required' | undefined>(undefined)
 
   // Quick Add state
   const [quickAddIp, setQuickAddIp] = useState('')
@@ -67,6 +68,7 @@ export function AISettingsDialog({ isOpen, onClose }: AISettingsDialogProps) {
     setTemperature(0.7)
     setMaxTokens(4096)
     setEnableThinking(false)  // New providers default to thinking off (faster; avoids Qwen empty-response stalls)
+    setToolChoice(undefined)
     setTestResult(null)
     setQuickAddIp('')
     setDiscoveredModels([])
@@ -122,6 +124,7 @@ export function AISettingsDialog({ isOpen, onClose }: AISettingsDialogProps) {
     setTemperature(provider.temperature ?? 0.7)
     setMaxTokens(provider.maxTokens ?? 4096)
     setEnableThinking(provider.enableThinking)
+    setToolChoice(provider.toolChoice)
     setTestResult(null)
     setMode('edit')
   }
@@ -173,7 +176,8 @@ export function AISettingsDialog({ isOpen, onClose }: AISettingsDialogProps) {
           systemPrompt,
           temperature,
           maxTokens,
-          enableThinking
+          enableThinking,
+          toolChoice
         )
       } else if (mode === 'edit' && editingProvider) {
         await window.electronAPI.updateAIProvider(
@@ -186,7 +190,8 @@ export function AISettingsDialog({ isOpen, onClose }: AISettingsDialogProps) {
             systemPrompt,
             temperature,
             maxTokens,
-            enableThinking
+            enableThinking,
+            toolChoice
           },
           apiKey || undefined
         )
@@ -524,6 +529,24 @@ export function AISettingsDialog({ isOpen, onClose }: AISettingsDialogProps) {
                 <p className="text-xs text-cs-text-secondary mt-1">
                   Sends chat_template_kwargs.enable_thinking. Works with Qwen3/Qwen3.5 on
                   vLLM/SGLang; ignored by models that don't support it.
+                </p>
+              </div>
+
+              {/* Tool choice */}
+              <div className="form-group">
+                <label className="form-label">Tool Calling</label>
+                <select
+                  value={toolChoice ?? 'auto'}
+                  onChange={(e) => setToolChoice(e.target.value === 'required' ? 'required' : undefined)}
+                  className="form-input"
+                >
+                  <option value="auto">Auto (model decides whether to call a tool)</option>
+                  <option value="required">Required (must call a tool every turn)</option>
+                </select>
+                <p className="text-xs text-cs-text-secondary mt-1">
+                  Sends OpenAI-compatible tool_choice. "Required" is useful for agentic
+                  personas that should never just answer with plain text — ignored by
+                  servers that don't support it.
                 </p>
               </div>
 

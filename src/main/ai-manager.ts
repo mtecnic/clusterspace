@@ -41,6 +41,10 @@ interface ChatCompletionRequest {
   stream?: boolean
   temperature?: number
   max_tokens?: number
+  // 'auto' (default) lets the model decide; 'required' forces it to call a
+  // tool every turn instead of answering with plain text — useful for
+  // agentic personas that should never just "talk" without acting.
+  tool_choice?: 'auto' | 'required'
   // vLLM/SGLang chat-template passthrough. Qwen3/Qwen3.5 read
   // enable_thinking here to toggle their reasoning mode.
   chat_template_kwargs?: { enable_thinking?: boolean }
@@ -1114,6 +1118,13 @@ export class AIManager {
       stream,
       temperature: config.temperature ?? 0.7,
       max_tokens: config.maxTokens ?? 4096
+    }
+
+    // Only send when explicitly set to 'required' — omitting tool_choice
+    // entirely (the 'auto' case) matches prior behavior and avoids sending
+    // an unrecognized field to servers that don't support it.
+    if (config.toolChoice === 'required') {
+      request.tool_choice = 'required'
     }
 
     // Only send the thinking toggle when explicitly configured. Leaving it

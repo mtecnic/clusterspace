@@ -112,6 +112,9 @@ export interface AIProviderConfig {
   // true/false = send chat_template_kwargs.enable_thinking. No-op on models
   // that don't read it (e.g. non-Qwen), so it's safe to leave unset.
   enableThinking?: boolean
+  // OpenAI-compatible tool_choice. undefined/'auto' = model decides whether
+  // to call a tool or just answer; 'required' forces a tool call every turn.
+  toolChoice?: 'auto' | 'required'
   createdAt: number
   updatedAt: number
 }

@@ -165,3 +165,31 @@ export function isVerificationTool(name: string): boolean {
 export function isMutatingTool(name: string): boolean {
   return isBrowserActionTool(name) || name === 'write_to_terminal'
 }
+
+// Tools safe to dispatch concurrently within a single batch — pure reads/
+// observations with no meaningful ordering dependency between two calls of
+// this set. Deliberately excludes declare_step/verify_step despite being
+// read-only risk-wise (goal-policy.ts): their correctness depends on call
+// order within a batch (verify_step assumes declare_step already ran).
+// Also excludes every mutating/write tool — anything not in this list stays
+// strictly sequential, which is the safe default.
+const PARALLEL_SAFE_TOOLS: ReadonlySet<string> = new Set([
+  'list_panes', 'capture_screenshot', 'get_fleet_status',
+  'read_terminal_output', 'poll_terminal_status', 'wait_for_output',
+  'browser_get_content', 'browser_get_axtree', 'browser_query', 'browser_query_all',
+  'browser_screenshot', 'browser_screenshot_full_page', 'browser_screenshot_annotated',
+  'browser_get_action_log', 'browser_get_cookies', 'browser_verify_visual_state',
+  'browser_describe_screen', 'browser_wait_for_selector', 'browser_wait_for_navigation',
+  'browser_wait_for_text', 'browser_list_recipes'
+])
+
+export function isParallelSafeTool(name: string): boolean {
+  return PARALLEL_SAFE_TOOLS.has(name)
+}
+
+/** True when every call in the batch is parallel-safe and there's more than
+ *  one — a single call gains nothing from Promise.all and this keeps the
+ *  common case on the simpler sequential path. */
+export function batchIsParallelSafe(toolCalls: ReadonlyArray<{ name: string }>): boolean {
+  return toolCalls.length > 1 && toolCalls.every(tc => isParallelSafeTool(tc.name))
+}
