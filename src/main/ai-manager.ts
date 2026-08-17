@@ -787,6 +787,32 @@ export class AIManager {
       if (result.length <= maxChars) return result
       return result.slice(0, 2000) + '\n\n...[truncated middle section]...\n\n' + result.slice(-500)
     }
+    if (Array.isArray(result)) {
+      const json = JSON.stringify(result)
+      if (json.length <= maxChars) return result
+      // Trim by item count instead of slicing the JSON text. Mid-string
+      // truncation on an array (e.g. list_panes' pane list) can chop an
+      // item's id/url in half, and the model has no way to tell a truncated
+      // field from a real one — it'll happily call a follow-up tool with a
+      // corrupted id. Every included item here is complete and untouched;
+      // always includes at least one item even if it alone exceeds budget.
+      const kept: unknown[] = []
+      let size = 2 // "[]"
+      for (const item of result) {
+        const itemJson = JSON.stringify(item)
+        if (size + itemJson.length + 1 > maxChars && kept.length > 0) break
+        kept.push(item)
+        size += itemJson.length + 1
+      }
+      console.log(`[AI] Truncating large array tool result from ${result.length} items (${json.length} chars) to ${kept.length} items`)
+      return {
+        items: kept,
+        truncated: true,
+        totalCount: result.length,
+        returnedCount: kept.length,
+        note: `Result had ${result.length} items (${json.length} chars total) — larger than the ${maxChars}-char context budget, so only the first ${kept.length} are included here (each one complete/untouched). There is no cursor to page the rest; narrow your query if you need items beyond these.`
+      }
+    }
     if (result && typeof result === 'object') {
       const obj = result as Record<string, unknown>
       if (typeof obj.content === 'string' && obj.content.length > maxChars) {
