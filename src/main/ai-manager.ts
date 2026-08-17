@@ -794,6 +794,24 @@ export class AIManager {
     }
   }
 
+  // Trim an array to fit charBudget by item count, not by slicing its JSON
+  // text — mid-string truncation on an array (e.g. list_panes' pane list,
+  // browser_screenshot_annotated's labels) can chop an item's id/selector in
+  // half, and the model has no way to tell a truncated field from a real
+  // one. Every included item is complete/untouched; always includes at
+  // least one item even if it alone exceeds the budget.
+  private truncateArrayByItems(arr: unknown[], charBudget: number): { kept: unknown[]; truncated: boolean } {
+    const kept: unknown[] = []
+    let size = 2 // "[]"
+    for (const item of arr) {
+      const itemJson = JSON.stringify(item)
+      if (size + itemJson.length + 1 > charBudget && kept.length > 0) break
+      kept.push(item)
+      size += itemJson.length + 1
+    }
+    return { kept, truncated: kept.length < arr.length }
+  }
+
   // Cap a tool result's size before it's JSON.stringify'd into the model's
   // context (AIContext.tsx does the actual stringify for interactive chat;
   // goal-runner sends `result` straight to the model too). Most tools that
@@ -802,9 +820,11 @@ export class AIManager {
   // paging — for those, truncate just the `content` field and flag
   // `truncated: true` (reusing PagedTextResult's own field) so the envelope
   // itself (hasMore/nextCursor/totalBytes) stays intact and the model can
-  // still page. Anything else (a bare string, or an object with no `content`
-  // field — e.g. browser_get_axtree's `tree`, browser_execute_js's `result`)
-  // falls back to truncating its JSON-stringified form directly.
+  // still page. An object whose largest field is an array (e.g.
+  // browser_screenshot_annotated's `labels`, browser_query_all's `elements`)
+  // gets that field trimmed by item count instead — same reasoning as a
+  // top-level array. Only a result with neither shape falls back to
+  // truncating its raw JSON-stringified form directly.
   private truncateToolResult(result: unknown, maxChars = 3000): unknown {
     if (typeof result === 'string') {
       if (result.length <= maxChars) return result
@@ -813,20 +833,7 @@ export class AIManager {
     if (Array.isArray(result)) {
       const json = JSON.stringify(result)
       if (json.length <= maxChars) return result
-      // Trim by item count instead of slicing the JSON text. Mid-string
-      // truncation on an array (e.g. list_panes' pane list) can chop an
-      // item's id/url in half, and the model has no way to tell a truncated
-      // field from a real one — it'll happily call a follow-up tool with a
-      // corrupted id. Every included item here is complete and untouched;
-      // always includes at least one item even if it alone exceeds budget.
-      const kept: unknown[] = []
-      let size = 2 // "[]"
-      for (const item of result) {
-        const itemJson = JSON.stringify(item)
-        if (size + itemJson.length + 1 > maxChars && kept.length > 0) break
-        kept.push(item)
-        size += itemJson.length + 1
-      }
+      const { kept } = this.truncateArrayByItems(result, maxChars)
       console.log(`[AI] Truncating large array tool result from ${result.length} items (${json.length} chars) to ${kept.length} items`)
       return {
         items: kept,
@@ -847,13 +854,40 @@ export class AIManager {
       }
       const json = JSON.stringify(obj)
       if (json.length > maxChars) {
-        console.log(`[AI] Truncating large tool result from ${json.length} chars (no content field to trim)`)
+        // Prefer trimming the largest array-valued field over raw JSON
+        // slicing — this is what browser_screenshot_annotated's `labels`
+        // (Set-of-Mark data the model needs intact to click by index) and
+        // similar array-shaped fields need to survive truncation usably.
+        let largestKey: string | null = null
+        let largestLen = -1
+        for (const [k, v] of Object.entries(obj)) {
+          if (Array.isArray(v) && v.length > 0) {
+            const len = JSON.stringify(v).length
+            if (len > largestLen) { largestLen = len; largestKey = k }
+          }
+        }
+        if (largestKey && largestLen > 200) {
+          const arr = obj[largestKey] as unknown[]
+          const restBudgetJson = JSON.stringify({ ...obj, [largestKey]: [] })
+          const arrayBudget = Math.max(500, maxChars - restBudgetJson.length)
+          const { kept, truncated } = this.truncateArrayByItems(arr, arrayBudget)
+          if (truncated) {
+            console.log(`[AI] Truncating array field "${largestKey}" in tool result from ${arr.length} to ${kept.length} items`)
+            return {
+              ...obj,
+              [largestKey]: kept,
+              truncated: true,
+              note: `Field "${largestKey}" had ${arr.length} items — trimmed to the first ${kept.length} to fit the ${maxChars}-char context budget (each included item is complete/untouched).`
+            }
+          }
+        }
+        console.log(`[AI] Truncating large tool result from ${json.length} chars (no content/array field to trim)`)
         return {
           success: typeof obj.success === 'boolean' ? obj.success : true,
           truncated: true,
           preview: json.slice(0, 2000) + '\n\n...[truncated middle section]...\n\n' + json.slice(-500),
           originalLength: json.length,
-          note: `Result was ${json.length} chars — larger than the ${maxChars}-char context budget and had no paginatable "content" field to trim cleanly, so this is a raw truncated preview of its JSON. Consider a narrower query (e.g. a selector, a max_depth, or a smaller limit).`
+          note: `Result was ${json.length} chars — larger than the ${maxChars}-char context budget and had no paginatable "content" field or usable array field to trim cleanly, so this is a raw truncated preview of its JSON. Consider a narrower query (e.g. a selector, a max_depth, or a smaller limit).`
         }
       }
     }
