@@ -106,7 +106,6 @@ const BUILTIN_PERMISSIONS: Record<string, ToolPermissions> = {
   focus_pane: { risk: 'write_local' },
   maximize_pane: { risk: 'write_local' },
   create_workspace: { risk: 'write_local' },
-  restart_terminal: { risk: 'write_local' },
 
   // Pane/tab control — switch tabs, open/close browser tabs, reconnect panes.
   // Local UI/session mutations; safe to run without approval.

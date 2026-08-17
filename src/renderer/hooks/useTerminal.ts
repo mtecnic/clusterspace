@@ -504,12 +504,12 @@ export function useTerminal({
   // forceFresh ensures we don't accidentally reattach to a half-dead PTY
   // for the same paneId — restart means start fresh, every time.
   //
-  // In-flight guard: reconnect_pane and restart_terminal (two differently
-  // named AI tools) both end up calling this, so an agent retrying after a
-  // failure can trigger two overlapping restarts. Without a guard, both
-  // would kill+spawn concurrently and could orphan a PTY. A second call
-  // while one is running just awaits the same in-flight restart instead of
-  // starting a duplicate one.
+  // In-flight guard: an agent retrying the reconnect_pane tool call after a
+  // failure (or a user hitting the manual Restart action while an AI-
+  // triggered reconnect is still in flight) can trigger two overlapping
+  // restarts. Without a guard, both would kill+spawn concurrently and could
+  // orphan a PTY. A second call while one is running just awaits the same
+  // in-flight restart instead of starting a duplicate one.
   const isRestartingRef = useRef(false)
   const restartPromiseRef = useRef<Promise<void> | null>(null)
   const restart = useCallback(async (overrides?: { tmuxSessionName?: string | null }) => {

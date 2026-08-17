@@ -380,7 +380,8 @@ export class AIManager {
   getToolDefinitions(): AIToolDefinition[] {
     // Migrated to ai-tools/ (registry, appended at bottom of this function):
     //   - terminal.ts: write_to_terminal, read_terminal_output, poll_terminal_status, wait_for_output
-    //   - pane.ts: list_panes, capture_screenshot, focus_pane, maximize_pane, create_workspace, restart_terminal
+    //   - pane.ts: list_panes, capture_screenshot, focus_pane, maximize_pane, create_workspace
+    //   - controls.ts: switch_terminal_tab, open_browser_tab, switch_browser_tab, close_browser_tab, reconnect_pane
     //   - step-protocol.ts: declare_step, verify_step
     //   - orchestration.ts: get_fleet_status, set_agent_role, assign_task, complete_task, fail_task, wait_for_agent, share_context, create_goal
     // Only browser tools remain inline (next migration batch).

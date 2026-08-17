@@ -2,7 +2,8 @@ import { IPC_CHANNELS, AIPaneInfo, AIPaneTab } from '../../shared/types'
 import { getBrowserWebContents } from '../browser-pane-registry'
 import { toolRegistry } from './registry'
 import { resolvePtyKey } from './tab-util'
-import { capturePaneImage } from '../pane-screenshot'
+import { capturePaneImageBuffer } from '../pane-screenshot'
+import { saveScreenshotToDisk } from './browser/_helpers'
 import type { PtyManager } from '../pty-manager'
 import type { PaneConfig } from '../../shared/types'
 
@@ -81,9 +82,9 @@ export function registerPaneTools(): void {
     }
   })
 
-  toolRegistry.register<{ pane_id?: string }, string>({
+  toolRegistry.register<{ pane_id?: string }, { success: boolean; path?: string; width?: number; height?: number; bytes?: number; error?: string }>({
     name: 'capture_screenshot',
-    description: 'Capture a screenshot of a specific pane (cropped to that pane) or the entire workspace for visual analysis. Pass pane_id to see just one pane.',
+    description: 'Capture a screenshot of a specific pane (cropped to that pane) or the entire workspace for visual analysis. Pass pane_id to see just one pane. Returns a file path (not base64) to keep chat tokens small.',
     parameters: {
       type: 'object',
       properties: {
@@ -91,10 +92,13 @@ export function registerPaneTools(): void {
       }
     },
     run: async (args, { window }) => {
-      if (window.isDestroyed()) throw new Error('Window not available')
-      const dataUrl = await capturePaneImage(window, args.pane_id)
-      if (!dataUrl) throw new Error(`Failed to capture screenshot${args.pane_id ? ` for pane ${args.pane_id}` : ''}`)
-      return dataUrl
+      if (window.isDestroyed()) return { success: false, error: 'Window not available' }
+      const result = await capturePaneImageBuffer(window, args.pane_id)
+      if (!result) return { success: false, error: `Failed to capture screenshot${args.pane_id ? ` for pane ${args.pane_id}` : ''}` }
+      if (args.pane_id && !result.resolvedRequestedPane) {
+        return { success: false, error: `Pane ${args.pane_id} isn't currently visible (e.g. hidden behind a maximized sibling) — its screenshot can't be captured right now.` }
+      }
+      return await saveScreenshotToDisk(result.buffer, result.width, result.height)
     }
   })
 
@@ -152,27 +156,6 @@ export function registerPaneTools(): void {
         cols: Math.max(1, Math.min(6, cols))
       })
       return `Created workspace "${workspace.name}" with ${rows}x${cols} grid`
-    }
-  })
-
-  toolRegistry.register<{ pane_id: string; tab_id?: string }, string>({
-    name: 'restart_terminal',
-    description: 'Restart a terminal pane/tab: kills the current session and respawns a fresh one (reattaching to its tmux session).',
-    parameters: {
-      type: 'object',
-      properties: {
-        pane_id: { type: 'string', description: 'The ID of the pane to restart' },
-        tab_id: { type: 'string', description: 'Optional tab ID within the pane (from list_panes). Defaults to the active/initial tab.' }
-      },
-      required: ['pane_id']
-    },
-    run: async ({ pane_id, tab_id }, { window }) => {
-      // Drive the renderer to kill + respawn (it owns the SSH/tmux command build
-      // and xterm wiring). Same path as reconnect_pane.
-      if (!window.isDestroyed()) {
-        window.webContents.send(IPC_CHANNELS.AI_RECONNECT_PANE, { paneId: pane_id, tabId: tab_id })
-      }
-      return `Restarting terminal in pane ${pane_id}${tab_id ? ` tab ${tab_id}` : ''}`
     }
   })
 }

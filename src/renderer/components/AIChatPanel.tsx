@@ -552,10 +552,11 @@ function renderInline(text: string): React.ReactNode {
 // at a glance instead of looking like wall-of-text.
 function toolStyle(name: string): { icon: string; color: string; label: string } {
   if (name.startsWith('browser_')) return { icon: '◐', color: '#7aa2f7', label: 'browser' }
-  if (name === 'write_to_terminal' || name === 'read_terminal_output' || name === 'poll_terminal_status' || name === 'wait_for_output' || name === 'restart_terminal') {
+  if (name === 'write_to_terminal' || name === 'read_terminal_output' || name === 'poll_terminal_status' || name === 'wait_for_output') {
     return { icon: '▶', color: '#9ece6a', label: 'terminal' }
   }
-  if (name === 'list_panes' || name === 'focus_pane' || name === 'maximize_pane' || name === 'create_workspace' || name === 'capture_screenshot') {
+  if (name === 'list_panes' || name === 'focus_pane' || name === 'maximize_pane' || name === 'create_workspace' || name === 'capture_screenshot'
+    || name === 'reconnect_pane' || name === 'switch_terminal_tab' || name === 'switch_browser_tab' || name === 'open_browser_tab' || name === 'close_browser_tab') {
     return { icon: '◫', color: '#bb9af7', label: 'pane' }
   }
   if (name === 'declare_step' || name === 'verify_step') {
@@ -651,10 +652,7 @@ function MessageBubble({ message }: { message: AIMessage }) {
   const isTool = message.role === 'tool'
 
   if (isTool) {
-    // Try to identify which tool this result is for (toolCallId resolves
-    // back to the original toolCall; renderer doesn't have that map handy,
-    // so we just label by content sniff if obvious, otherwise generic).
-    return <ToolResultChip toolName={(message as { toolName?: string }).toolName || 'tool'} content={message.content || ''} />
+    return <ToolResultChip toolName={message.toolName || 'tool'} content={message.content || ''} />
   }
 
   const cleaned = stripThinkTags(message.content)

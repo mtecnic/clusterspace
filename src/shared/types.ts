@@ -844,7 +844,9 @@ Some tools return a paged envelope: \`{success, content, hasMore, nextCursor, to
 - capture_screenshot: Take a screenshot for visual analysis
 - focus_pane, maximize_pane: Control window layout
 - create_workspace: Create new workspace layouts
-- restart_terminal: Restart a terminal pane
+- reconnect_pane: Reconnect a disconnected/crashed pane or tab (terminal: kill+respawn reattaching to tmux; browser: recreate the crashed webview)
+- switch_terminal_tab, switch_browser_tab: Switch a pane's active tab
+- open_browser_tab, close_browser_tab: Open/close a tab in a browser pane
 
 ## Browser Control Tools (for panes where type === "browser")
 
