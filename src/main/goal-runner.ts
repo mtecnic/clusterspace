@@ -320,7 +320,9 @@ export class GoalRunner {
       while (true) {
         // Wall-clock cap.
         if (Date.now() - runtime.startedAt > runtime.wallClockMs) {
-          this.endGoal(runtime, 'failed', `Wall-clock cap exceeded (${runtime.wallClockMs}ms)`)
+          const reason = `Wall-clock cap exceeded (${runtime.wallClockMs}ms)`
+          const finalReport = await this.getFinalExplanation(provider, apiKey, messages, reason)
+          this.endGoal(runtime, 'failed', finalReport)
           return
         }
         // Step-count cap — independent backstop from the wall clock. A goal
@@ -328,7 +330,9 @@ export class GoalRunner {
         // otherwise run for the full wall clock regardless of how many
         // (possibly useless) turns that represents.
         if (runtime.stepCount >= runtime.maxSteps) {
-          this.endGoal(runtime, 'failed', `Step cap exceeded (${runtime.maxSteps} tool-call steps)`)
+          const reason = `Step cap exceeded (${runtime.maxSteps} tool-call steps)`
+          const finalReport = await this.getFinalExplanation(provider, apiKey, messages, reason)
+          this.endGoal(runtime, 'failed', finalReport)
           return
         }
         // External abort.
@@ -435,7 +439,9 @@ export class GoalRunner {
         runtime.stepsSinceLastCritic += nonTransientStepsThisBatch
 
         if (haltRequested) {
-          this.endGoal(runtime, 'aborted', 'Loop halted: repeated duplicate tool calls exceeded the safety limit.')
+          const reason = 'Loop halted: repeated duplicate tool calls exceeded the safety limit.'
+          const finalReport = await this.getFinalExplanation(provider, apiKey, messages, reason)
+          this.endGoal(runtime, 'aborted', finalReport)
           return
         }
 
@@ -523,6 +529,41 @@ export class GoalRunner {
   }
 
   // ---- Helpers ----
+
+  /**
+   * One bounded, no-dispatch model turn used right before ending a run on a
+   * halt/cap condition (wall clock, step cap, duplicate-call halt). Without
+   * this, the loop cuts the model off cold — the user only ever sees a
+   * status flip with a canned reason string, never an explanation in the
+   * model's own words. Any tool_calls this turn returns are intentionally
+   * ignored (never dispatched) — the run is ending regardless of what the
+   * model asks for next. Falls back to `reason` alone if the call fails,
+   * times out, or returns empty content.
+   */
+  private async getFinalExplanation(
+    provider: ReturnType<AIStore['getProvider']>,
+    apiKey: string | null | undefined,
+    messages: AIMessage[],
+    reason: string
+  ): Promise<string> {
+    if (!provider) return reason
+    const finalMessages: AIMessage[] = [
+      ...messages,
+      {
+        id: uuidv4(),
+        role: 'system',
+        content: `Stopping now: ${reason} This is your final turn — no more tool calls will run. Briefly explain to the user what happened and what they should try next.`,
+        timestamp: Date.now()
+      }
+    ]
+    try {
+      const assistant = await this.aiManager.streamMessage(finalMessages, provider, apiKey ?? undefined)
+      const text = assistant?.content?.trim()
+      return text ? `${reason}\n\n${text}` : reason
+    } catch {
+      return reason
+    }
+  }
 
   private buildGoalPrompt(c: GoalCheckpoint): string {
     const criterionDescription = this.humanizeCriterion(c.successCriterion)

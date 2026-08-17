@@ -116,6 +116,12 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
   // per conversation turn in sendMessage, like the retry/auto-turn counters.
   const guardStateRef = useRef(createLoopGuardState())
 
+  // Set right before kicking off a bounded "final turn" stream (loop-guard
+  // halt) — the model gets one more completion to explain what happened,
+  // but onAIStreamEnd must NOT act on any tool_calls it returns, since the
+  // run is ending regardless. Cleared as soon as that stream completes.
+  const finalTurnRef = useRef(false)
+
   // Track auto turns to prevent runaway loops
   const autoTurnCountRef = useRef(0)
 
@@ -168,6 +174,14 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
         newMessages.push(message)
         return newMessages
       })
+
+      // Bounded final turn after a loop-guard halt — never dispatch tool
+      // calls from this response, no matter what the model returned; the
+      // run is ending regardless. See handleToolCalls' haltRequested branch.
+      if (finalTurnRef.current) {
+        finalTurnRef.current = false
+        return
+      }
 
       // Handle tool calls - pass the assistant message to include in conversation
       if (message.toolCalls && message.toolCalls.length > 0) {
@@ -377,8 +391,28 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
     }
 
     if (haltRequested) {
-      setError('Stopped: repeated duplicate tool calls exceeded the safety limit. Please review and provide guidance to continue.')
-      setMessages(prev => [...prev, ...toolResults])
+      setError('Stopped: repeated duplicate tool calls exceeded the safety limit. See the explanation below.')
+      // Bounded final turn: let the model explain what happened in its own
+      // words instead of cutting it off cold. finalTurnRef makes sure
+      // onAIStreamEnd treats this response as terminal — any tool_calls it
+      // contains are never dispatched, since the run is ending regardless.
+      const nudge: AIMessage = {
+        id: uuidv4(),
+        role: 'system',
+        content: 'Stopping now: repeated duplicate tool calls exceeded the safety limit. This is your final turn — no more tool calls will run. Briefly explain to the user what happened and what they should try next.',
+        timestamp: Date.now()
+      }
+      const appended = [...toolResults, nudge]
+      setMessages(prev => [...stripStaleScreenshots(prev), ...appended])
+      const currentMessages = stripStaleScreenshots(messagesRef.current)
+      const allMessages = [...currentMessages, ...appended]
+
+      finalTurnRef.current = true
+      const placeholder: AIMessage = { id: uuidv4(), role: 'assistant', content: '', timestamp: Date.now() }
+      setMessages(prev => [...prev, placeholder])
+      setIsStreaming(true)
+      streamContentRef.current = ''
+      window.electronAPI.aiStreamMessage(allMessages)
       return
     }
 
