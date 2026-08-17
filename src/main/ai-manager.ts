@@ -88,6 +88,10 @@ interface StreamChunk {
   }>
 }
 
+// Fixed caller id for the single global interactive chat panel — goals use
+// their own checkpoint id instead. See toolStateByCaller/policiesByCaller.
+const INTERACTIVE_CALLER_ID = 'interactive'
+
 export class AIManager {
   private window: BrowserWindow
   private ptyManager: PtyManager
@@ -99,25 +103,34 @@ export class AIManager {
   private activeRequests: Map<string, AbortController> = new Map()
 
   // Shared state for tools that need to coordinate across calls (e.g., the
-  // step protocol's declare → verify handshake). Lives on the AIManager so
-  // each provider/conversation gets its own bag; passed into the tool
-  // registry's dispatch() as part of ToolContext.
-  private toolState: ToolRuntimeState = { currentStep: null }
+  // step protocol's declare → verify handshake), keyed per-caller so a
+  // running goal and the interactive chat panel (or two concurrent goals)
+  // can't clobber each other's declared step. The interactive chat panel
+  // is a single global conversation with no natural id of its own, so it
+  // uses the fixed INTERACTIVE_CALLER_ID sentinel; each goal uses its own
+  // checkpoint id. Was previously one unscoped field on AIManager.
+  private toolStateByCaller: Map<string, ToolRuntimeState> = new Map()
 
   // COMPLETION_PATTERNS moved to src/main/ai-tools/terminal.ts.
 
-  // Active goal policy. When set (by GoalRunner before kicking off a goal),
-  // executeTool consults this instead of the legacy regex approval gate.
-  // When null, chat-from-the-AI-panel uses the legacy gate so user-driven
-  // exploration isn't surprised by extra prompts.
-  private activePolicy: import('./goal-policy').GoalPolicy | null = null
+  // Per-goal policy (set by GoalRunner before kicking off a goal). executeTool
+  // consults the policy for its callerId instead of the legacy regex approval
+  // gate. Interactive chat (callerId === INTERACTIVE_CALLER_ID) never has an
+  // entry here, so it always uses the legacy gate — previously this was a
+  // single unscoped field, so a running goal's policy could leak into
+  // concurrent interactive-chat tool calls (or vice versa).
+  private policiesByCaller: Map<string, import('./goal-policy').GoalPolicy> = new Map()
 
-  setActivePolicy(policy: import('./goal-policy').GoalPolicy | null): void {
-    this.activePolicy = policy
+  setPolicyForCaller(callerId: string, policy: import('./goal-policy').GoalPolicy | null): void {
+    if (policy) this.policiesByCaller.set(callerId, policy)
+    else this.policiesByCaller.delete(callerId)
   }
 
-  getActivePolicy(): import('./goal-policy').GoalPolicy | null {
-    return this.activePolicy
+  /** Drop all per-caller state (policy + tool state) once a goal ends, so
+   *  the maps don't grow unboundedly across many goal runs. */
+  releaseCaller(callerId: string): void {
+    this.policiesByCaller.delete(callerId)
+    this.toolStateByCaller.delete(callerId)
   }
 
   constructor(
@@ -142,7 +155,12 @@ export class AIManager {
   }
 
   /** Snapshot of services tools can use, plus the shared mutable state bag. */
-  private buildToolContext(): ToolContext {
+  private buildToolContext(callerId: string): ToolContext {
+    let state = this.toolStateByCaller.get(callerId)
+    if (!state) {
+      state = { currentStep: null }
+      this.toolStateByCaller.set(callerId, state)
+    }
     return {
       window: this.window,
       ptyManager: this.ptyManager,
@@ -150,7 +168,7 @@ export class AIManager {
       agentStore: this.agentStore,
       orchestrationStore: this.orchestrationStore,
       configLoader: this.configLoader,
-      state: this.toolState,
+      state,
       vision: this.buildVisionHelpers()
     }
   }
@@ -842,20 +860,27 @@ export class AIManager {
   //   1. Approval gate (modal for sensitive browser ops)
   //   2. Browser action log (live ticker in the UI)
   //   3. Result truncation (avoid blowing the model's context budget)
-  async executeTool(toolCall: AIToolCall): Promise<AIToolResult> {
+  //
+  // callerId scopes policy + step-protocol state (see toolStateByCaller/
+  // policiesByCaller) — defaults to the single global interactive chat
+  // panel; GoalRunner passes its own checkpoint id so a running goal's
+  // policy/declared-step never leaks into (or is leaked into by) a
+  // concurrent interactive chat call or a different goal.
+  async executeTool(toolCall: AIToolCall, callerId: string = INTERACTIVE_CALLER_ID): Promise<AIToolResult> {
     try {
       const args = toolCall.arguments
       const dispatchStart = Date.now()
+      const activePolicy = this.policiesByCaller.get(callerId) ?? null
 
-      // 1a. Policy gate (Phase 2A) — if an active goal has a declared policy,
-      //     enforce it. Tools beyond the goal's risk ceiling, outside its
-      //     allowlist, or escaping its sandbox dir get prompted/denied.
-      if (this.activePolicy) {
+      // 1a. Policy gate (Phase 2A) — if this caller has a declared goal
+      //     policy, enforce it. Tools beyond the goal's risk ceiling, outside
+      //     its allowlist, or escaping its sandbox dir get prompted/denied.
+      if (activePolicy) {
         // Lazy import to avoid pulling goal-policy into bundles that don't
         // run goal flows.
         const { evaluate, getPermissions } = await import('./goal-policy')
         const perms = getPermissions(toolCall.name, args as Record<string, unknown>)
-        const verdict = evaluate(toolCall.name, perms, this.activePolicy)
+        const verdict = evaluate(toolCall.name, perms, activePolicy)
         if (!verdict.allow) {
           if (verdict.needsApproval) {
             const approved = await requestApproval(this.window, {
@@ -880,12 +905,12 @@ export class AIManager {
       //     File uploads, password-field typing, and actions targeting a
       //     payment/checkout/banking-looking URL prompt regardless.
       let needsGate =
-        !this.activePolicy && (
+        !activePolicy && (
           toolCall.name === 'browser_set_files' ||
           (toolCall.name === 'browser_type' && typeof args.selector === 'string' && selectorLooksLikePassword(args.selector as string))
         )
       let sensitiveUrl: string | undefined
-      if (!needsGate && !this.activePolicy && toolCall.name.startsWith('browser_')) {
+      if (!needsGate && !activePolicy && toolCall.name.startsWith('browser_')) {
         if (toolCall.name === 'browser_navigate' && urlIsSensitive(args.url as string | undefined)) {
           needsGate = true
           sensitiveUrl = args.url as string
@@ -942,7 +967,7 @@ export class AIManager {
       const dispatched = await toolRegistry.dispatch(
         toolCall.name,
         args as Record<string, unknown>,
-        this.buildToolContext()
+        this.buildToolContext(callerId)
       )
       let result: unknown = dispatched.ok ? dispatched.result : { success: false, error: dispatched.error }
 

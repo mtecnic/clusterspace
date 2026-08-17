@@ -278,8 +278,10 @@ export class GoalRunner {
       return
     }
 
-    // Set policy so the dispatcher enforces while this goal runs.
-    this.aiManager.setActivePolicy(runtime.checkpoint.policy)
+    // Set policy so the dispatcher enforces while this goal runs. Scoped to
+    // this goal's own id — doesn't affect the interactive chat panel or any
+    // other concurrently-running goal.
+    this.aiManager.setPolicyForCaller(runtime.checkpoint.id, runtime.checkpoint.policy)
 
     // Compose the initial user prompt that wraps the goal in the runner
     // contract — the model must use claim_complete to attempt finishing.
@@ -361,7 +363,7 @@ export class GoalRunner {
             continue
           }
 
-          const result = await this.aiManager.executeTool(tc)
+          const result = await this.aiManager.executeTool(tc, runtime.checkpoint.id)
           const resultPreview = this.previewResult(result.result)
           const ok = !result.error
           dispatchedOks.push(ok)
@@ -733,7 +735,7 @@ export class GoalRunner {
     runtime.state = { kind: 'done' }
     this.running.delete(runtime.checkpoint.id)
     this.goalStore.update(runtime.checkpoint.id, { status, finalReport })
-    this.aiManager.setActivePolicy(null)
+    this.aiManager.releaseCaller(runtime.checkpoint.id)
     // Map goal terminal status onto the agent's status pill.
     const agentStatus =
       status === 'completed' ? 'complete' :
