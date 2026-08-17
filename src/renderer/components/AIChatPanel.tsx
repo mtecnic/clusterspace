@@ -57,6 +57,7 @@ export function AIChatPanel({ onOpenSettings }: AIChatPanelProps) {
   const {
     isEnabled,
     isStreaming,
+    isExecutingTools,
     isPanelOpen,
     isPanelMinimized,
     activeProvider,
@@ -147,9 +148,15 @@ export function AIChatPanel({ onOpenSettings }: AIChatPanelProps) {
     return content.length > 50 ? content.substring(0, 50) + '...' : content
   }
 
+  // "Agent is busy" — covers both the LLM token-streaming phase and the
+  // tool-dispatch phase, so Stop/Esc and the input-disable gate work the
+  // whole time the agent is doing something, not just while text is
+  // streaming.
+  const isBusy = isStreaming || isExecutingTools
+
   const handleSend = async () => {
     const trimmed = input.trim()
-    if (!trimmed || isStreaming) return
+    if (!trimmed || isBusy) return
 
     setInput('')
     await sendMessage(trimmed)
@@ -161,7 +168,7 @@ export function AIChatPanel({ onOpenSettings }: AIChatPanelProps) {
       handleSend()
     }
     if (e.key === 'Escape') {
-      if (isStreaming) {
+      if (isBusy) {
         cancelStream()
       } else {
         closePanel()
@@ -186,7 +193,7 @@ export function AIChatPanel({ onOpenSettings }: AIChatPanelProps) {
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
           </svg>
           <span className="text-sm font-medium">AI</span>
-          {isStreaming && (
+          {isBusy && (
             <span className="w-2 h-2 bg-cs-warning rounded-full animate-pulse" />
           )}
         </button>
@@ -202,7 +209,7 @@ export function AIChatPanel({ onOpenSettings }: AIChatPanelProps) {
           className="flex items-center gap-3 px-4 py-2 bg-cs-surface rounded-b-lg shadow-lg cursor-pointer hover:bg-cs-hover"
           onClick={restorePanel}
         >
-          {isStreaming ? (
+          {isBusy ? (
             <>
               <span className="w-2 h-2 bg-cs-warning rounded-full animate-pulse" />
               <span className="text-sm text-cs-text-secondary">AI working...</span>
@@ -233,7 +240,7 @@ export function AIChatPanel({ onOpenSettings }: AIChatPanelProps) {
   return (
     <ImageViewerContext.Provider value={setLightboxSrc}>
     <div className="fixed top-0 left-1/2 -translate-x-1/2 z-50 w-[600px] max-w-[90vw]">
-      <div className={`bg-cs-surface rounded-b-lg shadow-2xl border border-cs-border border-t-0 flex flex-col max-h-[70vh] ${isStreaming ? 'ai-panel-active' : ''}`}>
+      <div className={`bg-cs-surface rounded-b-lg shadow-2xl border border-cs-border border-t-0 flex flex-col max-h-[70vh] ${isBusy ? 'ai-panel-active' : ''}`}>
         {/* Header */}
         <div className="flex items-center justify-between px-4 py-2 border-b border-cs-border">
           <div className="flex items-center gap-2">
@@ -373,15 +380,16 @@ export function AIChatPanel({ onOpenSettings }: AIChatPanelProps) {
           <div ref={messagesEndRef} />
         </div>
 
-        {/* Streaming indicator — flowing gradient bar above the input.
-            Telegraphs "the model is doing something right now" with motion
+        {/* Busy indicator — flowing gradient bar above the input, shown for
+            both the token-streaming phase and the tool-dispatch phase.
+            Telegraphs "the agent is doing something right now" with motion
             instead of waiting for the next message bubble to materialize. */}
-        {isStreaming && (
+        {isBusy && (
           <div className="px-3 pt-2 border-t border-cs-border bg-cs-bg/40">
             <div className="ai-stream-shimmer" />
             <div className="mt-1 mb-2 flex items-center gap-2 text-[10px] text-cs-text-secondary">
               <span className="w-1.5 h-1.5 rounded-full bg-cs-accent animate-pulse" />
-              <span className="font-mono uppercase tracking-wider opacity-70">streaming</span>
+              <span className="font-mono uppercase tracking-wider opacity-70">{isStreaming ? 'streaming' : 'running tools'}</span>
               <span className="opacity-50">· press Esc to stop</span>
             </div>
           </div>
@@ -406,10 +414,10 @@ export function AIChatPanel({ onOpenSettings }: AIChatPanelProps) {
                 placeholder="Ask AI to help with terminals..."
                 className="flex-1 bg-cs-bg border border-cs-border rounded-lg px-3 py-2 text-sm text-cs-text placeholder-cs-text-secondary resize-none focus:outline-none focus:border-cs-accent"
                 rows={2}
-                disabled={isStreaming}
+                disabled={isBusy}
               />
               <div className="flex flex-col gap-1">
-                {isStreaming ? (
+                {isBusy ? (
                   <button
                     onClick={cancelStream}
                     className="px-3 py-2 bg-cs-error hover:bg-cs-error/80 text-white rounded-lg text-sm font-medium"

@@ -32,6 +32,11 @@ interface AIContextValue {
   settings: AISettings
   isEnabled: boolean
   isStreaming: boolean
+  // True while a batch of tool calls is being dispatched — distinct from
+  // isStreaming (the LLM token-streaming phase). Stop/Esc previously only
+  // worked during isStreaming, leaving no way to interrupt a slow/hung tool
+  // call or stop the auto-loop between turns.
+  isExecutingTools: boolean
   isPanelOpen: boolean
   isPanelMinimized: boolean
   activeProvider: AIProviderConfig | null
@@ -81,6 +86,13 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
   const [settings, setSettings] = useState<AISettings>(DEFAULT_AI_SETTINGS)
   const [messages, setMessages] = useState<AIMessage[]>([])
   const [isStreaming, setIsStreaming] = useState(false)
+  const [isExecutingTools, setIsExecutingTools] = useState(false)
+  // Set by cancelStream(); handleToolCalls checks it between tool
+  // dispatches/turns to stop the auto-loop. Can't interrupt a tool call
+  // that's already in flight (no per-tool AbortSignal plumbing exists), but
+  // it does stop the next one from starting and stops the loop from
+  // continuing to another model turn.
+  const cancelRequestedRef = useRef(false)
   const [isPanelOpen, setIsPanelOpen] = useState(false)
   const [isPanelMinimized, setIsPanelMinimized] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -235,13 +247,23 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
   // Handle tool calls with retry logic
   // Takes assistantMessage to include in conversation (avoids stale closure)
   const handleToolCalls = useCallback(async (toolCalls: AIToolCall[], assistantMessage: AIMessage) => {
+    setIsExecutingTools(true)
+    try {
     const toolResults: AIMessage[] = []
     let hasErrors = false
     let shotPaneAfterBatch: string | null = null
     let haltRequested = false
+    let cancelled = false
     const dispatchedOks: boolean[] = []
 
     for (const toolCall of toolCalls) {
+      // Mid-execution interrupt: stop dispatching further calls in this
+      // batch once the user hits Stop/Esc. Can't abort a call already in
+      // flight (no per-tool cancellation signal exists), but this stops the
+      // next one from starting and stops the loop from reaching another
+      // model turn — previously Stop only worked during token streaming.
+      if (cancelRequestedRef.current) { cancelled = true; break }
+
       // Circuit breaker / duplicate-call guard — check before dispatch, skip
       // the IPC round-trip entirely when blocked.
       const block = checkBeforeCall(guardStateRef.current, toolCall.name, toolCall.arguments)
@@ -318,6 +340,11 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
         const t = screenshotTargetFor(toolCall, true)
         if (t) shotPaneAfterBatch = t
       }
+    }
+
+    if (cancelled) {
+      setMessages(prev => [...prev, ...toolResults])
+      return
     }
 
     if (haltRequested) {
@@ -397,6 +424,12 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
       return  // Stop auto-loop, require user input
     }
 
+    // One more cancellation check — the screenshot capture above awaited,
+    // so Stop/Esc could have fired while it was in flight.
+    if (cancelRequestedRef.current) {
+      return
+    }
+
     // Add placeholder for next assistant message
     const placeholder: AIMessage = {
       id: uuidv4(),
@@ -410,6 +443,9 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
 
     // Stream continuation
     window.electronAPI.aiStreamMessage(allMessages)
+    } finally {
+      setIsExecutingTools(false)
+    }
   }, [])
 
   // Get active provider
@@ -454,6 +490,7 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
     setError(null)
     toolRetryCountRef.current = 0 // Reset retry counter on new message
     guardStateRef.current = createLoopGuardState()
+    cancelRequestedRef.current = false
     autoTurnCountRef.current = 0  // Reset auto turn counter on new message
 
     // Add user message
@@ -485,12 +522,17 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
   }, [activeProvider, messages])
 
   const cancelStream = useCallback(() => {
+    // Always set — handleToolCalls checks this between tool dispatches/turns
+    // even when there's no active token stream to cancel.
+    cancelRequestedRef.current = true
     window.electronAPI.aiCancel()
-    setIsStreaming(false)
-    streamContentRef.current = ''
-    // Remove placeholder message
-    setMessages(prev => prev.slice(0, -1))
-  }, [])
+    if (isStreaming) {
+      setIsStreaming(false)
+      streamContentRef.current = ''
+      // Remove placeholder message
+      setMessages(prev => prev.slice(0, -1))
+    }
+  }, [isStreaming])
 
   const clearChat = useCallback(() => {
     setMessages([])
@@ -593,6 +635,7 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
     settings,
     isEnabled: settings.enabled,
     isStreaming,
+    isExecutingTools,
     isPanelOpen,
     isPanelMinimized,
     activeProvider,
