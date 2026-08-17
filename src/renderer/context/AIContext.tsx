@@ -15,16 +15,22 @@ import {
   dispatchBrowserTabAction,
   dispatchReconnect
 } from '../lib/pane-controls'
-import { screenshotTargetFor } from '@shared/vision-loop'
+import { screenshotTargetFor, MAX_CONTEXT_SCREENSHOTS } from '@shared/vision-loop'
 import { createLoopGuardState, checkBeforeCall, recordOutcome, checkNarrativeMismatch } from '@shared/loop-guard'
 
-// Immutable version of evictPriorScreenshots: returns a new array where prior
-// auto-screenshot messages have their (heavy) image stripped, keeping only the
-// latest screenshot in context. React-safe (no in-place mutation).
+// Immutable version of evictPriorScreenshots: returns a new array where all
+// but the newest (MAX_CONTEXT_SCREENSHOTS - 1) auto-screenshot messages have
+// their (heavy) image stripped — the caller appends one more right after,
+// bringing the total kept in context up to MAX_CONTEXT_SCREENSHOTS.
+// React-safe (no in-place mutation).
 function stripStaleScreenshots(msgs: AIMessage[]): AIMessage[] {
-  return msgs.map(m =>
-    m.autoScreenshot && m.images && m.images.length > 0 ? { ...m, images: undefined } : m
-  )
+  const indices: number[] = []
+  msgs.forEach((m, i) => {
+    if (m.autoScreenshot && m.images && m.images.length > 0) indices.push(i)
+  })
+  const keep = Math.max(0, MAX_CONTEXT_SCREENSHOTS - 1)
+  const stripSet = new Set(indices.slice(0, Math.max(0, indices.length - keep)))
+  return msgs.map((m, i) => stripSet.has(i) ? { ...m, images: undefined } : m)
 }
 
 interface AIContextValue {

@@ -91,8 +91,17 @@ function resizeIfNeeded(image: Electron.NativeImage, maxWidth?: number): Electro
   return image
 }
 
+// JPEG quality for in-context vision-loop screenshots. The model doesn't
+// need pixel-perfect fidelity, and PNG can run 5-10x larger than JPEG for
+// photo-like/gradient-heavy page content — this materially cuts the token
+// cost of the auto-screenshot loop. capturePaneImageBuffer (disk-saved,
+// human-inspectable) stays PNG/lossless.
+const CONTEXT_SCREENSHOT_JPEG_QUALITY = 70
+
 function toDataUrl(image: Electron.NativeImage, maxWidth?: number): string {
-  return resizeIfNeeded(image, maxWidth).toDataURL()
+  const resized = resizeIfNeeded(image, maxWidth)
+  const jpeg = resized.toJPEG(CONTEXT_SCREENSHOT_JPEG_QUALITY)
+  return `data:image/jpeg;base64,${jpeg.toString('base64')}`
 }
 
 async function getPaneRect(window: BrowserWindow, paneId: string): Promise<Rectangle | null> {

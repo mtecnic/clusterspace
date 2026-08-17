@@ -6,9 +6,16 @@ import { AIMessage, AIToolCall } from './types'
  *
  * Policy: after a browser action, always capture a screenshot and feed it back
  * as the agent's current state. After a non-browser action, only capture on
- * failure (fallback state to help a retry). Only the most recent auto-screenshot
- * is kept in context — older ones have their image stripped to bound token cost.
+ * failure (fallback state to help a retry). The most recent MAX_CONTEXT_SCREENSHOTS
+ * auto-screenshots are kept in context (with older ones' images stripped) —
+ * previously only 1, which meant zero visual history for before/after
+ * comparison. Screenshots are also JPEG-compressed (see pane-screenshot.ts)
+ * rather than PNG for the in-context copies, since the model doesn't need
+ * pixel-perfect fidelity and PNG can be 5-10x the size for photo-like content.
  */
+
+// Matches Hermes' computer-use default (last 3 screenshots kept live).
+export const MAX_CONTEXT_SCREENSHOTS = 3
 
 // Browser tools whose visible/DOM result is the ground truth — re-observe after each.
 export const BROWSER_ACTION_TOOLS: ReadonlySet<string> = new Set([
@@ -42,13 +49,20 @@ export function screenshotTargetFor(tc: AIToolCall, errored: boolean): string | 
 }
 
 /**
- * Strip images from earlier auto-screenshot messages in place, keeping only the
- * newest as the agent's "current state". Leaves user-attached images untouched.
+ * Strip images from older auto-screenshot messages in place, keeping the
+ * newest (MAX_CONTEXT_SCREENSHOTS - 1) — the caller is expected to push one
+ * more screenshot message right after calling this, bringing the total kept
+ * in context up to MAX_CONTEXT_SCREENSHOTS. Leaves user-attached images
+ * untouched.
  */
 export function evictPriorScreenshots(messages: AIMessage[]): void {
-  for (const m of messages) {
-    if (m.autoScreenshot && m.images && m.images.length > 0) {
-      m.images = undefined
-    }
+  const indices: number[] = []
+  messages.forEach((m, i) => {
+    if (m.autoScreenshot && m.images && m.images.length > 0) indices.push(i)
+  })
+  const keep = Math.max(0, MAX_CONTEXT_SCREENSHOTS - 1)
+  const toStrip = indices.slice(0, Math.max(0, indices.length - keep))
+  for (const i of toStrip) {
+    messages[i].images = undefined
   }
 }
