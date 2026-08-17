@@ -803,7 +803,11 @@ function registerIpcHandlers() {
       if (!mainWindow || mainWindow.isDestroyed()) {
         return null
       }
-      return await capturePaneImage(mainWindow, paneId)
+      // Cap width like AIManager.capturePaneImage's default — without this,
+      // the vision loop's auto-screenshot sends a full native-resolution
+      // capture straight to the vision model, which some multimodal
+      // processors (e.g. Qwen3-VL) reject outright on large images.
+      return await capturePaneImage(mainWindow, paneId, { maxWidth: 1024 })
     } catch (error) {
       console.error('AI screenshot error:', error)
       return null
