@@ -16,6 +16,7 @@ import {
   dispatchReconnect
 } from '../lib/pane-controls'
 import { screenshotTargetFor } from '@shared/vision-loop'
+import { createLoopGuardState, checkBeforeCall, recordOutcome, checkNarrativeMismatch } from '@shared/loop-guard'
 
 // Immutable version of evictPriorScreenshots: returns a new array where prior
 // auto-screenshot messages have their (heavy) image stripped, keeping only the
@@ -90,6 +91,10 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
   // Track tool call retry count for self-correction
   const toolRetryCountRef = useRef(0)
   const MAX_TOOL_RETRIES = 3
+
+  // Circuit breaker + duplicate-call guard (shared/loop-guard.ts) — reset
+  // per conversation turn in sendMessage, like the retry/auto-turn counters.
+  const guardStateRef = useRef(createLoopGuardState())
 
   // Track auto turns to prevent runaway loops
   const autoTurnCountRef = useRef(0)
@@ -219,14 +224,35 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
     const toolResults: AIMessage[] = []
     let hasErrors = false
     let shotPaneAfterBatch: string | null = null
+    let haltRequested = false
+    const dispatchedOks: boolean[] = []
 
     for (const toolCall of toolCalls) {
+      // Circuit breaker / duplicate-call guard — check before dispatch, skip
+      // the IPC round-trip entirely when blocked.
+      const block = checkBeforeCall(guardStateRef.current, toolCall.name, toolCall.arguments)
+      if (block) {
+        hasErrors = true
+        toolResults.push({
+          id: uuidv4(),
+          role: 'tool',
+          content: JSON.stringify({ success: false, blocked: true, error: block.reason }),
+          toolCallId: toolCall.id,
+          toolName: toolCall.name,
+          timestamp: Date.now()
+        })
+        if (block.haltLoop) { haltRequested = true; break }
+        continue
+      }
+
       try {
         const result = await window.electronAPI.aiExecuteTool(toolCall)
 
         // Check if tool returned an error
         if (result.error) {
           hasErrors = true
+          dispatchedOks.push(false)
+          const disabledMsg = recordOutcome(guardStateRef.current, toolCall.name, false)
           toolResults.push({
             id: uuidv4(),
             role: 'tool',
@@ -238,9 +264,14 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
             toolName: toolCall.name,
             timestamp: Date.now()
           })
+          if (disabledMsg) {
+            toolResults.push({ id: uuidv4(), role: 'system', content: disabledMsg, timestamp: Date.now() })
+          }
           const t = screenshotTargetFor(toolCall, true)
           if (t) shotPaneAfterBatch = t
         } else {
+          dispatchedOks.push(true)
+          recordOutcome(guardStateRef.current, toolCall.name, true)
           toolResults.push({
             id: uuidv4(),
             role: 'tool',
@@ -254,6 +285,8 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
         }
       } catch (err) {
         hasErrors = true
+        dispatchedOks.push(false)
+        const disabledMsg = recordOutcome(guardStateRef.current, toolCall.name, false)
         toolResults.push({
           id: uuidv4(),
           role: 'tool',
@@ -265,8 +298,26 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
           toolName: toolCall.name,
           timestamp: Date.now()
         })
+        if (disabledMsg) {
+          toolResults.push({ id: uuidv4(), role: 'system', content: disabledMsg, timestamp: Date.now() })
+        }
         const t = screenshotTargetFor(toolCall, true)
         if (t) shotPaneAfterBatch = t
+      }
+    }
+
+    if (haltRequested) {
+      setError('Stopped: repeated duplicate tool calls exceeded the safety limit. Please review and provide guidance to continue.')
+      setMessages(prev => [...prev, ...toolResults])
+      return
+    }
+
+    // False-success/false-failure check: does the assistant's own narration
+    // (alongside this batch of tool calls) match what actually happened?
+    if (dispatchedOks.length > 0) {
+      const mismatch = checkNarrativeMismatch(assistantMessage.content, dispatchedOks.every(Boolean), dispatchedOks.some(Boolean))
+      if (mismatch) {
+        toolResults.push({ id: uuidv4(), role: 'system', content: mismatch, timestamp: Date.now() })
       }
     }
 
@@ -388,6 +439,7 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
 
     setError(null)
     toolRetryCountRef.current = 0 // Reset retry counter on new message
+    guardStateRef.current = createLoopGuardState()
     autoTurnCountRef.current = 0  // Reset auto turn counter on new message
 
     // Add user message

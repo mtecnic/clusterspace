@@ -3,6 +3,10 @@ import type { BrowserWindow } from 'electron'
 import { v4 as uuidv4 } from 'uuid'
 import type { AIMessage } from '../shared/types'
 import { screenshotTargetFor, evictPriorScreenshots } from '../shared/vision-loop'
+import {
+  createLoopGuardState, checkBeforeCall, recordOutcome, checkNarrativeMismatch,
+  isMutatingTool, isVerificationTool, type LoopGuardState
+} from '../shared/loop-guard'
 import type { AIManager } from './ai-manager'
 import type { AIMemoryStore } from './ai-memory-store'
 import type { AIStore } from './ai-store'
@@ -35,6 +39,13 @@ import { toolRegistry } from './ai-tools/registry'
 const DEFAULT_WALL_CLOCK_MS = 60 * 60 * 1000  // 1 hour
 const POLL_INTERVAL_MS = 100
 const DEFAULT_CRITIC_INTERVAL_STEPS = 5
+// Backstop alongside the wall-clock cap — a goal issuing many fast/cheap
+// calls (e.g. polling in a tight loop) could otherwise run for the full
+// wall clock regardless of how many (possibly useless) turns that is.
+const DEFAULT_MAX_STEPS = 300
+// Bounded per goal — a single "you claimed done but never checked" nudge,
+// not a repeatable stall tactic.
+const MAX_VERIFY_NUDGES = 1
 
 export interface StartGoalInput {
   paneId: string
@@ -49,6 +60,9 @@ export interface StartGoalInput {
   /** Optional separate provider for critic calls (cheaper / faster model).
    *  Defaults to the main provider. */
   criticProviderId?: string
+  /** Hard cap on non-transient tool-call steps, independent of wall clock.
+   *  Default 300. */
+  maxSteps?: number
 }
 
 type RunnerState =
@@ -60,6 +74,8 @@ interface RuntimeGoal {
   state: RunnerState
   startedAt: number
   wallClockMs: number
+  maxSteps: number
+  stepCount: number
   criticIntervalSteps: number
   criticProviderId?: string
   stepsSinceLastCritic: number
@@ -67,6 +83,14 @@ interface RuntimeGoal {
   pendingClaim?: { rationale: string }
   /** Set by abort_with_report. */
   pendingAbort?: { reason: string; report: string }
+  /** Circuit breaker + duplicate-call guard state (shared/loop-guard.ts). */
+  guard: LoopGuardState
+  /** True once a mutating action (browser click/type/navigate, terminal
+   *  write) has happened without a subsequent verification-ish tool call —
+   *  cleared the moment a verification tool runs. Used to nudge the model
+   *  to actually check its work before claim_complete is trusted. */
+  pendingVerifyNudge: boolean
+  verifyNudgesGiven: number
 }
 
 export class GoalRunner {
@@ -200,9 +224,14 @@ export class GoalRunner {
       state: { kind: 'running', abortRequested: false, pauseRequested: false },
       startedAt: Date.now(),
       wallClockMs: input.wallClockMs ?? DEFAULT_WALL_CLOCK_MS,
+      maxSteps: input.maxSteps ?? DEFAULT_MAX_STEPS,
+      stepCount: 0,
       criticIntervalSteps: input.criticIntervalSteps ?? DEFAULT_CRITIC_INTERVAL_STEPS,
       criticProviderId: input.criticProviderId,
-      stepsSinceLastCritic: 0
+      stepsSinceLastCritic: 0,
+      guard: createLoopGuardState(),
+      pendingVerifyNudge: false,
+      verifyNudgesGiven: 0
     }
     this.running.set(checkpoint.id, runtime)
     this.goalStore.update(checkpoint.id, { status: 'running' })
@@ -269,6 +298,14 @@ export class GoalRunner {
           this.endGoal(runtime, 'failed', `Wall-clock cap exceeded (${runtime.wallClockMs}ms)`)
           return
         }
+        // Step-count cap — independent backstop from the wall clock. A goal
+        // issuing many fast/cheap calls (e.g. polling in a tight loop) could
+        // otherwise run for the full wall clock regardless of how many
+        // (possibly useless) turns that represents.
+        if (runtime.stepCount >= runtime.maxSteps) {
+          this.endGoal(runtime, 'failed', `Step cap exceeded (${runtime.maxSteps} tool-call steps)`)
+          return
+        }
         // External abort.
         if (runtime.state.kind === 'running' && runtime.state.abortRequested) {
           this.endGoal(runtime, 'aborted', 'User aborted')
@@ -303,10 +340,32 @@ export class GoalRunner {
         // Dispatch each tool call (executeTool handles policy + action log).
         let nonTransientStepsThisBatch = 0
         let shotPaneAfterBatch: string | null = null
+        let haltRequested = false
+        const dispatchedOks: boolean[] = []
         for (const tc of toolCalls) {
+          runtime.stepCount++
+
+          // Circuit breaker / duplicate-call guard — check before dispatch.
+          const block = checkBeforeCall(runtime.guard, tc.name, tc.arguments)
+          if (block) {
+            this.goalStore.appendStep(runtime.checkpoint.id, {
+              tool: tc.name, args: tc.arguments, resultPreview: block.reason, ok: false,
+              elapsedMs: Date.now() - runtime.startedAt
+            })
+            this.emitEvent({ type: 'step', goalId: runtime.checkpoint.id, tool: tc.name, ok: false, preview: block.reason })
+            messages.push({
+              id: uuidv4(), role: 'tool', content: JSON.stringify({ success: false, blocked: true, error: block.reason }),
+              toolCallId: tc.id, toolName: tc.name, timestamp: Date.now()
+            })
+            if (block.haltLoop) { haltRequested = true; break }
+            continue
+          }
+
           const result = await this.aiManager.executeTool(tc)
           const resultPreview = this.previewResult(result.result)
           const ok = !result.error
+          dispatchedOks.push(ok)
+          const disabledMsg = recordOutcome(runtime.guard, tc.name, ok)
           this.goalStore.appendStep(runtime.checkpoint.id, {
             tool: tc.name,
             args: tc.arguments,
@@ -329,6 +388,14 @@ export class GoalRunner {
             toolName: tc.name,
             timestamp: Date.now()
           })
+          if (disabledMsg) {
+            messages.push({ id: uuidv4(), role: 'system', content: disabledMsg, timestamp: Date.now() })
+          }
+          // Verify-on-stop tracking: a mutating action taints the run until a
+          // verification-ish tool call clears it — checked when claim_complete
+          // fires, below.
+          if (isMutatingTool(tc.name)) runtime.pendingVerifyNudge = true
+          else if (isVerificationTool(tc.name)) runtime.pendingVerifyNudge = false
           // Vision grounding: browser actions always warrant a fresh look; other
           // tools only when they errored (fallback state for a retry). Captured
           // once after the batch so tool results stay contiguous.
@@ -341,6 +408,20 @@ export class GoalRunner {
           }
         }
         runtime.stepsSinceLastCritic += nonTransientStepsThisBatch
+
+        if (haltRequested) {
+          this.endGoal(runtime, 'aborted', 'Loop halted: repeated duplicate tool calls exceeded the safety limit.')
+          return
+        }
+
+        // False-success/false-failure check: does the model's own narration
+        // (alongside this batch of tool calls) match what actually happened?
+        if (dispatchedOks.length > 0) {
+          const mismatch = checkNarrativeMismatch(assistant.content, dispatchedOks.every(Boolean), dispatchedOks.some(Boolean))
+          if (mismatch) {
+            messages.push({ id: uuidv4(), role: 'system', content: mismatch, timestamp: Date.now() })
+          }
+        }
 
         // Attach the post-action screenshot as the agent's current state. Only
         // the latest one is kept in context (older images are evicted).
@@ -368,6 +449,21 @@ export class GoalRunner {
         if (runtime.pendingClaim) {
           const claim = runtime.pendingClaim
           runtime.pendingClaim = undefined
+          // Verify-on-stop: a mutating action happened with no verification
+          // tool call since — nudge once (bounded) instead of trusting the
+          // claim outright. Doesn't block forever: after MAX_VERIFY_NUDGES
+          // the claim proceeds to normal criterion verification regardless.
+          if (runtime.pendingVerifyNudge && runtime.verifyNudgesGiven < MAX_VERIFY_NUDGES) {
+            runtime.verifyNudgesGiven++
+            runtime.pendingVerifyNudge = false
+            messages.push({
+              id: uuidv4(),
+              role: 'system',
+              content: 'You claimed completion, but your last mutating action (a click/type/navigate or terminal write) was never followed by a check — no screenshot review, content read, or output read since. Verify the actual result first (e.g. browser_verify_visual_state, browser_get_content, read_terminal_output), then call claim_complete again if it still holds.',
+              timestamp: Date.now()
+            })
+            continue
+          }
           const verdict = await this.verifySuccessCriterion(runtime.checkpoint.successCriterion, claim.rationale, provider, apiKey ?? undefined)
           if (verdict.verified) {
             this.endGoal(runtime, 'completed', verdict.detail ?? claim.rationale)
@@ -493,11 +589,18 @@ export class GoalRunner {
         }
       }
       case 'json_predicate':
-        // Sandboxed JSON predicate evaluation is non-trivial — deferring to
-        // a future phase. For now, accept the model's rationale and surface
-        // the predicate in the final report so the user can see what was
-        // asserted.
-        return { verified: true, detail: `JSON predicate "${c.expr}" — accepted rationale (full evaluator not yet implemented): ${rationale}` }
+        // No evaluator exists — safely sandboxing an arbitrary expression
+        // (without eval/Function, which would be a code-injection vector on
+        // model- or user-supplied text) is real scope, deferred. Silently
+        // returning verified:true here (the old behavior) was actively
+        // misleading: it looked like a real check ran and passed, when in
+        // fact NO check happened at all — worse than no criterion, since it
+        // hides that the goal can never actually fail this gate. Fail
+        // honestly instead and point at working alternatives.
+        return {
+          verified: false,
+          detail: `json_predicate verification is not implemented, so "${c.expr}" can never be checked — this goal cannot auto-complete via this criterion. Use "manual" (trust the model's claim), "model_question" (LLM judge), or "shell" (if expressible as a command) instead.`
+        }
     }
   }
 
