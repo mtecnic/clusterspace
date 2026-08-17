@@ -902,15 +902,24 @@ export class AIManager {
       }
 
       // 1b. Legacy regex gate for chat-from-the-AI-panel (no active policy).
-      //     File uploads, password-field typing, and actions targeting a
-      //     payment/checkout/banking-looking URL prompt regardless.
+      //     File uploads and password-field typing prompt regardless.
       let needsGate =
         !activePolicy && (
           toolCall.name === 'browser_set_files' ||
           (toolCall.name === 'browser_type' && typeof args.selector === 'string' && selectorLooksLikePassword(args.selector as string))
         )
+      // Sensitive-URL gate (payment/checkout/banking) — applies regardless of
+      // an active goal policy's risk ceiling, UNLESS the goal explicitly
+      // declared risk: 'spends_money' (the deliberate opt-out — see
+      // GoalCreateDialog's "Spends money — use sparingly" option). Whether an
+      // action "spends money" depends on the target URL/page, not the tool
+      // name, so no tool can ever be statically tagged spends_money in
+      // BUILTIN_PERMISSIONS — this dynamic check is what actually gives that
+      // risk tier teeth; previously it only ran when no goal was active at
+      // all, so a running goal (any risk tier) could interact with a payment
+      // page with zero extra scrutiny beyond its normal risk ceiling.
       let sensitiveUrl: string | undefined
-      if (!needsGate && !activePolicy && toolCall.name.startsWith('browser_')) {
+      if (!needsGate && activePolicy?.risk !== 'spends_money' && toolCall.name.startsWith('browser_')) {
         if (toolCall.name === 'browser_navigate' && urlIsSensitive(args.url as string | undefined)) {
           needsGate = true
           sensitiveUrl = args.url as string

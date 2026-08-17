@@ -23,7 +23,17 @@ import type { GoalRisk, GoalPolicy } from '../shared/types'
  *                     (write_to_terminal, browser_type, set_files, ...)
  *   network_get    → browser_navigate to non-localhost
  *   network_write  → tools that submit forms, POST, write cookies, etc.
- *   spends_money   → tools that interact with payment / checkout pages
+ *   spends_money   → the top tier; NOT assigned to any tool in
+ *                    BUILTIN_PERMISSIONS below (whether an action "spends
+ *                    money" depends on the target URL/page, not the tool
+ *                    name — no static tag can capture that). It's enforced
+ *                    dynamically instead: AIManager.executeTool gates any
+ *                    browser_* action against a payment/checkout/banking-
+ *                    looking URL (urlIsSensitive in browser-approval.ts)
+ *                    regardless of a goal's declared risk ceiling, UNLESS
+ *                    that ceiling is exactly 'spends_money' — that's the
+ *                    tier's only real effect: opting a goal out of that
+ *                    per-action prompt.
  */
 export type { GoalRisk, GoalPolicy }
 
