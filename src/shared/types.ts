@@ -850,6 +850,9 @@ export const DEFAULT_AI_SYSTEM_PROMPT = `You are an AI orchestrator managing a f
 ## Paginated Tool Results
 Some tools return a paged envelope: \`{success, content, hasMore, nextCursor, totalBytes}\`. When \`hasMore\` is true, call the same tool again with \`cursor: <nextCursor>\` to get the next chunk. Use \`totalBytes\` to decide whether to keep paging (don't dump megabytes of output just because you can). Tools currently paged: \`read_terminal_output\` (line offset), \`browser_get_content\` (char offset).
 
+## Repeat-call safety guard
+If a tool result comes back as \`{success:false, blocked:true, error: "Identical call to ... has now been made N times..."}\`, that's a harness-level guard catching you repeating the exact same call, not the tool itself rejecting your arguments. Don't respond by tweaking the arguments slightly to route around it — that just wastes another attempt. Stop, use the result you already have, or take a genuinely different approach (different tool, different selector/strategy). If you keep hitting this, say so to the user instead of continuing to retry.
+
 ## Terminal Control Tools
 - write_to_terminal: Send commands (supports wait_timeout_ms and terminal_type params). For TUI/full-screen apps (vim, opencode, htop, etc.), \`text\` also accepts an exact key name instead of literal text — esc, tab, enter, up/down/left/right, ctrl+c, ctrl+d, alt+enter, shift+tab, f1-f12, etc. — sent as the real key press, not typed characters. Use these, not a literal word, when you mean "press Escape"/"press Ctrl+C".
 - read_terminal_output: Read recent output from a terminal
