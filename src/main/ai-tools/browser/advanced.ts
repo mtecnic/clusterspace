@@ -84,7 +84,7 @@ export function registerBrowserAdvancedTools(): void {
       },
       required: ['pane_id']
     },
-    run: async ({ pane_id, name, steps_json }) => {
+    run: async ({ pane_id, name, steps_json }, ctx) => {
       let recipe: Recipe | undefined
       if (name) {
         recipe = getRecipeStore().get(name)
@@ -95,17 +95,24 @@ export function registerBrowserAdvancedTools(): void {
       } else {
         return { success: false, error: 'Provide either name or steps_json' }
       }
+      // Recipes are meant to be sequences of browser_* tool calls — enforce
+      // that up front rather than letting a non-browser step (which might
+      // touch ctx.state, e.g. declare_step) run against a recipe's implicit
+      // per-step context in a way nothing here accounts for.
+      const nonBrowserStep = recipe.steps.find(s => !s.tool.startsWith('browser_'))
+      if (nonBrowserStep) {
+        return { success: false, error: `Recipe step "${nonBrowserStep.tool}" is not a browser_* tool — recipes may only call browser_* tools.` }
+      }
       // Inject pane_id into every step's args if not already present.
       const stepsWithPane = recipe.steps.map(s => ({ ...s, args: { pane_id, ...s.args } }))
       // Dispatch each step through the registry so it goes through the same
-      // path as a normal AI tool call (approval gates, action log, etc.).
+      // path as a normal AI tool call (approval gates, action log, etc.),
+      // using the real ToolContext this tool itself was dispatched with —
+      // every recipe step runs with the same window/services as the
+      // browser_run_recipe call itself.
       const dispatcher = async (tool: string, args: Record<string, unknown>) => {
         if (!toolRegistry.has(tool)) return { success: false, error: `Unknown tool: ${tool}` }
-        // We don't have a ToolContext here — recipes are an AI-driven path,
-        // and the only tools they can call are browser_* ones which don't
-        // touch ctx.state. Pass a minimal ctx (typed as any to avoid a
-        // requirement on services the recipe step won't use).
-        const r = await toolRegistry.dispatch(tool, args, {} as never)
+        const r = await toolRegistry.dispatch(tool, args, ctx)
         return r.ok ? { success: true, ...(typeof r.result === 'object' && r.result ? r.result : {}) } : { success: false, error: r.error }
       }
       const result = await runRecipe({ ...recipe, steps: stepsWithPane }, dispatcher)
