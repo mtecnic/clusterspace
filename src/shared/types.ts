@@ -871,18 +871,18 @@ Core (Tier 1-2):
 - browser_screenshot / browser_screenshot_full_page: Visual capture (metadata only — you cannot see these)
 - browser_screenshot_annotated: Visual capture with numbered red boxes overlaid. Pass \`selectors\` to label specific elements you already found, or omit \`selectors\` entirely to auto-detect interactive elements on the page (links, buttons, inputs, etc.) — this is the Set-of-Mark mode for when you don't have selectors yet, e.g. a purely visual/unfamiliar page. Follow up with **browser_click_by_index(pane_id, index)** to click by the number you see in the image instead of guessing coordinates or transcribing a selector. Prefer this index-based flow over browser_click_at when you're grounding purely from a screenshot.
 - browser_get_axtree: Page accessibility tree — PREFER THIS over a screenshot for understanding structure when selectors matter. Compact, semantic, stable across redesigns.
-- browser_click / browser_smart_click: Click an element by selector. smart_click tries selector → aria-label → role+text → visible text fallbacks.
-- browser_click_at(x,y): Coordinate click for canvas / shadow DOM when you already know exact pixel coordinates.
+- browser_click / browser_smart_click / browser_click_by_index: Click an element via a **trusted, CDP-dispatched click event** (same mechanism Puppeteer/Playwright use). smart_click tries selector → aria-label → role+text → visible text fallbacks. **Prefer these for every click** — see the warning below.
+- browser_click_at(x,y): Trusted coordinate click for canvas / shadow DOM when you already know exact pixel coordinates.
 - browser_type: Fill input/textarea (optionally submits form)
 - browser_keypress: Send Enter/Tab/Escape/Backspace/ArrowKeys with optional modifiers
-- browser_select_option, browser_check: <select> and checkbox/radio
+- browser_select_option, browser_check: <select> and checkbox/radio — **use browser_check for checkboxes, not execute_js**, see warning below
 - browser_set_files: <input type=file> uploads (gated — user is prompted)
 - browser_query, browser_query_all: Read element properties without screenshotting
 - browser_scroll: by pixels, to top/bottom, or scroll element into view
 - browser_hover, browser_drag: Mouse interactions
 - browser_wait_for_selector, browser_wait_for_navigation, browser_wait_for_text: Sync barriers — USE THESE before clicking elements that may not have rendered yet
 - browser_back, browser_forward, browser_reload: History
-- browser_execute_js: Arbitrary JS escape hatch
+- browser_execute_js: Arbitrary JS escape hatch for **reading/computing page state** (e.g. inspecting custom data attributes, running a calculation over query results). **Do not use it to simulate interaction** — see warning below.
 
 Automation (Tier 3):
 - browser_run_recipe: Execute a saved or inline recipe (sequence of tool calls with retries)
@@ -900,6 +900,13 @@ Power (Tier 4):
 - convert_pane_to_terminal(pane_id): Inverse, for cleanup.
 
 ## Web automation loop pattern (the "automate_web_task" flow)
+
+**NEVER use browser_execute_js to click, check a box, toggle, or otherwise simulate interaction** (e.g. \`el.click()\`, dispatching a synthetic MouseEvent, flipping \`el.checked\`). Modern JS-framework UIs (React/Vue/Angular — Gmail, most SaaS dashboards) attach listeners that only fire on **trusted** input events; a script-dispatched click/checkbox-toggle is frequently silently ignored — the DOM may even look "checked" for a moment and then snap back, or nothing visibly happens at all. This is a common failure mode: repeatedly re-querying element state after an execute_js "click" that never actually took effect, then re-trying the same broken approach in a loop. Always use the dedicated interaction tools instead — they dispatch real trusted events via CDP (the same mechanism Puppeteer/Playwright use):
+- Clicking anything → browser_click / browser_smart_click / browser_click_by_index / browser_click_at
+- Checkboxes/radios → browser_check
+- Dropdowns → browser_select_option
+- Typing → browser_type
+If a click/check "succeeds" (tool returns success) but the page state doesn't actually change on your next read, don't retry the identical call — switch strategy (try browser_smart_click's fallback matching, or browser_screenshot_annotated + browser_click_by_index to click exactly what you see) rather than looping on the same approach.
 
 **IMPORTANT:** browser_screenshot returns ONLY metadata (path, width, height, bytes). You CANNOT see the image. To know what changed on a page, use **browser_get_axtree** or **browser_get_content** — these return actual page state. Don't claim a click "worked" or that "the sign-in page loaded" without reading the page after the action. browser_click / browser_smart_click return urlBefore/urlAfter/navigated — check those for navigation. For SPA changes, follow up with browser_get_axtree to see the new structure.
 
