@@ -812,6 +812,46 @@ export class AIManager {
     }
   }
 
+  // Cap a tool result's size before it's JSON.stringify'd into the model's
+  // context (AIContext.tsx does the actual stringify for interactive chat;
+  // goal-runner sends `result` straight to the model too). Most tools that
+  // can return large payloads (read_terminal_output, browser_get_content)
+  // already use the `PagedTextResult` envelope with its own cursor/hasMore
+  // paging — for those, truncate just the `content` field and flag
+  // `truncated: true` (reusing PagedTextResult's own field) so the envelope
+  // itself (hasMore/nextCursor/totalBytes) stays intact and the model can
+  // still page. Anything else (a bare string, or an object with no `content`
+  // field — e.g. browser_get_axtree's `tree`, browser_execute_js's `result`)
+  // falls back to truncating its JSON-stringified form directly.
+  private truncateToolResult(result: unknown, maxChars = 3000): unknown {
+    if (typeof result === 'string') {
+      if (result.length <= maxChars) return result
+      return result.slice(0, 2000) + '\n\n...[truncated middle section]...\n\n' + result.slice(-500)
+    }
+    if (result && typeof result === 'object') {
+      const obj = result as Record<string, unknown>
+      if (typeof obj.content === 'string' && obj.content.length > maxChars) {
+        return {
+          ...obj,
+          content: obj.content.slice(0, 2000) + '\n\n...[truncated middle section]...\n\n' + obj.content.slice(-500),
+          truncated: true
+        }
+      }
+      const json = JSON.stringify(obj)
+      if (json.length > maxChars) {
+        console.log(`[AI] Truncating large tool result from ${json.length} chars (no content field to trim)`)
+        return {
+          success: typeof obj.success === 'boolean' ? obj.success : true,
+          truncated: true,
+          preview: json.slice(0, 2000) + '\n\n...[truncated middle section]...\n\n' + json.slice(-500),
+          originalLength: json.length,
+          note: `Result was ${json.length} chars — larger than the ${maxChars}-char context budget and had no paginatable "content" field to trim cleanly, so this is a raw truncated preview of its JSON. Consider a narrower query (e.g. a selector, a max_depth, or a smaller limit).`
+        }
+      }
+    }
+    return result
+  }
+
   // Execute a tool call. Every tool now lives in the registry (see
   // src/main/ai-tools/). AIManager handles three things around dispatch:
   //   1. Approval gate (modal for sensitive browser ops)
@@ -910,12 +950,8 @@ export class AIManager {
         })
       }
 
-      // 4. Truncate large string results to keep context manageable. (Phase
-      //    1B will replace this with a structured pagination envelope.)
-      if (typeof result === 'string' && result.length > 3000) {
-        console.log(`[AI] Truncating large tool result from ${result.length} chars`)
-        result = result.slice(0, 2000) + '\n\n...[truncated middle section]...\n\n' + result.slice(-500)
-      }
+      // 4. Truncate large results to keep context manageable.
+      result = this.truncateToolResult(result)
 
       return { toolCallId: toolCall.id, result }
     } catch (error) {
