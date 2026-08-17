@@ -31,6 +31,60 @@ const COMPLETION_PATTERNS: Record<string, RegExp[]> = {
 
 type TerminalType = 'shell' | 'claude_code' | 'interactive'
 
+// Named keys write_to_terminal recognizes as an exact (trimmed, case-
+// insensitive) match on `text` — anything else is sent as literal
+// text/command bytes. Needed because the PTY write path is a pure
+// byte pass-through (pty-manager.ts's write()); without this, a call like
+// text: "esc" types the three literal characters e/s/c instead of sending
+// the actual Escape byte, which silently breaks TUI navigation (arrow keys,
+// Ctrl+C, Esc, etc. all no-op as literal text into whatever's focused).
+const KEY_MAP: Record<string, string> = {
+  enter: '\r', return: '\r',
+  esc: '\x1b', escape: '\x1b',
+  tab: '\t',
+  backspace: '\x7f',
+  space: ' ',
+  up: '\x1b[A', down: '\x1b[B', right: '\x1b[C', left: '\x1b[D',
+  home: '\x1b[H', end: '\x1b[F',
+  pageup: '\x1b[5~', pgup: '\x1b[5~',
+  pagedown: '\x1b[6~', pgdn: '\x1b[6~',
+  delete: '\x1b[3~', del: '\x1b[3~',
+  insert: '\x1b[2~',
+  f1: '\x1bOP', f2: '\x1bOQ', f3: '\x1bOR', f4: '\x1bOS',
+  f5: '\x1b[15~', f6: '\x1b[17~', f7: '\x1b[18~', f8: '\x1b[19~',
+  f9: '\x1b[20~', f10: '\x1b[21~', f11: '\x1b[23~', f12: '\x1b[24~'
+}
+
+/**
+ * Resolves an exact key-name token ("esc", "ctrl+c", "alt+enter", ...) to
+ * its real terminal byte sequence. Returns null when `text` isn't a
+ * recognized key name — the caller should then treat it as literal text.
+ */
+function resolveKeyName(text: string): string | null {
+  const trimmed = text.trim().toLowerCase()
+  if (trimmed in KEY_MAP) return KEY_MAP[trimmed]
+  if (trimmed === 'shift+tab') return '\x1b[Z'
+
+  const parts = trimmed.split('+').map(p => p.trim()).filter(Boolean)
+  if (parts.length < 2) return null
+  const modifiers = parts.slice(0, -1)
+  const base = parts[parts.length - 1]
+  if (!modifiers.every(m => m === 'ctrl' || m === 'alt' || m === 'shift')) return null
+
+  if (modifiers.includes('ctrl')) {
+    if (base.length !== 1) return null
+    const code = base.toUpperCase().charCodeAt(0)
+    if (code < 64 || code > 95) return null
+    let bytes = String.fromCharCode(code - 64)
+    if (modifiers.includes('alt')) bytes = '\x1b' + bytes
+    return bytes
+  }
+
+  const baseBytes = base.length === 1 ? base : KEY_MAP[base]
+  if (!baseBytes) return null
+  return modifiers.includes('alt') ? '\x1b' + baseBytes : baseBytes
+}
+
 /**
  * Poll the PTY's scrollback until it looks "done" — either a known prompt
  * pattern shows up at the tail, or the output stops changing for N polls.
@@ -91,13 +145,17 @@ export function registerTerminalTools(): void {
     terminal_type?: TerminalType
   }, string>({
     name: 'write_to_terminal',
-    description: 'Write text or commands to a terminal pane. When press_enter=true, waits for command completion and returns the output. Use terminal_type="claude_code" with higher timeout for Claude Code instances.',
+    description: 'Write text or commands to a terminal pane. When press_enter=true, waits for command completion and returns the output. Use terminal_type="claude_code" with higher timeout for Claude Code instances. `text` also recognizes named keys for TUI navigation — see the `text` param.',
     parameters: {
       type: 'object',
       properties: {
         pane_id: { type: 'string', description: 'The ID of the pane to write to' },
         ...TAB_ID_PARAM,
-        text: { type: 'string', description: 'The text or command to write' },
+        text: {
+          type: 'string',
+          description:
+            'The text/command to type, OR an exact key name to press instead: esc, tab, enter, backspace, space, up/down/left/right, home, end, pageup/pagedown, delete, insert, f1-f12, or a modifier combo like ctrl+c, alt+enter, shift+tab. Key names are matched exactly (whole field, case-insensitive) and sent as the real key — e.g. text="esc" presses Escape, it does NOT type the letters e/s/c. To type the literal word "esc" as text, that ambiguity can\'t be expressed here; rephrase the input.'
+        },
         press_enter: { type: 'boolean', description: 'Whether to press Enter after writing (default: true)' },
         wait_timeout_ms: { type: 'number', description: 'Max time to wait for completion in ms (default: 3000, max: 120000). Use 60000+ for Claude Code.' },
         terminal_type: { type: 'string', enum: ['shell', 'claude_code', 'interactive'], description: 'Type of terminal for smart completion detection. Use "claude_code" for Claude Code instances.' }
@@ -111,7 +169,8 @@ export function registerTerminalTools(): void {
       const ptyId = ptyManager.getPtyIdForPane(resolvePtyKey(args.pane_id, args.tab_id))
       if (!ptyId) throw new Error(`No terminal found for pane ${args.pane_id}${args.tab_id ? ` tab ${args.tab_id}` : ''}. The session may have disconnected — call reconnect_pane to re-establish it, then retry.`)
 
-      const data = pressEnter ? args.text + '\r' : args.text
+      const resolvedKey = resolveKeyName(args.text)
+      const data = resolvedKey ?? (pressEnter ? args.text + '\r' : args.text)
       ptyManager.write(ptyId, data)
 
       if (pressEnter) {

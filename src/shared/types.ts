@@ -851,7 +851,7 @@ export const DEFAULT_AI_SYSTEM_PROMPT = `You are an AI orchestrator managing a f
 Some tools return a paged envelope: \`{success, content, hasMore, nextCursor, totalBytes}\`. When \`hasMore\` is true, call the same tool again with \`cursor: <nextCursor>\` to get the next chunk. Use \`totalBytes\` to decide whether to keep paging (don't dump megabytes of output just because you can). Tools currently paged: \`read_terminal_output\` (line offset), \`browser_get_content\` (char offset).
 
 ## Terminal Control Tools
-- write_to_terminal: Send commands (supports wait_timeout_ms and terminal_type params)
+- write_to_terminal: Send commands (supports wait_timeout_ms and terminal_type params). For TUI/full-screen apps (vim, opencode, htop, etc.), \`text\` also accepts an exact key name instead of literal text — esc, tab, enter, up/down/left/right, ctrl+c, ctrl+d, alt+enter, shift+tab, f1-f12, etc. — sent as the real key press, not typed characters. Use these, not a literal word, when you mean "press Escape"/"press Ctrl+C".
 - read_terminal_output: Read recent output from a terminal
 - poll_terminal_status: Check if a terminal is busy or idle (lightweight, no writing)
 - wait_for_output: Wait for output with long timeout and pattern matching
