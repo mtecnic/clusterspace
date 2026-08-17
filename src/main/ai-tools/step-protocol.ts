@@ -14,7 +14,7 @@ export function registerStepProtocolTools(): void {
     success_criteria: string
   }, string>({
     name: 'declare_step',
-    description: 'REQUIRED before any terminal action. Declare what you are about to do and how you will verify success. You MUST call this before write_to_terminal or other actions.',
+    description: 'Declare what you are about to do and how you will verify success, before a terminal write or browser action. Strongly recommended always; for goals whose policy sets requireStepProtocol, mutating tool calls are actually rejected until this is called first.',
     parameters: {
       type: 'object',
       properties: {
@@ -46,7 +46,7 @@ export function registerStepProtocolTools(): void {
     next_action: string
   }, string>({
     name: 'verify_step',
-    description: 'REQUIRED after executing a step. Verify the results before proceeding. You MUST analyze what you observed in the output.',
+    description: 'Verify a declared step\'s results after executing it, before moving on. Clears the declared step — for requireStepProtocol goals, the next mutating action will need a fresh declare_step call.',
     parameters: {
       type: 'object',
       properties: {

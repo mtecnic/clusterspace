@@ -25,6 +25,7 @@ import { getBrowserWebContents } from './browser-pane-registry'
 import { capturePaneImage as capturePaneImageHelper } from './pane-screenshot'
 import { appendActionLog } from './browser-action-log'
 import { requestApproval, selectorLooksLikePassword, urlIsSensitive } from './browser-approval'
+import { isMutatingTool } from '../shared/loop-guard'
 import { registerAllTools, toolRegistry, type ToolContext, type ToolRuntimeState } from './ai-tools'
 
 // OpenAI-compatible request/response types
@@ -897,6 +898,22 @@ export class AIManager {
           } else {
             // Hard deny (denylist) — never prompt.
             return { toolCallId: toolCall.id, result: { success: false, error: `Denied by goal policy: ${verdict.reason ?? 'tool denied'}` } }
+          }
+        }
+      }
+
+      // 1a.5. Step-protocol enforcement — opt-in per goal (GoalPolicy.
+      //     requireStepProtocol). declare_step/verify_step's own tool
+      //     descriptions say "REQUIRED" but that was only ever a prompt-text
+      //     convention the model could silently skip; this makes it a real
+      //     gate when a goal opts in. Interactive chat (no policy) is never
+      //     gated — this is deliberately opt-in, not a global requirement.
+      if (activePolicy?.requireStepProtocol && isMutatingTool(toolCall.name)) {
+        const state = this.toolStateByCaller.get(callerId)
+        if (!state?.currentStep) {
+          return {
+            toolCallId: toolCall.id,
+            result: { success: false, error: `This goal requires the step protocol: call declare_step before ${toolCall.name} (or any other mutating action).` }
           }
         }
       }

@@ -352,6 +352,12 @@ export interface GoalPolicy {
   allowedTools?: string[]
   deniedTools?: string[]
   sandboxDir?: string
+  // When true, mutating tool calls (terminal writes, browser click/type/
+  // navigate/etc.) are rejected unless declare_step was called first for
+  // this run — the step protocol's tool descriptions already say "REQUIRED"
+  // but nothing enforced that; this makes it a real, opt-in gate instead of
+  // a convention the model can silently skip.
+  requireStepProtocol?: boolean
 }
 
 export interface GoalStep {
