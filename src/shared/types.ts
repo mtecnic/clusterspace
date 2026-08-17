@@ -889,6 +889,7 @@ Automation (Tier 3):
 - browser_list_recipes: List saved recipes by name — check this before assuming one doesn't exist
 - browser_save_recipe: Save a working multi-step flow as a named recipe for later reuse
 - browser_get_action_log: Read recent browser tool-call log for self-debugging
+- browser_pane_doctor: Preflight health check on a pane's automation driver (registry, JS exec, CDP, page state). Use when browser_* tools on a pane keep failing and you're not sure if the pane itself is broken vs. the page/selector being wrong.
 
 Power (Tier 4):
 - browser_get_cookies, browser_set_cookie: Cookie management

@@ -150,6 +150,7 @@ const BUILTIN_PERMISSIONS: Record<string, ToolPermissions> = {
   browser_screenshot_full_page: { risk: 'read_only' },
   browser_screenshot_annotated: { risk: 'read_only' },
   browser_get_action_log: { risk: 'read_only' },
+  browser_pane_doctor: { risk: 'read_only' },
   browser_get_cookies: { risk: 'read_only' },
   browser_verify_visual_state: { risk: 'read_only' },
   browser_describe_screen: { risk: 'read_only' },

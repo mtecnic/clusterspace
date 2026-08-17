@@ -5,6 +5,7 @@ import { getActionLog } from '../../browser-action-log'
 import { getRecipeStore, runRecipe, type Recipe } from '../../browser-recipes'
 import { toolRegistry } from '../registry'
 import { cdpClickAt } from './_helpers'
+import { sendCdpCommand } from '../../cdp-helpers'
 import { IPC_CHANNELS } from '../../../shared/types'
 
 // Tells the renderer's WorkspaceContext to refetch — needed whenever a tool
@@ -190,6 +191,72 @@ export function registerBrowserAdvancedTools(): void {
       success: true,
       entries: getActionLog(pane_id, limit ?? 50)
     })
+  })
+
+  toolRegistry.register<{ pane_id: string }, { status: 'ok' | 'degraded' | 'unreachable'; checks: Array<{ name: string; ok: boolean; detail?: string }>; summary: string }>({
+    name: 'browser_pane_doctor',
+    description: 'Run a health check on a browser pane\'s automation driver: registry attachment, whether the webview is destroyed, JS execution, CDP availability, and current page state. Use when browser_* tools on a pane keep failing and you can\'t tell whether the pane itself is broken versus the page/selector being wrong — mirrors a preflight diagnostic, not a repair.',
+    parameters: {
+      type: 'object',
+      properties: {
+        pane_id: { type: 'string', description: 'The browser pane ID' }
+      },
+      required: ['pane_id']
+    },
+    run: async ({ pane_id }) => {
+      const checks: Array<{ name: string; ok: boolean; detail?: string }> = []
+
+      const wc = getBrowserWebContents(pane_id)
+      checks.push({
+        name: 'registry',
+        ok: !!wc,
+        detail: wc ? undefined : 'No webview registered for this pane_id — it may not be a browser pane, or its webview never attached. Check list_panes / try reconnect_pane.'
+      })
+      if (!wc) {
+        return { status: 'unreachable', checks, summary: 'Pane is unreachable — no registered webview.' }
+      }
+
+      const destroyed = wc.isDestroyed()
+      checks.push({ name: 'webcontents_alive', ok: !destroyed, detail: destroyed ? 'WebContents is destroyed — the webview likely crashed. Try reconnect_pane.' : undefined })
+      if (destroyed) {
+        return { status: 'unreachable', checks, summary: 'Webview WebContents is destroyed.' }
+      }
+
+      let jsOk = false
+      let cdpOk = false
+      let currentUrl = ''
+      try {
+        const info = await wc.executeJavaScript('({readyState: document.readyState, url: location.href})', true) as { readyState: string; url: string }
+        jsOk = true
+        currentUrl = info.url
+        checks.push({ name: 'js_execution', ok: true, detail: `readyState=${info.readyState}` })
+      } catch (error) {
+        checks.push({ name: 'js_execution', ok: false, detail: error instanceof Error ? error.message : String(error) })
+      }
+
+      try {
+        await sendCdpCommand(wc, 'Runtime.evaluate', { expression: '1', returnByValue: true })
+        cdpOk = true
+        checks.push({ name: 'cdp', ok: true })
+      } catch (error) {
+        checks.push({ name: 'cdp', ok: false, detail: error instanceof Error ? error.message : String(error) })
+      }
+
+      const onErrorPage = /^(about:blank|chrome-error:)/.test(currentUrl)
+      checks.push({
+        name: 'page_state',
+        ok: !onErrorPage,
+        detail: onErrorPage ? `Current URL looks like an error/blank page: ${currentUrl}` : currentUrl
+      })
+
+      const allOk = checks.every(c => c.ok)
+      const status: 'ok' | 'degraded' | 'unreachable' = allOk ? 'ok' : (jsOk || cdpOk) ? 'degraded' : 'unreachable'
+      const summary =
+        status === 'ok' ? 'Pane driver is healthy.' :
+        status === 'degraded' ? 'Pane driver is partially working — see failed checks above before assuming the pane itself is broken.' :
+        'Pane driver is unreachable — neither JS execution nor CDP responded. Try reconnect_pane.'
+      return { status, checks, summary }
+    }
   })
 
   // ===== Advanced: cookies + save =====
