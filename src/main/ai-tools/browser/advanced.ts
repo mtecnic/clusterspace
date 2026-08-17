@@ -134,6 +134,48 @@ export function registerBrowserAdvancedTools(): void {
     }
   })
 
+  toolRegistry.register<Record<string, never>, { success: boolean; recipes: Array<{ id?: string; name: string; description?: string; steps: number }> }>({
+    name: 'browser_list_recipes',
+    description: 'List saved browser recipes by name, with a short description and step count. Use before browser_run_recipe to discover what already exists instead of guessing a name.',
+    parameters: { type: 'object', properties: {} },
+    run: async () => {
+      const recipes = getRecipeStore().list().map(r => ({ id: r.id, name: r.name, description: r.description, steps: r.steps.length }))
+      return { success: true, recipes }
+    }
+  })
+
+  toolRegistry.register<{ name: string; description?: string; steps_json: string }, { success: boolean; name?: string; error?: string }>({
+    name: 'browser_save_recipe',
+    description: 'Save a sequence of browser_* tool calls as a named, reusable recipe (steps are the same shape browser_run_recipe accepts). Use this after successfully working out a multi-step flow (e.g. a login sequence) so it can be replayed later via browser_run_recipe instead of re-deriving it each time. Recipes may only contain browser_* tool steps.',
+    parameters: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Name to save the recipe under (overwrites an existing recipe with the same name)' },
+        description: { type: 'string', description: 'Optional human-readable description of what this recipe does' },
+        steps_json: { type: 'string', description: 'JSON array of steps: [{"tool":"browser_...","args":{...},"retry":1,"on_fail":"stop"}]. pane_id is injected automatically at run time — omit it from args.' }
+      },
+      required: ['name', 'steps_json']
+    },
+    run: async ({ name, description, steps_json }) => {
+      let steps: Recipe['steps']
+      try {
+        steps = JSON.parse(steps_json)
+      } catch (err) {
+        return { success: false, error: `Invalid steps_json: ${(err as Error).message}` }
+      }
+      if (!Array.isArray(steps) || steps.length === 0) {
+        return { success: false, error: 'steps_json must be a non-empty array of {tool, args} steps' }
+      }
+      const nonBrowserStep = steps.find(s => typeof s.tool !== 'string' || !s.tool.startsWith('browser_'))
+      if (nonBrowserStep) {
+        return { success: false, error: `Step "${nonBrowserStep.tool}" is not a browser_* tool — recipes may only call browser_* tools.` }
+      }
+      const existing = getRecipeStore().get(name)
+      const saved = getRecipeStore().save({ id: existing?.id, name, description, steps })
+      return { success: true, name: saved.name }
+    }
+  })
+
   toolRegistry.register<{ pane_id?: string; limit?: number }, { success: boolean; entries: unknown[] }>({
     name: 'browser_get_action_log',
     description: 'Read recent browser tool-call log entries (timestamp, tool, args, success, error). Useful for debugging your own multi-step flow.',

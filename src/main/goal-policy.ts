@@ -168,6 +168,8 @@ const BUILTIN_PERMISSIONS: Record<string, ToolPermissions> = {
   browser_wait_for_navigation: { risk: 'read_only' },
   browser_wait_for_text: { risk: 'read_only' },
   browser_run_recipe: { risk: 'network_write' },
+  browser_list_recipes: { risk: 'read_only' },
+  browser_save_recipe: { risk: 'write_local' },
 
   // Save tools touch the filesystem; declare as write_local + the path arg.
   // (caller fills in `paths` when constructing the ToolPermissions instance.)

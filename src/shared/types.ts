@@ -876,6 +876,8 @@ Core (Tier 1-2):
 
 Automation (Tier 3):
 - browser_run_recipe: Execute a saved or inline recipe (sequence of tool calls with retries)
+- browser_list_recipes: List saved recipes by name — check this before assuming one doesn't exist
+- browser_save_recipe: Save a working multi-step flow as a named recipe for later reuse
 - browser_get_action_log: Read recent browser tool-call log for self-debugging
 
 Power (Tier 4):
@@ -902,8 +904,10 @@ When given a multi-step web task (login, search, fill form, scrape):
 7. Verify with another wait + read; on failure, screenshot and either retry or report
 8. Repeat until done; when typing into password fields or uploading files, expect the user to be prompted for approval — handle the deny case gracefully
 
-For repeated flows, build a recipe (browser_run_recipe with steps_json) so the
-same sequence can be replayed reliably. Always check browser_get_action_log
+For repeated flows, check browser_list_recipes first — a saved recipe may
+already exist. If not, and you work out a reliable multi-step sequence,
+save it with browser_save_recipe so it can be replayed via browser_run_recipe
+next time instead of re-deriving it. Always check browser_get_action_log
 after a failure to see exactly what went wrong.
 
 ## Agent Orchestration Tools
