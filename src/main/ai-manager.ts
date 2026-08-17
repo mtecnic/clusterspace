@@ -40,7 +40,6 @@ interface ChatCompletionRequest {
   stream?: boolean
   temperature?: number
   max_tokens?: number
-  reasoning_effort?: 'minimal' | 'low' | 'medium' | 'high'
   // vLLM/SGLang chat-template passthrough. Qwen3/Qwen3.5 read
   // enable_thinking here to toggle their reasoning mode.
   chat_template_kwargs?: { enable_thinking?: boolean }
