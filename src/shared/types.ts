@@ -579,6 +579,12 @@ export const IPC_CHANNELS = {
   AI_SWITCH_TERMINAL_TAB: 'ai:switch:terminal-tab',
   AI_BROWSER_TAB_ACTION: 'ai:browser:tab-action',
   AI_RECONNECT_PANE: 'ai:reconnect:pane',
+  // Renderer -> main ack for the five pane-control channels above. Each of
+  // those payloads carries an optional requestId; the renderer replies with
+  // {requestId, ok} once it's actually tried to apply the command, so the
+  // main-process tool can report a real result instead of a canned "success"
+  // regardless of whether a stale/hallucinated pane_id silently no-opped.
+  PANE_CONTROL_ACK: 'ai:pane-control:ack',
 
   // AI Memory channels
   AI_MEMORY_GET_CONVERSATIONS: 'ai:memory:get-conversations',

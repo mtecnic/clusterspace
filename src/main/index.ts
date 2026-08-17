@@ -22,6 +22,7 @@ import {
 import { capturePaneImage } from './pane-screenshot'
 import { getActionLog, subscribeActionLog } from './browser-action-log'
 import { resolveApproval } from './browser-approval'
+import { resolvePaneControlAck } from './pane-control-ack'
 import { RecipeStore } from './browser-recipes'
 import {
   IPC_CHANNELS,
@@ -1377,6 +1378,12 @@ function registerIpcHandlers() {
   // Approval gate response from renderer
   ipcMain.on(IPC_CHANNELS.BROWSER_APPROVAL_RESPONSE, (_e, id: string, approved: boolean) => {
     resolveApproval(id, approved)
+  })
+
+  // Pane-control ack from renderer (switch tab / reconnect / browser tab
+  // action / focus / maximize actually found a registered handler or not)
+  ipcMain.on(IPC_CHANNELS.PANE_CONTROL_ACK, (_e, requestId: string, ok: boolean) => {
+    resolvePaneControlAck(requestId, ok)
   })
 
   // Recipes

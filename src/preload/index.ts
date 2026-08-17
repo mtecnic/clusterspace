@@ -159,11 +159,13 @@ export interface ElectronAPI {
   aiExecuteTool: (toolCall: AIToolCall) => Promise<AIToolResult>
 
   // AI pane control (triggered by AI tools)
-  onAIFocusPane: (callback: (paneId: string) => void) => () => void
-  onAIMaximizePane: (callback: (paneId: string) => void) => () => void
-  onAISwitchTerminalTab: (callback: (payload: { paneId: string; tabId: string }) => void) => () => void
-  onAIBrowserTabAction: (callback: (payload: { paneId: string; action: 'open' | 'switch' | 'close'; url?: string; tabId?: string }) => void) => () => void
-  onAIReconnectPane: (callback: (payload: { paneId: string; tabId?: string }) => void) => () => void
+  onAIFocusPane: (callback: (payload: { paneId: string; requestId?: string }) => void) => () => void
+  onAIMaximizePane: (callback: (payload: { paneId: string; requestId?: string }) => void) => () => void
+  onAISwitchTerminalTab: (callback: (payload: { paneId: string; tabId: string; requestId?: string }) => void) => () => void
+  onAIBrowserTabAction: (callback: (payload: { paneId: string; action: 'open' | 'switch' | 'close'; url?: string; tabId?: string; requestId?: string }) => void) => () => void
+  onAIReconnectPane: (callback: (payload: { paneId: string; tabId?: string; requestId?: string }) => void) => () => void
+  // Reply to a pane-control command's requestId — see pane-control-ack.ts.
+  ackPaneControl: (requestId: string, ok: boolean) => void
 
   // AI Memory operations
   getAIConversations: (limit?: number) => Promise<AIConversation[]>
@@ -567,9 +569,9 @@ const electronAPI: ElectronAPI = {
   },
 
   // AI pane control (triggered by AI tools)
-  onAIFocusPane: (callback: (paneId: string) => void) => {
-    const handler = (_event: IpcRendererEvent, paneId: string) => {
-      callback(paneId)
+  onAIFocusPane: (callback: (payload: { paneId: string; requestId?: string }) => void) => {
+    const handler = (_event: IpcRendererEvent, payload: { paneId: string; requestId?: string }) => {
+      callback(payload)
     }
     ipcRenderer.on(IPC_CHANNELS.AI_FOCUS_PANE, handler)
     return () => {
@@ -577,9 +579,9 @@ const electronAPI: ElectronAPI = {
     }
   },
 
-  onAIMaximizePane: (callback: (paneId: string) => void) => {
-    const handler = (_event: IpcRendererEvent, paneId: string) => {
-      callback(paneId)
+  onAIMaximizePane: (callback: (payload: { paneId: string; requestId?: string }) => void) => {
+    const handler = (_event: IpcRendererEvent, payload: { paneId: string; requestId?: string }) => {
+      callback(payload)
     }
     ipcRenderer.on(IPC_CHANNELS.AI_MAXIMIZE_PANE, handler)
     return () => {
@@ -587,22 +589,26 @@ const electronAPI: ElectronAPI = {
     }
   },
 
-  onAISwitchTerminalTab: (callback: (payload: { paneId: string; tabId: string }) => void) => {
-    const handler = (_event: IpcRendererEvent, payload: { paneId: string; tabId: string }) => callback(payload)
+  onAISwitchTerminalTab: (callback: (payload: { paneId: string; tabId: string; requestId?: string }) => void) => {
+    const handler = (_event: IpcRendererEvent, payload: { paneId: string; tabId: string; requestId?: string }) => callback(payload)
     ipcRenderer.on(IPC_CHANNELS.AI_SWITCH_TERMINAL_TAB, handler)
     return () => ipcRenderer.removeListener(IPC_CHANNELS.AI_SWITCH_TERMINAL_TAB, handler)
   },
 
-  onAIBrowserTabAction: (callback: (payload: { paneId: string; action: 'open' | 'switch' | 'close'; url?: string; tabId?: string }) => void) => {
-    const handler = (_event: IpcRendererEvent, payload: { paneId: string; action: 'open' | 'switch' | 'close'; url?: string; tabId?: string }) => callback(payload)
+  onAIBrowserTabAction: (callback: (payload: { paneId: string; action: 'open' | 'switch' | 'close'; url?: string; tabId?: string; requestId?: string }) => void) => {
+    const handler = (_event: IpcRendererEvent, payload: { paneId: string; action: 'open' | 'switch' | 'close'; url?: string; tabId?: string; requestId?: string }) => callback(payload)
     ipcRenderer.on(IPC_CHANNELS.AI_BROWSER_TAB_ACTION, handler)
     return () => ipcRenderer.removeListener(IPC_CHANNELS.AI_BROWSER_TAB_ACTION, handler)
   },
 
-  onAIReconnectPane: (callback: (payload: { paneId: string; tabId?: string }) => void) => {
-    const handler = (_event: IpcRendererEvent, payload: { paneId: string; tabId?: string }) => callback(payload)
+  onAIReconnectPane: (callback: (payload: { paneId: string; tabId?: string; requestId?: string }) => void) => {
+    const handler = (_event: IpcRendererEvent, payload: { paneId: string; tabId?: string; requestId?: string }) => callback(payload)
     ipcRenderer.on(IPC_CHANNELS.AI_RECONNECT_PANE, handler)
     return () => ipcRenderer.removeListener(IPC_CHANNELS.AI_RECONNECT_PANE, handler)
+  },
+
+  ackPaneControl: (requestId: string, ok: boolean) => {
+    ipcRenderer.send(IPC_CHANNELS.PANE_CONTROL_ACK, requestId, ok)
   },
 
   // AI Memory operations

@@ -5,6 +5,7 @@ import { resolvePtyKey } from './tab-util'
 import { capturePaneImageBuffer } from '../pane-screenshot'
 import { saveScreenshotToDisk } from './browser/_helpers'
 import { notifyWorkspaceChanged } from './browser/advanced'
+import { sendPaneControl } from '../pane-control-ack'
 import type { PtyManager } from '../pty-manager'
 import type { PaneConfig } from '../../shared/types'
 
@@ -103,7 +104,7 @@ export function registerPaneTools(): void {
     }
   })
 
-  toolRegistry.register<{ pane_id: string }, string>({
+  toolRegistry.register<{ pane_id: string }, { success: boolean; error?: string }>({
     name: 'focus_pane',
     description: 'Focus on a specific terminal pane',
     parameters: {
@@ -114,14 +115,12 @@ export function registerPaneTools(): void {
       required: ['pane_id']
     },
     run: async ({ pane_id }, { window }) => {
-      if (!window.isDestroyed()) {
-        window.webContents.send(IPC_CHANNELS.AI_FOCUS_PANE, pane_id)
-      }
-      return `Focused pane ${pane_id}`
+      const ok = await sendPaneControl(window, IPC_CHANNELS.AI_FOCUS_PANE, { paneId: pane_id })
+      return ok ? { success: true } : { success: false, error: `Pane ${pane_id} not found in the active workspace — check list_panes for current ids.` }
     }
   })
 
-  toolRegistry.register<{ pane_id: string }, string>({
+  toolRegistry.register<{ pane_id: string }, { success: boolean; error?: string }>({
     name: 'maximize_pane',
     description: 'Maximize a terminal pane to full screen, or restore if already maximized',
     parameters: {
@@ -132,10 +131,8 @@ export function registerPaneTools(): void {
       required: ['pane_id']
     },
     run: async ({ pane_id }, { window }) => {
-      if (!window.isDestroyed()) {
-        window.webContents.send(IPC_CHANNELS.AI_MAXIMIZE_PANE, pane_id)
-      }
-      return `Toggled maximize for pane ${pane_id}`
+      const ok = await sendPaneControl(window, IPC_CHANNELS.AI_MAXIMIZE_PANE, { paneId: pane_id })
+      return ok ? { success: true } : { success: false, error: `Pane ${pane_id} not found in the active workspace — check list_panes for current ids.` }
     }
   })
 

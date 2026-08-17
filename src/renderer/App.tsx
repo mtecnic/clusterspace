@@ -21,8 +21,8 @@ import { GridConfig, PaneConfig } from '@shared/types'
 import { dispatchBrowserTabAction } from './lib/pane-controls'
 
 interface AppContentProps {
-  onRegisterFocusPane?: (cb: (id: string) => void) => void
-  onRegisterMaximizePane?: (cb: (id: string) => void) => void
+  onRegisterFocusPane?: (cb: (id: string) => boolean) => void
+  onRegisterMaximizePane?: (cb: (id: string) => boolean) => void
 }
 
 function AppContent({ onRegisterFocusPane, onRegisterMaximizePane }: AppContentProps) {
@@ -255,13 +255,22 @@ function AppContent({ onRegisterFocusPane, onRegisterMaximizePane }: AppContentP
     onToggleGoals: () => setShowGoalDashboard(prev => !prev)
   })
 
-  // Register AI pane control callbacks
+  // Register AI pane control callbacks. Each validates the paneId actually
+  // exists in the active workspace before acting, and returns whether it
+  // did — the AI tool's ack path (see pane-control-ack.ts) surfaces this as
+  // a real result instead of unconditional "success".
   React.useEffect(() => {
-    onRegisterFocusPane?.(setFocusedPaneId)
-    onRegisterMaximizePane?.((id) => {
-      setMaximizedPaneId(prev => prev === id ? null : id)
+    onRegisterFocusPane?.((id) => {
+      const exists = !!activeWorkspace?.panes.some(p => p.id === id)
+      if (exists) setFocusedPaneId(id)
+      return exists
     })
-  }, [onRegisterFocusPane, onRegisterMaximizePane])
+    onRegisterMaximizePane?.((id) => {
+      const exists = !!activeWorkspace?.panes.some(p => p.id === id)
+      if (exists) setMaximizedPaneId(prev => prev === id ? null : id)
+      return exists
+    })
+  }, [onRegisterFocusPane, onRegisterMaximizePane, activeWorkspace])
 
   // Set initial focused pane
   React.useEffect(() => {
@@ -517,22 +526,22 @@ function AppContent({ onRegisterFocusPane, onRegisterMaximizePane }: AppContentP
 }
 
 function AppWithAI() {
-  const [focusPaneCallback, setFocusPaneCallback] = useState<((id: string) => void) | null>(null)
-  const [maximizePaneCallback, setMaximizePaneCallback] = useState<((id: string) => void) | null>(null)
+  const [focusPaneCallback, setFocusPaneCallback] = useState<((id: string) => boolean) | null>(null)
+  const [maximizePaneCallback, setMaximizePaneCallback] = useState<((id: string) => boolean) | null>(null)
 
   // Stabilize callbacks to prevent infinite re-render loops
-  const handleRegisterFocusPane = useCallback((cb: (id: string) => void) => {
+  const handleRegisterFocusPane = useCallback((cb: (id: string) => boolean) => {
     setFocusPaneCallback(() => cb)
   }, [])
 
-  const handleRegisterMaximizePane = useCallback((cb: (id: string) => void) => {
+  const handleRegisterMaximizePane = useCallback((cb: (id: string) => boolean) => {
     setMaximizePaneCallback(() => cb)
   }, [])
 
   return (
     <AIProvider
-      onFocusPane={(id) => focusPaneCallback?.(id)}
-      onMaximizePane={(id) => maximizePaneCallback?.(id)}
+      onFocusPane={(id) => focusPaneCallback?.(id) ?? false}
+      onMaximizePane={(id) => maximizePaneCallback?.(id) ?? false}
     >
       <AppContent
         onRegisterFocusPane={handleRegisterFocusPane}

@@ -71,8 +71,10 @@ const AIContext = createContext<AIContextValue | null>(null)
 
 interface AIProviderProps {
   children: ReactNode
-  onFocusPane?: (paneId: string) => void
-  onMaximizePane?: (paneId: string) => void
+  // Returns whether paneId actually exists in the active workspace, so the
+  // pane-control ack path can report a real result.
+  onFocusPane?: (paneId: string) => boolean
+  onMaximizePane?: (paneId: string) => boolean
 }
 
 export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProviderProps) {
@@ -186,27 +188,39 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
     }
   }, [])
 
-  // Set up AI pane control listeners
+  // Set up AI pane control listeners. Each replies with an ack (when the
+  // command carried a requestId) reporting whether it actually found
+  // something to act on — see pane-control-ack.ts on the main side. Without
+  // this, a stale/hallucinated pane_id used to get told "success"
+  // unconditionally with no way for the tool caller to detect it.
   useEffect(() => {
-    const unsubFocus = window.electronAPI.onAIFocusPane((paneId) => {
-      onFocusPane?.(paneId)
+    const ack = (requestId: string | undefined, ok: boolean) => {
+      if (requestId) window.electronAPI.ackPaneControl(requestId, ok)
+    }
+
+    const unsubFocus = window.electronAPI.onAIFocusPane(({ paneId, requestId }) => {
+      const ok = onFocusPane?.(paneId) ?? false
+      ack(requestId, ok)
     })
 
-    const unsubMaximize = window.electronAPI.onAIMaximizePane((paneId) => {
-      onMaximizePane?.(paneId)
+    const unsubMaximize = window.electronAPI.onAIMaximizePane(({ paneId, requestId }) => {
+      const ok = onMaximizePane?.(paneId) ?? false
+      ack(requestId, ok)
     })
 
     // Tab/reconnect control — dispatch to the target pane's registered handlers.
-    const unsubSwitchTab = window.electronAPI.onAISwitchTerminalTab(({ paneId, tabId }) => {
-      dispatchSwitchTerminalTab(paneId, tabId)
+    const unsubSwitchTab = window.electronAPI.onAISwitchTerminalTab(({ paneId, tabId, requestId }) => {
+      ack(requestId, dispatchSwitchTerminalTab(paneId, tabId))
     })
-    const unsubBrowserTab = window.electronAPI.onAIBrowserTabAction(({ paneId, action, url, tabId }) => {
-      if (action === 'open') dispatchBrowserTabAction(paneId, { action: 'open', url })
-      else if (action === 'switch' && tabId) dispatchBrowserTabAction(paneId, { action: 'switch', tabId })
-      else if (action === 'close' && tabId) dispatchBrowserTabAction(paneId, { action: 'close', tabId })
+    const unsubBrowserTab = window.electronAPI.onAIBrowserTabAction(({ paneId, action, url, tabId, requestId }) => {
+      let ok = false
+      if (action === 'open') ok = dispatchBrowserTabAction(paneId, { action: 'open', url })
+      else if (action === 'switch' && tabId) ok = dispatchBrowserTabAction(paneId, { action: 'switch', tabId })
+      else if (action === 'close' && tabId) ok = dispatchBrowserTabAction(paneId, { action: 'close', tabId })
+      ack(requestId, ok)
     })
-    const unsubReconnect = window.electronAPI.onAIReconnectPane(({ paneId, tabId }) => {
-      dispatchReconnect(paneId, tabId)
+    const unsubReconnect = window.electronAPI.onAIReconnectPane(({ paneId, tabId, requestId }) => {
+      ack(requestId, dispatchReconnect(paneId, tabId))
     })
 
     return () => {
