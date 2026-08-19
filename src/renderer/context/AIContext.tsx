@@ -16,7 +16,7 @@ import {
   dispatchReconnect
 } from '../lib/pane-controls'
 import { screenshotTargetFor, MAX_CONTEXT_SCREENSHOTS } from '@shared/vision-loop'
-import { createLoopGuardState, checkBeforeCall, recordOutcome, checkNarrativeMismatch, batchIsParallelSafe } from '@shared/loop-guard'
+import { createLoopGuardState, checkBeforeCall, recordOutcome, checkNarrativeMismatch, batchIsParallelSafe, resultReportsFailure } from '@shared/loop-guard'
 
 // Immutable version of evictPriorScreenshots: returns a new array where all
 // but the newest (MAX_CONTEXT_SCREENSHOTS - 1) auto-screenshot messages have
@@ -283,15 +283,21 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
     const dispatchOne = async (toolCall: AIToolCall): Promise<{ ok: boolean; messages: AIMessage[]; shotTarget: string | null }> => {
       try {
         const result = await window.electronAPI.aiExecuteTool(toolCall)
-        if (result.error) {
+        // Dispatch-level error (thrown) OR the tool's own payload reporting
+        // {success:false} — most tools (browser_* especially) signal failure
+        // the second way without ever throwing, so both must count here or
+        // the circuit breaker/narrative check never see them.
+        if (result.error || resultReportsFailure(result.result)) {
           const disabledMsg = recordOutcome(guardStateRef.current, toolCall.name, false)
           const msgs: AIMessage[] = [{
             id: uuidv4(),
             role: 'tool',
-            content: JSON.stringify({
-              error: result.error,
-              suggestion: 'Try a different approach or use list_panes first to see available panes.'
-            }),
+            content: result.error
+              ? JSON.stringify({
+                  error: result.error,
+                  suggestion: 'Try a different approach or use list_panes first to see available panes.'
+                })
+              : JSON.stringify(result.result),
             toolCallId: toolCall.id,
             toolName: toolCall.name,
             timestamp: Date.now()

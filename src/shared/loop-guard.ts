@@ -58,6 +58,27 @@ const RECOVERY_HINTS: Record<string, string> = {
   read_terminal_output: 'Check the pane is actually connected with list_panes, or call reconnect_pane first.'
 }
 
+/**
+ * Best-effort check of whether a tool's own result payload reports failure
+ * (`{success: false, ...}`) even though dispatch itself didn't throw. This
+ * is the dominant failure convention across browser_* tools (and most
+ * others) — they return `{success:false, error}` rather than throwing, so
+ * a caller that only treats thrown exceptions as failure (checking a
+ * dispatch-level error field) will never see these as failures at all.
+ * That blinds both the circuit breaker and the narrative-mismatch check to
+ * nearly every real-world "the action didn't work" case, since dispatch
+ * itself still "succeeded" (it just ran the tool, which then reported the
+ * actual action failed). Deliberately conservative: only trips when a
+ * `success` field is present and literally `false` — tools with no such
+ * field (list_panes, etc.) are left alone rather than guessed at.
+ */
+export function resultReportsFailure(result: unknown): boolean {
+  if (result && typeof result === 'object' && 'success' in result) {
+    return (result as { success?: unknown }).success === false
+  }
+  return false
+}
+
 function signatureFor(toolName: string, args: Record<string, unknown>): string {
   try {
     const sortedKeys = Object.keys(args).sort()

@@ -5,7 +5,7 @@ import type { AIMessage } from '../shared/types'
 import { screenshotTargetFor, evictPriorScreenshots } from '../shared/vision-loop'
 import {
   createLoopGuardState, checkBeforeCall, recordOutcome, checkNarrativeMismatch,
-  isMutatingTool, isVerificationTool, type LoopGuardState
+  isMutatingTool, isVerificationTool, resultReportsFailure, type LoopGuardState
 } from '../shared/loop-guard'
 import type { AIManager } from './ai-manager'
 import type { AIMemoryStore } from './ai-memory-store'
@@ -392,7 +392,10 @@ export class GoalRunner {
 
           const result = await this.aiManager.executeTool(tc, runtime.checkpoint.id)
           const resultPreview = this.previewResult(result.result)
-          const ok = !result.error
+          // Dispatch-level error (thrown) OR the tool's own payload reporting
+          // {success:false} — see resultReportsFailure's doc comment for why
+          // both must count.
+          const ok = !result.error && !resultReportsFailure(result.result)
           dispatchedOks.push(ok)
           const disabledMsg = recordOutcome(runtime.guard, tc.name, ok)
           this.goalStore.appendStep(runtime.checkpoint.id, {
