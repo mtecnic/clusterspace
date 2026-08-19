@@ -448,6 +448,20 @@ export interface AIPaneInfo {
   activeTabId?: string   // Which tab is currently active/visible
 }
 
+// list_panes' own item-count-based pagination (mirrors PagedTextResult's
+// cursor/hasMore shape, but by pane index rather than byte offset). Exists
+// so a workspace with many panes never has its inventory silently
+// truncated by AIManager's blanket char-budget truncation with no way to
+// see the rest — list_panes takes no filter params, so "narrow your query"
+// (the generic truncation fallback's advice) is never actually possible
+// for it.
+export interface AIPaneListResult {
+  items: AIPaneInfo[]
+  hasMore: boolean
+  nextCursor?: number
+  totalCount: number
+}
+
 // A tab inside a pane, as exposed to the AI agent. `connected` reflects whether
 // that specific tab has a live backend (PTY for terminals; the active browser
 // webview for browser panes).
@@ -848,7 +862,10 @@ export const DEFAULT_AI_SETTINGS: AISettings = {
 export const DEFAULT_AI_SYSTEM_PROMPT = `You are an AI orchestrator managing a fleet of terminal agents in ClusterSpace.
 
 ## Paginated Tool Results
-Some tools return a paged envelope: \`{success, content, hasMore, nextCursor, totalBytes}\`. When \`hasMore\` is true, call the same tool again with \`cursor: <nextCursor>\` to get the next chunk. Use \`totalBytes\` to decide whether to keep paging (don't dump megabytes of output just because you can). Tools currently paged: \`read_terminal_output\` (line offset), \`browser_get_content\` (char offset).
+Some tools return a paged envelope: \`{success, content, hasMore, nextCursor, totalBytes}\`. When \`hasMore\` is true, call the same tool again with \`cursor: <nextCursor>\` to get the next chunk. Use \`totalBytes\` to decide whether to keep paging (don't dump megabytes of output just because you can). Tools currently paged: \`read_terminal_output\` (line offset), \`browser_get_content\` (char offset), \`list_panes\` (pane index).
+
+## Never invent an id
+Every \`pane_id\`, \`tab_id\`, or similar identifier you use MUST come verbatim from an actual tool result (list_panes, get_fleet_status, a screenshot's returned metadata, etc.) — never a value you composed, guessed, or "recall" from a screenshot's visual layout. IDs are never rendered as visible text in a UI, so there is no legitimate way to read one off an image. If you can't find the id you need (e.g. list_panes says \`hasMore\`), page for it or tell the user it isn't visible to you — do not fabricate a plausible-looking one and call a tool with it.
 
 ## Repeat-call safety guard
 If a tool result comes back as \`{success:false, blocked:true, error: "Identical call to ... has now been made N times..."}\`, that's a harness-level guard catching you repeating the exact same call, not the tool itself rejecting your arguments. Don't respond by tweaking the arguments slightly to route around it — that just wastes another attempt. Stop, use the result you already have, or take a genuinely different approach (different tool, different selector/strategy). If you keep hitting this, say so to the user instead of continuing to retry.

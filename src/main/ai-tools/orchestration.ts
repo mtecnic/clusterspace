@@ -12,13 +12,41 @@ export function registerOrchestrationTools(): void {
     statusCounts: Record<string, number>
   }>({
     name: 'get_fleet_status',
-    description: 'Get the status of all agents and the current orchestration goal. Use this to understand the fleet state before taking action.',
+    description: "Get the status of agents in the current workspace and the active orchestration goal. Use this to understand the fleet state before taking action. Scoped to the active workspace — cross-reference paneIds against list_panes' current output, not older ones from this conversation.",
     parameters: { type: 'object', properties: {} },
-    run: async (_args, { agentStore, orchestrationStore }) => ({
-      agents: agentStore.getAllAgents(),
-      activeGoal: orchestrationStore.getActiveGoal(),
-      statusCounts: agentStore.getStatusCounts()
-    })
+    run: async (_args, { agentStore, orchestrationStore, workspaceStore }) => {
+      // Scope to the active workspace, same as list_panes — agentStore itself
+      // is a flat paneId->state map with no workspace field (and no pruning
+      // on pane/workspace removal), so unscoped it returns every agent
+      // record ever created across every workspace, including ones for
+      // panes that no longer exist anywhere. That mismatch (this tool
+      // reporting far more "agents" than list_panes has panes) has misled
+      // the model into thinking there were hidden panes it needed to find.
+      const settings = workspaceStore.getSettings()
+      const workspace = settings.activeWorkspaceId ? workspaceStore.get(settings.activeWorkspaceId) : undefined
+      const activePaneIds = new Set((workspace?.panes ?? []).map(p => p.id))
+
+      // Opportunistic prune: agentStore.removeAgent exists but nothing ever
+      // calls it (no pane-removal hook wires into it), so records for
+      // closed panes/deleted workspaces accumulate forever. Since we're
+      // already enumerating every workspace's live panes to scope this
+      // tool's result, reuse that pass to drop any agent record that no
+      // longer matches a pane anywhere, rather than adding a separate
+      // removal-flow hook this tool doesn't otherwise need.
+      const allLivePaneIds = new Set(workspaceStore.getAll().flatMap(w => w.panes.map(p => p.id)))
+      for (const a of agentStore.getAllAgents()) {
+        if (!allLivePaneIds.has(a.paneId)) agentStore.removeAgent(a.paneId)
+      }
+
+      const agents = agentStore.getAllAgents().filter(a => activePaneIds.has(a.paneId))
+      const statusCounts: Record<string, number> = {}
+      for (const a of agents) statusCounts[a.status] = (statusCounts[a.status] ?? 0) + 1
+      return {
+        agents,
+        activeGoal: orchestrationStore.getActiveGoal(),
+        statusCounts
+      }
+    }
   })
 
   toolRegistry.register<{ pane_id: string; role: string; purpose: string }, string>({

@@ -840,7 +840,7 @@ export class AIManager {
         truncated: true,
         totalCount: result.length,
         returnedCount: kept.length,
-        note: `Result had ${result.length} items (${json.length} chars total) — larger than the ${maxChars}-char context budget, so only the first ${kept.length} are included here (each one complete/untouched). There is no cursor to page the rest; narrow your query if you need items beyond these.`
+        note: `Result had ${result.length} items (${json.length} chars total) — larger than the ${maxChars}-char context budget, so only the first ${kept.length} are included here (each one complete/untouched). This tool has no cursor/query param to fetch the rest — the remaining ${result.length - kept.length} items are simply not visible to you right now. Do NOT guess, invent, or reconstruct an id/field for an item beyond these ${kept.length} — treat anything past this list as unknown, and tell the user the result was truncated rather than acting on a fabricated value.`
       }
     }
     if (result && typeof result === 'object') {
@@ -877,7 +877,7 @@ export class AIManager {
               ...obj,
               [largestKey]: kept,
               truncated: true,
-              note: `Field "${largestKey}" had ${arr.length} items — trimmed to the first ${kept.length} to fit the ${maxChars}-char context budget (each included item is complete/untouched).`
+              note: `Field "${largestKey}" had ${arr.length} items — trimmed to the first ${kept.length} to fit the ${maxChars}-char context budget (each included item is complete/untouched). Items beyond these ${kept.length} are unknown to you — don't guess or invent values for them.`
             }
           }
         }
@@ -887,7 +887,7 @@ export class AIManager {
           truncated: true,
           preview: json.slice(0, 2000) + '\n\n...[truncated middle section]...\n\n' + json.slice(-500),
           originalLength: json.length,
-          note: `Result was ${json.length} chars — larger than the ${maxChars}-char context budget and had no paginatable "content" field or usable array field to trim cleanly, so this is a raw truncated preview of its JSON. Consider a narrower query (e.g. a selector, a max_depth, or a smaller limit).`
+          note: `Result was ${json.length} chars — larger than the ${maxChars}-char context budget and had no paginatable "content" field or usable array field to trim cleanly, so this is a raw truncated preview of its JSON — the middle section shown as "...[truncated middle section]..." is genuinely missing, not omitted for brevity. If this tool takes a selector/max_depth/limit param, narrow it; otherwise don't guess at what the truncated section contained.`
         }
       }
     }

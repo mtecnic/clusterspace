@@ -1,4 +1,4 @@
-import { IPC_CHANNELS, AIPaneInfo, AIPaneTab } from '../../shared/types'
+import { IPC_CHANNELS, AIPaneInfo, AIPaneTab, AIPaneListResult } from '../../shared/types'
 import { getBrowserWebContents } from '../browser-pane-registry'
 import { toolRegistry } from './registry'
 import { resolvePtyKey } from './tab-util'
@@ -54,16 +54,30 @@ function buildPaneTabs(pane: PaneConfig, ptyManager: PtyManager): { tabs: AIPane
  * workspace-level inventory.
  */
 export function registerPaneTools(): void {
-  toolRegistry.register<Record<string, never>, AIPaneInfo[]>({
+  toolRegistry.register<{ cursor?: number; limit?: number }, AIPaneListResult>({
     name: 'list_panes',
-    description: 'List all panes in the current workspace with their IDs, labels, status, and tabs. Each pane lists its tabs (tmux tabs for terminals, browser tabs) with per-tab connection status — use a tab id with the terminal tools or switch_terminal_tab / switch_browser_tab.',
-    parameters: { type: 'object', properties: {} },
-    run: async (_args, { workspaceStore, ptyManager }) => {
+    description: 'List all panes in the current workspace with their IDs, labels, status, and tabs. Each pane lists its tabs (tmux tabs for terminals, browser tabs) with per-tab connection status — use a tab id with the terminal tools or switch_terminal_tab / switch_browser_tab. Paged: default page size covers the vast majority of workspaces in one call, but if `hasMore` comes back true, call again with `cursor: <nextCursor>` to get the rest — never guess or invent a pane_id that wasn\'t actually returned here.',
+    parameters: {
+      type: 'object',
+      properties: {
+        cursor: { type: 'number', description: 'Pane index to start from (0-based). Omit for the first page.' },
+        limit: { type: 'number', description: 'Max panes to return (default 50).' }
+      }
+    },
+    run: async (args, { workspaceStore, ptyManager }) => {
       const settings = workspaceStore.getSettings()
-      if (!settings.activeWorkspaceId) return []
+      if (!settings.activeWorkspaceId) return { items: [], hasMore: false, totalCount: 0 }
       const workspace = workspaceStore.get(settings.activeWorkspaceId)
-      if (!workspace) return []
-      return workspace.panes.map(pane => {
+      if (!workspace) return { items: [], hasMore: false, totalCount: 0 }
+
+      const totalCount = workspace.panes.length
+      const cursor = Math.max(0, args.cursor ?? 0)
+      const limit = Math.min(Math.max(1, args.limit ?? 50), 50)
+      const page = workspace.panes.slice(cursor, cursor + limit)
+      const end = cursor + page.length
+      const hasMore = end < totalCount
+
+      const items = page.map(pane => {
         const type = pane.type ?? 'terminal'
         const { tabs, activeTabId } = buildPaneTabs(pane, ptyManager)
         // A pane is "connected" if any of its tabs has a live backend.
@@ -79,8 +93,10 @@ export function registerPaneTools(): void {
           position: pane.position,
           tabs,
           activeTabId
-        }
+        } satisfies AIPaneInfo
       })
+
+      return { items, hasMore, nextCursor: hasMore ? end : undefined, totalCount }
     }
   })
 
