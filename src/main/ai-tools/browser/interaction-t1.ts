@@ -48,36 +48,61 @@ export function registerBrowserInteractionT1Tools(): void {
 
   toolRegistry.register<{ pane_id: string; selector: string; text: string; submit?: boolean }, { success: boolean; found?: boolean; error?: string }>({
     name: 'browser_type',
-    description: 'Set the value of an input or textarea matching a CSS selector and dispatch input/change events (so React/Vue/etc. notice). Optionally submits the parent form.',
+    description: 'Type text into an input, textarea, or contenteditable/rich-text box matching a CSS selector, replacing any existing content. Dispatches real trusted key events (same mechanism as browser_keypress, one call per character) so it works on React/Draft.js/Lexical-style editors, not just plain form fields. Optionally presses Enter after (submit).',
     parameters: {
       type: 'object',
       properties: {
         pane_id: { type: 'string', description: 'The ID of the browser pane' },
-        selector: { type: 'string', description: 'CSS selector for the input/textarea' },
-        text: { type: 'string', description: 'Text to set as the value' },
-        submit: { type: 'boolean', description: 'If true, submits the parent form after setting the value (default: false)' }
+        selector: { type: 'string', description: 'CSS selector for the input/textarea/contenteditable element' },
+        text: { type: 'string', description: 'Text to type. Existing content in the field is cleared first.' },
+        submit: { type: 'boolean', description: 'If true, presses Enter after typing (default: false)' }
       },
       required: ['pane_id', 'selector', 'text']
     },
     run: async ({ pane_id, selector, text, submit }) => {
       const wc = getBrowserWebContents(pane_id)
       if (!wc) return { success: false, error: `No browser pane with id ${pane_id}` }
-      const code = `(() => {
+      // Locate + scroll into view (read-only query, not a simulated
+      // interaction) — the actual focus and typing below both go through
+      // real input events, same as browser_click/browser_keypress.
+      const locate = `(async () => {
         const el = document.querySelector(${JSON.stringify(selector)});
         if (!el) return { found: false };
-        el.focus();
-        const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-        const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
-        if (setter) setter.call(el, ${JSON.stringify(text)});
-        else el.value = ${JSON.stringify(text)};
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        el.dispatchEvent(new Event('change', { bubbles: true }));
-        ${submit ? `if (el.form && typeof el.form.requestSubmit === 'function') { el.form.requestSubmit(); } else if (el.form) { el.form.submit(); }` : ``}
-        return { found: true };
+        el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+        await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+        const r = el.getBoundingClientRect();
+        return { found: true, x: Math.round(r.x + r.width/2), y: Math.round(r.y + r.height/2) };
       })()`
       try {
-        const result = await wc.executeJavaScript(code, true) as { found: boolean }
-        return { success: true, ...result }
+        const loc = await wc.executeJavaScript(locate, true) as { found: boolean; x?: number; y?: number }
+        if (!loc.found || loc.x == null || loc.y == null) return { success: true, found: false }
+        // A real click (not el.focus()) — some rich-text editors only fully
+        // initialize their internal selection/cursor state on a genuine
+        // user-gesture focus.
+        await cdpClickAt(wc, loc.x, loc.y)
+        // Clear existing content the same way a user would: select all, delete.
+        wc.sendInputEvent({ type: 'keyDown', keyCode: 'a', modifiers: ['control'] })
+        wc.sendInputEvent({ type: 'keyUp', keyCode: 'a', modifiers: ['control'] })
+        wc.sendInputEvent({ type: 'keyDown', keyCode: 'Backspace' })
+        wc.sendInputEvent({ type: 'keyUp', keyCode: 'Backspace' })
+        for (const ch of text) {
+          if (ch === '\n') {
+            wc.sendInputEvent({ type: 'keyDown', keyCode: 'Enter' })
+            wc.sendInputEvent({ type: 'keyUp', keyCode: 'Enter' })
+          } else if (ch === '\t') {
+            wc.sendInputEvent({ type: 'keyDown', keyCode: 'Tab' })
+            wc.sendInputEvent({ type: 'keyUp', keyCode: 'Tab' })
+          } else {
+            wc.sendInputEvent({ type: 'keyDown', keyCode: ch })
+            wc.sendInputEvent({ type: 'char', keyCode: ch })
+            wc.sendInputEvent({ type: 'keyUp', keyCode: ch })
+          }
+        }
+        if (submit) {
+          wc.sendInputEvent({ type: 'keyDown', keyCode: 'Enter' })
+          wc.sendInputEvent({ type: 'keyUp', keyCode: 'Enter' })
+        }
+        return { success: true, found: true }
       } catch (error) {
         return { success: false, error: error instanceof Error ? error.message : String(error) }
       }
