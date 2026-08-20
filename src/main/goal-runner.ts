@@ -397,7 +397,7 @@ export class GoalRunner {
           // both must count.
           const ok = !result.error && !resultReportsFailure(result.result)
           dispatchedOks.push(ok)
-          const disabledMsg = recordOutcome(runtime.guard, tc.name, ok)
+          const disabledMsg = recordOutcome(runtime.guard, tc.name, ok, { args: tc.arguments })
           this.goalStore.appendStep(runtime.checkpoint.id, {
             tool: tc.name,
             args: tc.arguments,

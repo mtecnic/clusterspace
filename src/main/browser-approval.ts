@@ -20,6 +20,13 @@ export interface ApprovalRequest {
 
 const pending = new Map<string, (approved: boolean) => void>()
 
+// Keys the user has already approved this app session (e.g. "url:stripe.com",
+// "password-field:input[type=password]") — without this, every matching
+// action re-prompted unconditionally every single time, including a second
+// navigation to a URL approved moments ago in the same run. Cleared only on
+// app restart; there's no explicit "forget" action yet.
+const approvedThisSession = new Set<string>()
+
 export function resolveApproval(id: string, approved: boolean): void {
   const fn = pending.get(id)
   if (fn) {
@@ -28,12 +35,26 @@ export function resolveApproval(id: string, approved: boolean): void {
   }
 }
 
-export async function requestApproval(window: BrowserWindow | null, req: Omit<ApprovalRequest, 'id'>): Promise<boolean> {
+/**
+ * `approvalKey`, when provided, is checked against prior approvals in this
+ * session before prompting — a hit resolves immediately with no prompt. A
+ * fresh approval (not a denial) is recorded under that key for next time.
+ * Omit it for actions that genuinely need a fresh decision every time.
+ */
+export async function requestApproval(
+  window: BrowserWindow | null,
+  req: Omit<ApprovalRequest, 'id'>,
+  approvalKey?: string
+): Promise<boolean> {
+  if (approvalKey && approvedThisSession.has(approvalKey)) return true
   if (!window || window.isDestroyed()) return false
   const id = uuidv4()
   const full: ApprovalRequest = { ...req, id }
   return new Promise<boolean>(resolve => {
-    pending.set(id, resolve)
+    pending.set(id, approved => {
+      if (approved && approvalKey) approvedThisSession.add(approvalKey)
+      resolve(approved)
+    })
     window.webContents.send(IPC_CHANNELS.BROWSER_APPROVAL_REQUEST, full)
     // Hard timeout: if user takes too long, deny
     setTimeout(() => {

@@ -922,13 +922,17 @@ export class AIManager {
         const verdict = evaluate(toolCall.name, perms, activePolicy)
         if (!verdict.allow) {
           if (verdict.needsApproval) {
+            // Scoped to (goal, tool, exact reason) — a different reason (e.g.
+            // an escalated risk tier) still re-prompts; this only skips the
+            // prompt for a genuinely identical override already granted.
+            const approvalKey = `goal-policy:${callerId}:${toolCall.name}:${verdict.reason ?? ''}`
             const approved = await requestApproval(this.window, {
               paneId: (args.pane_id as string) ?? 'unknown',
               tool: toolCall.name,
               description: `Goal policy: ${verdict.reason ?? 'tool exceeds declared risk'}`,
               reason: 'Goal-policy override',
               args: args as Record<string, unknown>
-            })
+            }, approvalKey)
             if (!approved) {
               return { toolCallId: toolCall.id, result: { success: false, error: `Denied by goal policy: ${verdict.reason ?? 'risk exceeded'}` } }
             }
@@ -994,6 +998,19 @@ export class AIManager {
         }
       }
       if (needsGate) {
+        // Approving once for a hostname/selector shouldn't re-prompt for the
+        // exact same one again this session. File uploads get no key — each
+        // one is genuinely a different action worth its own decision.
+        let approvalKey: string | undefined
+        if (sensitiveUrl) {
+          try {
+            approvalKey = `url:${new URL(sensitiveUrl).hostname}`
+          } catch {
+            approvalKey = `url:${sensitiveUrl}`
+          }
+        } else if (toolCall.name !== 'browser_set_files') {
+          approvalKey = `password-field:${args.selector}`
+        }
         const approved = await requestApproval(this.window, {
           paneId: args.pane_id as string,
           tool: toolCall.name,
@@ -1006,7 +1023,7 @@ export class AIManager {
             ? 'Sensitive URL (payment/checkout/banking)'
             : toolCall.name === 'browser_set_files' ? 'File upload (sensitive)' : 'Password field interaction',
           args: args as Record<string, unknown>
-        })
+        }, approvalKey)
         if (!approved) {
           appendActionLog({
             paneId: args.pane_id as string,

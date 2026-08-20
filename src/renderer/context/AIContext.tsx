@@ -288,7 +288,7 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
         // the second way without ever throwing, so both must count here or
         // the circuit breaker/narrative check never see them.
         if (result.error || resultReportsFailure(result.result)) {
-          const disabledMsg = recordOutcome(guardStateRef.current, toolCall.name, false)
+          const disabledMsg = recordOutcome(guardStateRef.current, toolCall.name, false, { args: toolCall.arguments })
           const msgs: AIMessage[] = [{
             id: uuidv4(),
             role: 'tool',
@@ -319,7 +319,7 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
           shotTarget: screenshotTargetFor(toolCall, false)
         }
       } catch (err) {
-        const disabledMsg = recordOutcome(guardStateRef.current, toolCall.name, false)
+        const disabledMsg = recordOutcome(guardStateRef.current, toolCall.name, false, { args: toolCall.arguments })
         const msgs: AIMessage[] = [{
           id: uuidv4(),
           role: 'tool',

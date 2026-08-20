@@ -31,6 +31,10 @@ const CONSECUTIVE_FAILURE_LIMIT = 3
 const DUPLICATE_CALL_LIMIT = 3
 const HALT_AFTER_BLOCKS = 5
 
+// Bounded history of recent call signatures, used only for cycle detection
+// (the exact-repeat counter above has no size limit and never needs one).
+const RECENT_SIGNATURE_WINDOW = 8
+
 export interface LoopGuardState {
   /** tool name -> consecutive failure count (reset to 0 on any success) */
   consecutiveFailures: Record<string, number>
@@ -40,10 +44,34 @@ export interface LoopGuardState {
   callSignatureCounts: Record<string, number>
   /** total duplicate-call blocks this run — HALT_AFTER_BLOCKS stops the loop */
   totalBlocks: number
+  /** last RECENT_SIGNATURE_WINDOW call signatures, oldest first — see detectCycle */
+  recentSignatures: string[]
 }
 
 export function createLoopGuardState(): LoopGuardState {
-  return { consecutiveFailures: {}, disabledTools: {}, callSignatureCounts: {}, totalBlocks: 0 }
+  return { consecutiveFailures: {}, disabledTools: {}, callSignatureCounts: {}, totalBlocks: 0, recentSignatures: [] }
+}
+
+/**
+ * Detects an alternating cycle (period 2 or 3) in the tail of recent call
+ * signatures — e.g. click A, probe B, click A, probe B, ... with genuinely
+ * different args each time, so callSignatureCounts (exact-repeat only)
+ * never fires. Requires 2 full repetitions of the cycle before flagging, to
+ * avoid punishing legitimate short back-and-forth (e.g. one retry after a
+ * fix). Returns the period on a match, or null.
+ */
+function detectCycle(recent: string[]): number | null {
+  for (const period of [2, 3]) {
+    const need = period * 2
+    if (recent.length < need) continue
+    const tail = recent.slice(-need)
+    let matches = true
+    for (let i = 0; i < period && matches; i++) {
+      if (tail[i] !== tail[i + period]) matches = false
+    }
+    if (matches && new Set(tail.slice(0, period)).size >= 2) return period
+  }
+  return null
 }
 
 // Per-tool fallback suggestion shown when it gets circuit-broken. Falls back
@@ -118,6 +146,19 @@ export function checkBeforeCall(state: LoopGuardState, toolName: string, args: R
       haltLoop: state.totalBlocks >= HALT_AFTER_BLOCKS
     }
   }
+
+  // Not an exact repeat — check for an alternating cycle instead (different
+  // args each time, so the counter above never catches it).
+  state.recentSignatures.push(sig)
+  if (state.recentSignatures.length > RECENT_SIGNATURE_WINDOW) state.recentSignatures.shift()
+  const period = detectCycle(state.recentSignatures)
+  if (period !== null) {
+    state.totalBlocks++
+    return {
+      reason: `You're alternating between ${period} different calls without making progress (a cycle, not genuinely different approaches). Stop and try something structurally different — a different tool, a different strategy to find the target, or ask the user for guidance.`,
+      haltLoop: state.totalBlocks >= HALT_AFTER_BLOCKS
+    }
+  }
   return null
 }
 
@@ -127,7 +168,12 @@ export function checkBeforeCall(state: LoopGuardState, toolName: string, args: R
  * circuit-breaker message the moment a tool crosses the failure limit (only
  * fired once, on the transition, not on every failure after).
  */
-export function recordOutcome(state: LoopGuardState, toolName: string, ok: boolean): string | null {
+export function recordOutcome(
+  state: LoopGuardState,
+  toolName: string,
+  ok: boolean,
+  context?: { args?: Record<string, unknown> }
+): string | null {
   if (ok) {
     state.consecutiveFailures[toolName] = 0
     return null
@@ -136,7 +182,18 @@ export function recordOutcome(state: LoopGuardState, toolName: string, ok: boole
   state.consecutiveFailures[toolName] = next
   if (next >= CONSECUTIVE_FAILURE_LIMIT && !state.disabledTools[toolName]) {
     const hint = RECOVERY_HINTS[toolName] ?? 'Try a different tool or a different approach.'
-    const reason = `${toolName} has failed ${next} times in a row and is now disabled for the rest of this run. ${hint}`
+    // Interpolate the last-attempted args (truncated) so the message points
+    // at what actually failed, not just a generic per-tool suggestion.
+    let argsSummary = ''
+    if (context?.args) {
+      try {
+        const json = JSON.stringify(context.args)
+        argsSummary = ` Last attempted: ${json.length > 150 ? json.slice(0, 150) + '…' : json}.`
+      } catch {
+        // args weren't serializable — skip the summary rather than fail the whole call.
+      }
+    }
+    const reason = `${toolName} has failed ${next} times in a row and is now disabled for the rest of this run.${argsSummary} ${hint}`
     state.disabledTools[toolName] = reason
     return reason
   }
