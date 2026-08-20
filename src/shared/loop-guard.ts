@@ -43,6 +43,19 @@ const DUPLICATE_CALL_LIMIT = 3
 const SUCCEEDING_DUPLICATE_CALL_LIMIT = 20
 const HALT_AFTER_BLOCKS = 5
 
+// Tools the elevated ceiling above must NOT apply to: their args are a fixed
+// absolute target (a literal x/y, a specific key), not a resolver spec that
+// naturally re-targets "whichever thing currently matches." Repeating the
+// exact same (x, y) can never mean "act on the next item in a list" the way
+// repeating the same aria_label/selector spec can — it can only ever hit the
+// same physical point. A click there mechanically "succeeds" (the dispatch
+// itself always works) regardless of whether anything useful is at that
+// point, so under the elevated ceiling this became a 20-iteration stuck
+// loop instead of the 3-iteration one it was before — observed for real
+// immediately after that ceiling first shipped, clicking a stale (x, y) at
+// a broken reply box ~15 times before the (much later) cutoff caught it.
+const FIXED_TARGET_TOOLS: ReadonlySet<string> = new Set(['browser_click_at', 'browser_hover', 'browser_drag'])
+
 // Bounded history of recent call signatures, used only for cycle detection
 // (the exact-repeat counter above has no size limit and never needs one).
 const RECENT_SIGNATURE_WINDOW = 8
@@ -161,7 +174,8 @@ export function checkBeforeCall(state: LoopGuardState, toolName: string, args: R
   const sig = signatureFor(toolName, args)
   const count = (state.callSignatureCounts[sig] ?? 0) + 1
   state.callSignatureCounts[sig] = count
-  const limit = state.lastOutcomeBySignature[sig] === true ? SUCCEEDING_DUPLICATE_CALL_LIMIT : DUPLICATE_CALL_LIMIT
+  const eligibleForElevation = state.lastOutcomeBySignature[sig] === true && !FIXED_TARGET_TOOLS.has(toolName)
+  const limit = eligibleForElevation ? SUCCEEDING_DUPLICATE_CALL_LIMIT : DUPLICATE_CALL_LIMIT
   if (count > limit) {
     state.totalBlocks++
     return {

@@ -47,24 +47,51 @@ const DEFAULT_TEXT_CANDIDATE_SELECTOR = 'a, button, [role=button], [onclick], in
  * click/keyboard event, never a synthetic one dispatched from inside this
  * script. Shared so a second tool (browser_type) doesn't have to re-require
  * a caller to already know a CSS selector before it can act.
+ *
+ * Every tier prefers a VISIBLE match over the first DOM-order match — sites
+ * that reuse the same testid/aria-label for more than one element (X.com's
+ * reply-modal textarea shares data-testid="tweetTextarea_0" with a separate,
+ * off-screen/hidden compose widget) otherwise silently resolve to the wrong,
+ * invisible element: a click "succeeds" and typing "succeeds" but nothing
+ * visible ever changes, because it landed on an element the user can't see
+ * at all. Falls back to the first match if none pass the visibility check,
+ * rather than reporting not-found — better to try the old first-match
+ * behavior than refuse to act.
  */
 export function buildElementLocatorJs(opts: ElementLocatorOptions): string {
   const target = { selector: opts.selector, ariaLabel: opts.ariaLabel, role: opts.role, text: opts.text }
   const candidateSelector = opts.textCandidateSelector ?? DEFAULT_TEXT_CANDIDATE_SELECTOR
   return `(async () => {
     const t = ${JSON.stringify(target)};
+    const isVisible = (e) => {
+      const r = e.getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0) return false;
+      const s = getComputedStyle(e);
+      return s.visibility !== 'hidden' && s.display !== 'none';
+    };
+    const pickVisible = (arr) => arr.find(isVisible) || arr[0] || null;
     let matchedBy = null, el = null;
-    if (t.selector) { const x = document.querySelector(t.selector); if (x) { el = x; matchedBy = 'selector'; } }
-    if (!el && t.ariaLabel) { const x = document.querySelector('[aria-label=' + JSON.stringify(t.ariaLabel) + ']'); if (x) { el = x; matchedBy = 'aria-label'; } }
+    if (t.selector) {
+      el = pickVisible(Array.from(document.querySelectorAll(t.selector)));
+      if (el) matchedBy = 'selector';
+    }
+    if (!el && t.ariaLabel) {
+      el = pickVisible(Array.from(document.querySelectorAll('[aria-label=' + JSON.stringify(t.ariaLabel) + ']')));
+      if (el) matchedBy = 'aria-label';
+    }
     if (!el && t.role && t.text) {
       const els = Array.from(document.querySelectorAll('[role=' + JSON.stringify(t.role) + ']'));
-      el = els.find(e => (e.innerText || '').trim().toLowerCase() === t.text.toLowerCase()) || els.find(e => (e.innerText || '').toLowerCase().includes(t.text.toLowerCase()));
+      const exact = els.filter(e => (e.innerText || '').trim().toLowerCase() === t.text.toLowerCase());
+      const partial = els.filter(e => (e.innerText || '').toLowerCase().includes(t.text.toLowerCase()));
+      el = pickVisible(exact) || pickVisible(partial);
       if (el) matchedBy = 'role+text';
     }
     if (!el && t.text) {
-      const all = document.querySelectorAll(${JSON.stringify(candidateSelector)});
-      for (const e of all) { const txt = ((e.innerText || e.value || '') + '').trim().toLowerCase(); if (txt === t.text.toLowerCase()) { el = e; break; } }
-      if (!el) for (const e of all) { const txt = ((e.innerText || e.value || '') + '').toLowerCase(); if (txt.includes(t.text.toLowerCase())) { el = e; break; } }
+      const all = Array.from(document.querySelectorAll(${JSON.stringify(candidateSelector)}));
+      const norm = e => ((e.innerText || e.value || '') + '').trim().toLowerCase();
+      const exact = all.filter(e => norm(e) === t.text.toLowerCase());
+      const partial = all.filter(e => norm(e).includes(t.text.toLowerCase()));
+      el = pickVisible(exact) || pickVisible(partial);
       if (el) matchedBy = 'text';
     }
     if (!el) return { found: false };

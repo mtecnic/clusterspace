@@ -28,14 +28,12 @@ export function registerBrowserInteractionT1Tools(): void {
     run: async ({ pane_id, selector }) => {
       const wc = getBrowserWebContents(pane_id)
       if (!wc) return { success: false, error: `No browser pane with id ${pane_id}` }
-      const code = `(async () => {
-        const el = document.querySelector(${JSON.stringify(selector)});
-        if (!el) return { found: false };
-        el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
-        await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
-        const r = el.getBoundingClientRect();
-        return { found: true, tag: el.tagName.toLowerCase(), x: Math.round(r.x + r.width/2), y: Math.round(r.y + r.height/2) };
-      })()`
+      // Shared locator (not a bespoke document.querySelector here) so this
+      // gets the same visible-match preference as browser_smart_click/
+      // browser_type — a bare querySelector always takes the first DOM-order
+      // match regardless of visibility, which silently clicks the wrong
+      // element on pages that reuse a selector for more than one thing.
+      const code = buildElementLocatorJs({ selector })
       try {
         const result = await wc.executeJavaScript(code, true) as { found: boolean; tag?: string; x?: number; y?: number }
         if (!result.found || result.x == null || result.y == null) return { success: true, found: false }
