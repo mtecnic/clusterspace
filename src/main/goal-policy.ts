@@ -110,6 +110,9 @@ const BUILTIN_PERMISSIONS: Record<string, ToolPermissions> = {
   declare_step: { risk: 'read_only' },
   verify_step: { risk: 'read_only' },
 
+  // Pauses only — no effect on any pane/system state.
+  wait: { risk: 'read_only' },
+
   // Pane / workspace — local UI mutations.
   list_panes: { risk: 'read_only' },
   capture_screenshot: { risk: 'read_only' },

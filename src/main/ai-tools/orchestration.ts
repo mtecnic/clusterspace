@@ -206,4 +206,21 @@ export function registerOrchestrationTools(): void {
       return `Created goal "${description}" (ID: ${goal.id}) with ${paneIds.length} assigned agents`
     }
   })
+
+  toolRegistry.register<{ ms: number }, { success: boolean; waitedMs: number }>({
+    name: 'wait',
+    description: 'Pause for a fixed duration — use this to pace repeated actions (e.g. "no more than one like every 30 seconds"), not write_to_terminal sleep (may not be a real shell), wait_for_output (terminal-only, requires a real pane), or navigating away and back as a fake timer.',
+    parameters: {
+      type: 'object',
+      properties: {
+        ms: { type: 'number', description: 'Milliseconds to wait (max 120000 / 2 minutes — call again for longer pauses)' }
+      },
+      required: ['ms']
+    },
+    run: async ({ ms }) => {
+      const capped = Math.min(Math.max(0, ms), 120_000)
+      await new Promise(r => setTimeout(r, capped))
+      return { success: true, waitedMs: capped }
+    }
+  })
 }
