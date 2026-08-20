@@ -35,6 +35,12 @@ import {
   SuccessCriterion,
   GoalPolicy
 } from '../shared/types'
+import type { ErrorKind } from '../shared/ai-error-classifier'
+
+export interface AIStreamError {
+  message: string
+  kind?: ErrorKind
+}
 
 /** Args accepted by GoalRunner.start — mirrors StartGoalInput on the main side. */
 export interface StartGoalInput {
@@ -149,7 +155,7 @@ export interface ElectronAPI {
   aiStreamMessage: (messages: AIMessage[]) => void
   onAIStreamChunk: (callback: (chunk: string) => void) => () => void
   onAIStreamEnd: (callback: (message: AIMessage) => void) => () => void
-  onAIStreamError: (callback: (error: string) => void) => () => void
+  onAIStreamError: (callback: (error: AIStreamError) => void) => () => void
   aiCancel: () => void
 
   // AI Tool operations
@@ -538,8 +544,8 @@ const electronAPI: ElectronAPI = {
     }
   },
 
-  onAIStreamError: (callback: (error: string) => void) => {
-    const handler = (_event: IpcRendererEvent, error: string) => {
+  onAIStreamError: (callback: (error: AIStreamError) => void) => {
+    const handler = (_event: IpcRendererEvent, error: AIStreamError) => {
       callback(error)
     }
     ipcRenderer.on(IPC_CHANNELS.AI_STREAM_ERROR, handler)

@@ -195,18 +195,21 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
       // else: normal completion — the model answered with text. Nothing to do.
     })
 
-    const unsubError = window.electronAPI.onAIStreamError((err) => {
+    const unsubError = window.electronAPI.onAIStreamError(({ message: err, kind }) => {
       setIsStreaming(false)
       streamContentRef.current = ''
 
-      // Check if this is a format/API error that might be recoverable
-      const isFormatError = err.includes('400') || err.includes('No user query')
-
-      if (isFormatError && toolRetryCountRef.current < MAX_TOOL_RETRIES) {
-        // API format error - might be due to tool message format
-        setError(`API Error: ${err}. The model may not support this message format.`)
+      if (kind === 'context_overflow') {
+        setError(`Context window exceeded: ${err}. The conversation is too long for the model — start a new conversation, or trim older messages.`)
       } else {
-        setError(err)
+        // Check if this is a format/API error that might be recoverable
+        const isFormatError = err.includes('400') || err.includes('No user query')
+        if (isFormatError && toolRetryCountRef.current < MAX_TOOL_RETRIES) {
+          // API format error - might be due to tool message format
+          setError(`API Error: ${err}. The model may not support this message format.`)
+        } else {
+          setError(err)
+        }
       }
 
       // Remove the placeholder message

@@ -26,6 +26,7 @@ import { capturePaneImage as capturePaneImageHelper } from './pane-screenshot'
 import { appendActionLog } from './browser-action-log'
 import { requestApproval, selectorLooksLikePassword, urlIsSensitive } from './browser-approval'
 import { isMutatingTool } from '../shared/loop-guard'
+import { classifyError, classifyHttpError, ClassifiedAIError } from '../shared/ai-error-classifier'
 import { registerAllTools, toolRegistry, type ToolContext, type ToolRuntimeState } from './ai-tools'
 
 // OpenAI-compatible request/response types
@@ -557,8 +558,8 @@ export class AIManager {
       })
 
       if (!response.ok) {
-        const error = await response.text()
-        throw new Error(`HTTP ${response.status}: ${error}`)
+        const errorText = await response.text()
+        throw new ClassifiedAIError(classifyHttpError(response.status, errorText))
       }
 
       const data = await response.json() as ChatCompletionResponse
@@ -637,14 +638,16 @@ export class AIManager {
       })
 
       if (!response.ok) {
-        const error = await response.text()
+        const errorText = await response.text()
+        const classified = classifyHttpError(response.status, errorText)
         // Log detailed error info for debugging
         console.error('[AI] Request failed:', {
           status: response.status,
-          error,
+          kind: classified.kind,
+          error: errorText,
           messageRoles: request.messages.map(m => m.role)
         })
-        throw new Error(`HTTP ${response.status}: ${error}`)
+        throw new ClassifiedAIError(classified)
       }
 
       const reader = response.body?.getReader()
@@ -774,10 +777,11 @@ export class AIManager {
       return finalMessage
     } catch (error) {
       if (!this.window.isDestroyed()) {
-        this.window.webContents.send(
-          IPC_CHANNELS.AI_STREAM_ERROR,
-          error instanceof Error ? error.message : 'Stream failed'
-        )
+        const classified = classifyError(error)
+        this.window.webContents.send(IPC_CHANNELS.AI_STREAM_ERROR, {
+          message: error instanceof Error ? error.message : 'Stream failed',
+          kind: classified.kind
+        })
       }
       return null
     } finally {
