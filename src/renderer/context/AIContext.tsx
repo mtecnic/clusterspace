@@ -267,6 +267,41 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
     }
   }, [onFocusPane, onMaximizePane])
 
+  // Give the model one bounded final turn instead of cutting it off cold —
+  // shared by every "the agent is stuck, stop the loop" condition
+  // (loop-guard halt, MAX_TOOL_RETRIES, maxAutoTurns). Before this, those
+  // three had three different outcomes: a real final turn (halt, added
+  // first), a banner-only stop with no model turn at all (MAX_TOOL_RETRIES),
+  // and a hardcoded fake assistant string instead of a real model response
+  // (maxAutoTurns). finalTurnRef makes onAIStreamEnd treat the resulting
+  // response as terminal — any tool_calls it contains are never dispatched,
+  // since the run is ending regardless of what the model asks for next.
+  //
+  // `pendingMessages` = messages the caller has already (or is about to,
+  // via its own setMessages) commit to React state, but that messagesRef
+  // hasn't caught up to yet (state updates are async) — needed to build
+  // `allMessages` correctly without double-adding them to visible state.
+  // This function only ever adds the nudge itself to state; the caller is
+  // responsible for committing pendingMessages before or via its own call.
+  const requestFinalTurnAndStop = useCallback((pendingMessages: AIMessage[], reasonForModel: string, reasonForBanner?: string) => {
+    if (reasonForBanner) setError(reasonForBanner)
+    const nudge: AIMessage = {
+      id: uuidv4(),
+      role: 'system',
+      content: `${reasonForModel} This is your final turn — no more tool calls will run. Briefly explain to the user what happened and what they should try next.`,
+      timestamp: Date.now()
+    }
+    setMessages(prev => [...prev, nudge])
+    const allMessages = [...stripStaleScreenshots(messagesRef.current), ...pendingMessages, nudge]
+
+    finalTurnRef.current = true
+    const placeholder: AIMessage = { id: uuidv4(), role: 'assistant', content: '', timestamp: Date.now() }
+    setMessages(prev => [...prev, placeholder])
+    setIsStreaming(true)
+    streamContentRef.current = ''
+    window.electronAPI.aiStreamMessage(allMessages)
+  }, [])
+
   // Handle tool calls with retry logic
   // Takes assistantMessage to include in conversation (avoids stale closure)
   const handleToolCalls = useCallback(async (toolCalls: AIToolCall[], assistantMessage: AIMessage) => {
@@ -400,28 +435,12 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
     }
 
     if (haltRequested) {
-      setError('Stopped: repeated duplicate tool calls exceeded the safety limit. See the explanation below.')
-      // Bounded final turn: let the model explain what happened in its own
-      // words instead of cutting it off cold. finalTurnRef makes sure
-      // onAIStreamEnd treats this response as terminal — any tool_calls it
-      // contains are never dispatched, since the run is ending regardless.
-      const nudge: AIMessage = {
-        id: uuidv4(),
-        role: 'system',
-        content: 'Stopping now: repeated duplicate tool calls exceeded the safety limit. This is your final turn — no more tool calls will run. Briefly explain to the user what happened and what they should try next.',
-        timestamp: Date.now()
-      }
-      const appended = [...toolResults, nudge]
-      setMessages(prev => [...stripStaleScreenshots(prev), ...appended])
-      const currentMessages = stripStaleScreenshots(messagesRef.current)
-      const allMessages = [...currentMessages, ...appended]
-
-      finalTurnRef.current = true
-      const placeholder: AIMessage = { id: uuidv4(), role: 'assistant', content: '', timestamp: Date.now() }
-      setMessages(prev => [...prev, placeholder])
-      setIsStreaming(true)
-      streamContentRef.current = ''
-      window.electronAPI.aiStreamMessage(allMessages)
+      setMessages(prev => [...stripStaleScreenshots(prev), ...toolResults])
+      requestFinalTurnAndStop(
+        toolResults,
+        'Stopping now: repeated duplicate tool calls exceeded the safety limit.',
+        'Stopped: repeated duplicate tool calls exceeded the safety limit. See the explanation below.'
+      )
       return
     }
 
@@ -438,10 +457,13 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
     if (hasErrors) {
       toolRetryCountRef.current++
       if (toolRetryCountRef.current >= MAX_TOOL_RETRIES) {
-        setError(`Tool failed after ${MAX_TOOL_RETRIES} attempts. Please try a different approach.`)
         toolRetryCountRef.current = 0
-        // Don't continue - let user intervene
         setMessages(prev => [...prev, ...toolResults])
+        requestFinalTurnAndStop(
+          toolResults,
+          `Stopping now: tool calls have failed ${MAX_TOOL_RETRIES} times in a row.`,
+          `Stopped: tool failed after ${MAX_TOOL_RETRIES} attempts. See the explanation below.`
+        )
         return
       }
     } else {
@@ -484,15 +506,11 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
     // Check auto turn limit to prevent runaway loops
     autoTurnCountRef.current++
     if (autoTurnCountRef.current >= maxAutoTurnsRef.current) {
-      // Add a message asking user to review and continue
-      const pauseMessage: AIMessage = {
-        id: uuidv4(),
-        role: 'assistant',
-        content: `Reached ${maxAutoTurnsRef.current} automatic turns. Please review progress and provide guidance to continue.`,
-        timestamp: Date.now()
-      }
-      setMessages(prev => [...prev, pauseMessage])
       autoTurnCountRef.current = 0
+      // `appended` (toolResults + optional screenshot) was already committed
+      // to state just above — pass it as pendingMessages so allMessages
+      // includes it without double-adding it to visible state.
+      requestFinalTurnAndStop(appended, `Stopping now: reached ${maxAutoTurnsRef.current} automatic turns.`)
       return  // Stop auto-loop, require user input
     }
 
