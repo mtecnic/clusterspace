@@ -4,7 +4,7 @@ import { getBrowserWebContents } from '../../browser-pane-registry'
 import { getActionLog } from '../../browser-action-log'
 import { getRecipeStore, runRecipe, type Recipe } from '../../browser-recipes'
 import { toolRegistry } from '../registry'
-import { cdpClickAt } from './_helpers'
+import { cdpClickAt, buildElementLocatorJs } from './_helpers'
 import { sendCdpCommand } from '../../cdp-helpers'
 import { IPC_CHANNELS } from '../../../shared/types'
 
@@ -50,29 +50,7 @@ export function registerBrowserAdvancedTools(): void {
     run: async ({ pane_id, selector, aria_label, role, text }) => {
       const wc = getBrowserWebContents(pane_id)
       if (!wc) return { success: false, error: `No browser pane ${pane_id}` }
-      const target = { selector, ariaLabel: aria_label, role, text }
-      const code = `(async () => {
-        const t = ${JSON.stringify(target)};
-        let matchedBy = null, el = null;
-        if (t.selector) { const x = document.querySelector(t.selector); if (x) { el = x; matchedBy = 'selector'; } }
-        if (!el && t.ariaLabel) { const x = document.querySelector('[aria-label=' + JSON.stringify(t.ariaLabel) + ']'); if (x) { el = x; matchedBy = 'aria-label'; } }
-        if (!el && t.role && t.text) {
-          const els = Array.from(document.querySelectorAll('[role=' + JSON.stringify(t.role) + ']'));
-          el = els.find(e => (e.innerText || '').trim().toLowerCase() === t.text.toLowerCase()) || els.find(e => (e.innerText || '').toLowerCase().includes(t.text.toLowerCase()));
-          if (el) matchedBy = 'role+text';
-        }
-        if (!el && t.text) {
-          const all = document.querySelectorAll('a, button, [role=button], [onclick], input[type=submit], input[type=button]');
-          for (const e of all) { const txt = ((e.innerText || e.value || '') + '').trim().toLowerCase(); if (txt === t.text.toLowerCase()) { el = e; break; } }
-          if (!el) for (const e of all) { const txt = ((e.innerText || e.value || '') + '').toLowerCase(); if (txt.includes(t.text.toLowerCase())) { el = e; break; } }
-          if (el) matchedBy = 'text';
-        }
-        if (!el) return { found: false };
-        el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
-        await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
-        const r = el.getBoundingClientRect();
-        return { found: true, matchedBy, tag: el.tagName.toLowerCase(), x: Math.round(r.x + r.width/2), y: Math.round(r.y + r.height/2) };
-      })()`
+      const code = buildElementLocatorJs({ selector, ariaLabel: aria_label, role, text })
       try {
         const result = await wc.executeJavaScript(code, true) as { found: boolean; matchedBy?: string; tag?: string; x?: number; y?: number }
         if (!result.found || result.x == null || result.y == null) return { success: true, found: false }

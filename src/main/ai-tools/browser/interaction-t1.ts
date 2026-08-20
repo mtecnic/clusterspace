@@ -1,6 +1,11 @@
 import { getBrowserWebContents } from '../../browser-pane-registry'
 import { toolRegistry } from '../registry'
-import { cdpClickAt } from './_helpers'
+import { cdpClickAt, buildElementLocatorJs } from './_helpers'
+
+// Candidate pool for browser_type's "match_text alone" resolver tier —
+// text-entry targets, not the clickable-elements list browser_smart_click
+// uses by default.
+const TEXT_ENTRY_CANDIDATE_SELECTOR = 'input, textarea, [contenteditable], [role="textbox"], [role="searchbox"]'
 
 /**
  * Tier 1: reliable input + wait primitives. These are the bread-and-butter
@@ -46,35 +51,47 @@ export function registerBrowserInteractionT1Tools(): void {
     }
   })
 
-  toolRegistry.register<{ pane_id: string; selector: string; text: string; submit?: boolean }, { success: boolean; found?: boolean; error?: string }>({
+  toolRegistry.register<{
+    pane_id: string
+    selector?: string
+    aria_label?: string
+    role?: string
+    match_text?: string
+    text: string
+    submit?: boolean
+  }, { success: boolean; found?: boolean; matchedBy?: string; error?: string }>({
     name: 'browser_type',
-    description: 'Type text into an input, textarea, or contenteditable/rich-text box matching a CSS selector, replacing any existing content. Dispatches real trusted key events (same mechanism as browser_keypress, one call per character) so it works on React/Draft.js/Lexical-style editors, not just plain form fields. Optionally presses Enter after (submit).',
+    description: 'Type text into an input, textarea, or contenteditable/rich-text box, replacing any existing content. Locate the target the same way browser_smart_click does — by selector, aria_label, role+match_text, or match_text alone — so you don\'t need to discover a CSS selector first. Dispatches real trusted key events (same mechanism as browser_keypress, one call per character) so it works on React/Draft.js/Lexical-style editors, not just plain form fields. Optionally presses Enter after (submit).',
     parameters: {
       type: 'object',
       properties: {
         pane_id: { type: 'string', description: 'The ID of the browser pane' },
-        selector: { type: 'string', description: 'CSS selector for the input/textarea/contenteditable element' },
+        selector: { type: 'string', description: 'Optional CSS selector for the input/textarea/contenteditable element (tried first)' },
+        aria_label: { type: 'string', description: 'Optional aria-label to match the target element' },
+        role: { type: 'string', description: 'Optional ARIA role (use with match_text)' },
+        match_text: { type: 'string', description: 'Visible text/placeholder to locate the target by (case-insensitive, exact then substring) — NOT the text to type, see `text`' },
         text: { type: 'string', description: 'Text to type. Existing content in the field is cleared first.' },
         submit: { type: 'boolean', description: 'If true, presses Enter after typing (default: false)' }
       },
-      required: ['pane_id', 'selector', 'text']
+      required: ['pane_id', 'text']
     },
-    run: async ({ pane_id, selector, text, submit }) => {
+    run: async ({ pane_id, selector, aria_label, role, match_text, text, submit }) => {
       const wc = getBrowserWebContents(pane_id)
       if (!wc) return { success: false, error: `No browser pane with id ${pane_id}` }
       // Locate + scroll into view (read-only query, not a simulated
       // interaction) — the actual focus and typing below both go through
-      // real input events, same as browser_click/browser_keypress.
-      const locate = `(async () => {
-        const el = document.querySelector(${JSON.stringify(selector)});
-        if (!el) return { found: false };
-        el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
-        await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
-        const r = el.getBoundingClientRect();
-        return { found: true, x: Math.round(r.x + r.width/2), y: Math.round(r.y + r.height/2) };
-      })()`
+      // real input events, same as browser_click/browser_keypress. Same
+      // resolver chain as browser_smart_click, but matching against
+      // text-entry elements instead of clickable ones at the match_text tier.
+      const locate = buildElementLocatorJs({
+        selector,
+        ariaLabel: aria_label,
+        role,
+        text: match_text,
+        textCandidateSelector: TEXT_ENTRY_CANDIDATE_SELECTOR
+      })
       try {
-        const loc = await wc.executeJavaScript(locate, true) as { found: boolean; x?: number; y?: number }
+        const loc = await wc.executeJavaScript(locate, true) as { found: boolean; matchedBy?: string; x?: number; y?: number }
         if (!loc.found || loc.x == null || loc.y == null) return { success: true, found: false }
         // A real click (not el.focus()) — some rich-text editors only fully
         // initialize their internal selection/cursor state on a genuine
@@ -102,7 +119,7 @@ export function registerBrowserInteractionT1Tools(): void {
           wc.sendInputEvent({ type: 'keyDown', keyCode: 'Enter' })
           wc.sendInputEvent({ type: 'keyUp', keyCode: 'Enter' })
         }
-        return { success: true, found: true }
+        return { success: true, found: true, matchedBy: loc.matchedBy }
       } catch (error) {
         return { success: false, error: error instanceof Error ? error.message : String(error) }
       }

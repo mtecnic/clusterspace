@@ -23,6 +23,58 @@ export async function saveScreenshotToDisk(
   return { success: true, path: fullPath, width, height, bytes: pngBuffer.length }
 }
 
+export interface ElementLocatorOptions {
+  selector?: string
+  ariaLabel?: string
+  role?: string
+  text?: string
+  /** CSS selector for the "text alone" fallback tier's candidate pool.
+   *  Defaults to clickable elements (browser_smart_click's use case); pass
+   *  an input/textarea/contenteditable selector when locating a text-entry
+   *  target instead (browser_type's use case). */
+  textCandidateSelector?: string
+}
+
+const DEFAULT_TEXT_CANDIDATE_SELECTOR = 'a, button, [role=button], [onclick], input[type=submit], input[type=button]'
+
+/**
+ * Builds the JS expression (for executeJavaScript) that resolves an element
+ * via the same 4-tier fallback chain originally written for
+ * browser_smart_click: selector -> aria-label -> role+text -> visible text
+ * (exact match then substring, at both text-based tiers). Returns
+ * `{found: false}` or `{found: true, matchedBy, tag, x, y}` (center point,
+ * already scrolled into view) — callers act on (x, y) via a real trusted
+ * click/keyboard event, never a synthetic one dispatched from inside this
+ * script. Shared so a second tool (browser_type) doesn't have to re-require
+ * a caller to already know a CSS selector before it can act.
+ */
+export function buildElementLocatorJs(opts: ElementLocatorOptions): string {
+  const target = { selector: opts.selector, ariaLabel: opts.ariaLabel, role: opts.role, text: opts.text }
+  const candidateSelector = opts.textCandidateSelector ?? DEFAULT_TEXT_CANDIDATE_SELECTOR
+  return `(async () => {
+    const t = ${JSON.stringify(target)};
+    let matchedBy = null, el = null;
+    if (t.selector) { const x = document.querySelector(t.selector); if (x) { el = x; matchedBy = 'selector'; } }
+    if (!el && t.ariaLabel) { const x = document.querySelector('[aria-label=' + JSON.stringify(t.ariaLabel) + ']'); if (x) { el = x; matchedBy = 'aria-label'; } }
+    if (!el && t.role && t.text) {
+      const els = Array.from(document.querySelectorAll('[role=' + JSON.stringify(t.role) + ']'));
+      el = els.find(e => (e.innerText || '').trim().toLowerCase() === t.text.toLowerCase()) || els.find(e => (e.innerText || '').toLowerCase().includes(t.text.toLowerCase()));
+      if (el) matchedBy = 'role+text';
+    }
+    if (!el && t.text) {
+      const all = document.querySelectorAll(${JSON.stringify(candidateSelector)});
+      for (const e of all) { const txt = ((e.innerText || e.value || '') + '').trim().toLowerCase(); if (txt === t.text.toLowerCase()) { el = e; break; } }
+      if (!el) for (const e of all) { const txt = ((e.innerText || e.value || '') + '').toLowerCase(); if (txt.includes(t.text.toLowerCase())) { el = e; break; } }
+      if (el) matchedBy = 'text';
+    }
+    if (!el) return { found: false };
+    el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+    await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+    const r = el.getBoundingClientRect();
+    return { found: true, matchedBy, tag: el.tagName.toLowerCase(), x: Math.round(r.x + r.width/2), y: Math.round(r.y + r.height/2) };
+  })()`
+}
+
 /**
  * CDP-based click. webContents.sendInputEvent has reliability gaps on
  * <webview> tags (events occasionally come through with reduced trust),
