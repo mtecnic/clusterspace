@@ -132,6 +132,21 @@ export class AIManager {
     else this.policiesByCaller.delete(callerId)
   }
 
+  /** Set once at the start of a conversation/goal — see ToolRuntimeState.originalIntent. */
+  setConversationIntent(callerId: string, intent: string): void {
+    let state = this.toolStateByCaller.get(callerId)
+    if (!state) {
+      state = { currentStep: null, originalIntent: null }
+      this.toolStateByCaller.set(callerId, state)
+    }
+    state.originalIntent = intent
+  }
+
+  /** Interactive-chat convenience wrapper — keeps INTERACTIVE_CALLER_ID private to this file. */
+  setInteractiveIntent(intent: string): void {
+    this.setConversationIntent(INTERACTIVE_CALLER_ID, intent)
+  }
+
   /** Drop all per-caller state (policy + tool state) once a goal ends, so
    *  the maps don't grow unboundedly across many goal runs. */
   releaseCaller(callerId: string): void {
@@ -164,7 +179,7 @@ export class AIManager {
   private buildToolContext(callerId: string): ToolContext {
     let state = this.toolStateByCaller.get(callerId)
     if (!state) {
-      state = { currentStep: null }
+      state = { currentStep: null, originalIntent: null }
       this.toolStateByCaller.set(callerId, state)
     }
     return {

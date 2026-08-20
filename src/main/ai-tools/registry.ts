@@ -14,6 +14,17 @@ import type { ConfigLoader } from '../config-loader'
 export interface ToolRuntimeState {
   // Step protocol — set by declare_step, cleared by verify_step.
   currentStep: { number: number; title: string; action: string; successCriteria: string } | null
+  // The original user request/goal this caller is pursuing, set once at the
+  // start of a conversation/goal (AIManager.setConversationIntent). Echoed
+  // back by declare_step so it stays freshly visible on every step of a
+  // long tool loop instead of relying on the model's attention reaching
+  // back to a message that may be many turns (or, after a message-cap
+  // trim, an eviction gap) behind it — observed in practice on a 20-minute
+  // browse-and-like task where the model's own operational shorthand
+  // ("check for a '0 Likes' aria-label") quietly diverged from the actual
+  // instruction ("no engagement at all" — zero likes AND replies AND
+  // reposts) after enough repeated turns.
+  originalIntent: string | null
 }
 
 /**

@@ -22,6 +22,7 @@ import {
 import { capturePaneImage } from './pane-screenshot'
 import { getActionLog, subscribeActionLog } from './browser-action-log'
 import { resolveApproval } from './browser-approval'
+import { classifyError } from '../shared/ai-error-classifier'
 import { resolvePaneControlAck } from './pane-control-ack'
 import { RecipeStore } from './browser-recipes'
 import {
@@ -758,19 +759,24 @@ function registerIpcHandlers() {
   ipcMain.on(IPC_CHANNELS.AI_CHAT_STREAM, async (_event, messages: AIMessage[]) => {
     try {
       if (!aiManager || !aiStore) {
-        mainWindow?.webContents.send(IPC_CHANNELS.AI_STREAM_ERROR, 'AI not initialized')
+        mainWindow?.webContents.send(IPC_CHANNELS.AI_STREAM_ERROR, { message: 'AI not initialized' })
         return
       }
       const provider = aiStore.getActiveProvider()
       if (!provider) {
-        mainWindow?.webContents.send(IPC_CHANNELS.AI_STREAM_ERROR, 'No active AI provider')
+        mainWindow?.webContents.send(IPC_CHANNELS.AI_STREAM_ERROR, { message: 'No active AI provider' })
         return
       }
       await aiManager.streamMessage(messages, provider, provider.resolvedApiKey)
     } catch (error) {
       console.error('AI chat stream error:', error)
-      mainWindow?.webContents.send(IPC_CHANNELS.AI_STREAM_ERROR, (error as Error).message)
+      const classified = classifyError(error)
+      mainWindow?.webContents.send(IPC_CHANNELS.AI_STREAM_ERROR, { message: classified.message, kind: classified.kind })
     }
+  })
+
+  ipcMain.handle(IPC_CHANNELS.AI_SET_INTENT, (_event, intent: string) => {
+    aiManager?.setInteractiveIntent(intent)
   })
 
   ipcMain.on(IPC_CHANNELS.AI_CANCEL, () => {

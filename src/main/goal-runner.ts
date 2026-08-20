@@ -305,6 +305,7 @@ export class GoalRunner {
     // this goal's own id — doesn't affect the interactive chat panel or any
     // other concurrently-running goal.
     this.aiManager.setPolicyForCaller(runtime.checkpoint.id, runtime.checkpoint.policy)
+    this.aiManager.setConversationIntent(runtime.checkpoint.id, runtime.checkpoint.goal)
 
     // Compose the initial user prompt that wraps the goal in the runner
     // contract — the model must use claim_complete to attempt finishing.

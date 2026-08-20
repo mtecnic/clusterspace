@@ -164,6 +164,7 @@ export interface ElectronAPI {
   aiScreenshot: (paneId?: string) => Promise<string | null>
   aiWriteTerminal: (paneId: string, text: string) => Promise<{ success: boolean; error?: string }>
   aiExecuteTool: (toolCall: AIToolCall) => Promise<AIToolResult>
+  aiSetIntent: (intent: string) => Promise<void>
 
   // AI pane control (triggered by AI tools)
   onAIFocusPane: (callback: (payload: { paneId: string; requestId?: string }) => void) => () => void
@@ -577,6 +578,10 @@ const electronAPI: ElectronAPI = {
 
   aiExecuteTool: (toolCall: AIToolCall) => {
     return ipcRenderer.invoke('ai:execute:tool', toolCall)
+  },
+
+  aiSetIntent: (intent: string) => {
+    return ipcRenderer.invoke(IPC_CHANNELS.AI_SET_INTENT, intent)
   },
 
   // AI pane control (triggered by AI tools)

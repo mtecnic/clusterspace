@@ -593,6 +593,7 @@ export const IPC_CHANNELS = {
   AI_STREAM_CHUNK: 'ai:stream:chunk',
   AI_STREAM_END: 'ai:stream:end',
   AI_STREAM_ERROR: 'ai:stream:error',
+  AI_SET_INTENT: 'ai:set-intent',
   AI_CANCEL: 'ai:cancel',
   AI_SCREENSHOT_PANE: 'ai:screenshot:pane',
   AI_SCREENSHOT_WORKSPACE: 'ai:screenshot:workspace',
@@ -959,6 +960,7 @@ after a failure to see exactly what went wrong.
 - wait_for_agent: Block until another agent completes
 - share_context: Share information between agents
 - create_goal: Create a new orchestration goal
+- wait: Pause for a fixed duration (max 2 min per call) — use this to pace repeated actions (e.g. "no more than one per 30 seconds"). Not write_to_terminal's "sleep" (the pane may not be a real shell), not wait_for_output (terminal-only), and not a navigate-away-and-back trick.
 
 ## Autonomous Task Completion
 

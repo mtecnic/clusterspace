@@ -32,9 +32,20 @@ export function registerStepProtocolTools(): void {
         action,
         successCriteria: success_criteria
       }
+      // Echo the original task back on every declared step — on a long
+      // repeated-action loop (e.g. "like posts with no engagement, one
+      // every 30s, for 20 minutes"), the model's own operational shorthand
+      // for satisfying that criterion can quietly drift from what was
+      // actually asked as the loop grinds on, well past the point the
+      // original message is still fresh in its attention. Re-surfacing it
+      // verbatim here — not the model's own paraphrase of it — gives each
+      // step a fresh chance to notice the drift instead of compounding it.
+      const intentReminder = ctx.state.originalIntent
+        ? `\n\nOriginal task (verbatim — re-check this step actually satisfies it, not just what worked on a prior step): "${ctx.state.originalIntent}"`
+        : ''
       return `✓ Step ${step_number} declared: "${title}"\n` +
              `  Action: ${action}\n` +
-             `  Success criteria: ${success_criteria}\n\n` +
+             `  Success criteria: ${success_criteria}${intentReminder}\n\n` +
              `You may now execute this step. After execution, call verify_step to confirm results.`
     }
   })

@@ -343,7 +343,7 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
           if (disabledMsg) msgs.push({ id: uuidv4(), role: 'system', content: disabledMsg, timestamp: Date.now() })
           return { ok: false, messages: msgs, shotTarget: screenshotTargetFor(toolCall, true) }
         }
-        recordOutcome(guardStateRef.current, toolCall.name, true)
+        recordOutcome(guardStateRef.current, toolCall.name, true, { args: toolCall.arguments })
         return {
           ok: true,
           messages: [{
@@ -582,6 +582,15 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
     guardStateRef.current = createLoopGuardState()
     cancelRequestedRef.current = false
     autoTurnCountRef.current = 0  // Reset auto turn counter on new message
+
+    // Record the task-defining first message of a fresh conversation so
+    // declare_step can echo it back on every step — see
+    // ToolRuntimeState.originalIntent's doc comment. Deliberately only the
+    // first message, not every follow-up: a mid-task correction like "no,
+    // scroll down first" shouldn't overwrite what the actual task is.
+    if (messages.length === 0) {
+      window.electronAPI.aiSetIntent(content)
+    }
 
     // Add user message
     const userMessage: AIMessage = {
