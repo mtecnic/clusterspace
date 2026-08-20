@@ -29,6 +29,18 @@ import { isBrowserActionTool } from './vision-loop'
 
 const CONSECUTIVE_FAILURE_LIMIT = 3
 const DUPLICATE_CALL_LIMIT = 3
+// Higher ceiling for a call whose exact-same-args repeat last SUCCEEDED —
+// "find-and-act-on-the-first-match" tools (browser_smart_click, etc.) are
+// the correct, idiomatic way to iterate a "do X to each item in a list"
+// task one item at a time, and identical arguments are *expected* on every
+// iteration (e.g. aria_label: "0 Likes. Like" — always resolves to
+// whichever post is currently first, not a "the same post again" stuck
+// loop). Observed hitting DUPLICATE_CALL_LIMIT for real on a 20-minute
+// "like posts with no engagement" task, killing it after only 4 minutes.
+// Still bounded — a genuinely pointless-but-succeeding loop (e.g. clicking
+// an already-toggled-on checkbox over and over) should eventually trip
+// this too, just much later than a real failure loop.
+const SUCCEEDING_DUPLICATE_CALL_LIMIT = 20
 const HALT_AFTER_BLOCKS = 5
 
 // Bounded history of recent call signatures, used only for cycle detection
@@ -42,6 +54,9 @@ export interface LoopGuardState {
   disabledTools: Record<string, string>
   /** "tool:sorted-args-json" -> how many times that exact call has been seen */
   callSignatureCounts: Record<string, number>
+  /** "tool:sorted-args-json" -> whether the LAST dispatch of that exact call
+   *  succeeded — see SUCCEEDING_DUPLICATE_CALL_LIMIT's doc comment. */
+  lastOutcomeBySignature: Record<string, boolean>
   /** total duplicate-call blocks this run — HALT_AFTER_BLOCKS stops the loop */
   totalBlocks: number
   /** last RECENT_SIGNATURE_WINDOW call signatures, oldest first — see detectCycle */
@@ -49,7 +64,14 @@ export interface LoopGuardState {
 }
 
 export function createLoopGuardState(): LoopGuardState {
-  return { consecutiveFailures: {}, disabledTools: {}, callSignatureCounts: {}, totalBlocks: 0, recentSignatures: [] }
+  return {
+    consecutiveFailures: {},
+    disabledTools: {},
+    callSignatureCounts: {},
+    lastOutcomeBySignature: {},
+    totalBlocks: 0,
+    recentSignatures: []
+  }
 }
 
 /**
@@ -139,7 +161,8 @@ export function checkBeforeCall(state: LoopGuardState, toolName: string, args: R
   const sig = signatureFor(toolName, args)
   const count = (state.callSignatureCounts[sig] ?? 0) + 1
   state.callSignatureCounts[sig] = count
-  if (count > DUPLICATE_CALL_LIMIT) {
+  const limit = state.lastOutcomeBySignature[sig] === true ? SUCCEEDING_DUPLICATE_CALL_LIMIT : DUPLICATE_CALL_LIMIT
+  if (count > limit) {
     state.totalBlocks++
     return {
       reason: `Identical call to ${toolName} with the same arguments has now been made ${count} times. Stop repeating it — use the result you already have, or try a genuinely different approach.`,
@@ -174,6 +197,9 @@ export function recordOutcome(
   ok: boolean,
   context?: { args?: Record<string, unknown> }
 ): string | null {
+  if (context?.args) {
+    state.lastOutcomeBySignature[signatureFor(toolName, context.args)] = ok
+  }
   if (ok) {
     state.consecutiveFailures[toolName] = 0
     return null
