@@ -9,6 +9,7 @@ import { StatusBar } from './components/StatusBar'
 import { NewWorkspaceDialog } from './components/NewWorkspaceDialog'
 import { CommandPalette } from './components/CommandPalette'
 import { SettingsDialog } from './components/SettingsDialog'
+import { RemoteAccessSettingsDialog } from './components/RemoteAccessSettingsDialog'
 import { GridResizeDialog } from './components/GridResizeDialog'
 import { SSHServersDialog } from './components/SSHServersDialog'
 import { BrowserCredentialsDialog } from './components/BrowserCredentialsDialog'
@@ -43,6 +44,7 @@ function AppContent({ onRegisterFocusPane, onRegisterMaximizePane }: AppContentP
   const [showNewWorkspaceDialog, setShowNewWorkspaceDialog] = useState(false)
   const [showCommandPalette, setShowCommandPalette] = useState(false)
   const [showSettingsDialog, setShowSettingsDialog] = useState(false)
+  const [showRemoteAccessDialog, setShowRemoteAccessDialog] = useState(false)
   const [showGridResizeDialog, setShowGridResizeDialog] = useState(false)
   const [showSSHServersDialog, setShowSSHServersDialog] = useState(false)
   const [showBrowserCredentialsDialog, setShowBrowserCredentialsDialog] = useState(false)
@@ -412,6 +414,15 @@ function AppContent({ onRegisterFocusPane, onRegisterMaximizePane }: AppContentP
         onUpdateSettings={updateSettings}
         onExportWorkspace={handleExportWorkspace}
         onImportWorkspace={handleImportWorkspace}
+        onOpenRemoteAccess={() => setShowRemoteAccessDialog(true)}
+      />
+
+      {/* Remote Access Settings Dialog */}
+      <RemoteAccessSettingsDialog
+        isOpen={showRemoteAccessDialog}
+        onClose={() => setShowRemoteAccessDialog(false)}
+        settings={settings}
+        onUpdateSettings={updateSettings}
       />
 
       {/* Grid Resize Dialog */}

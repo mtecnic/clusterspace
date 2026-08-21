@@ -8,6 +8,7 @@ interface SettingsDialogProps {
   onUpdateSettings: (updates: Partial<AppSettings>) => void
   onExportWorkspace: () => void
   onImportWorkspace: () => void
+  onOpenRemoteAccess: () => void
 }
 
 const THEMES = [
@@ -23,7 +24,8 @@ export function SettingsDialog({
   settings,
   onUpdateSettings,
   onExportWorkspace,
-  onImportWorkspace
+  onImportWorkspace,
+  onOpenRemoteAccess
 }: SettingsDialogProps) {
   const [scrollbackLines, setScrollbackLines] = useState(settings?.scrollbackLines || 5000)
   const [fontSize, setFontSize] = useState(settings?.fontSize || 14)
@@ -117,6 +119,16 @@ export function SettingsDialog({
                 ))}
               </div>
             </div>
+          </div>
+
+          <div className="mb-6">
+            <h3 className="text-sm font-semibold text-cs-text mb-3">Remote Access</h3>
+            <p className="text-sm text-cs-text-muted mb-2">
+              View and control panes from a web browser when you're away from this machine.
+            </p>
+            <button className="btn btn-secondary" onClick={onOpenRemoteAccess}>
+              Configure Remote Access…
+            </button>
           </div>
 
           <div className="mb-6">
