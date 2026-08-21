@@ -1,22 +1,11 @@
 let currentView = null
 let currentRowKey = null
+// Persisted across the 15s poll re-render (and across expand/collapse
+// clicks, which also re-render) so groups don't keep collapsing themselves.
+const expandedPaneIds = new Set()
 
-// Flatten pane+tab into one sequential list — a pane with multiple tmux/SSH
-// sessions or multiple browser tabs previously only exposed its default tab
-// remotely (looked like "asking for a password": silently attaching to a
-// fresh/unauthenticated tab instead of the one with the real session).
-// Panes with no explicit tabs (or just one) still produce a single row.
-function flattenRows(panes) {
-  const rows = []
-  for (const pane of panes) {
-    const tabs = pane.tabs && pane.tabs.length ? pane.tabs : [{ id: undefined, label: pane.label, active: true, connected: pane.connected }]
-    for (const tab of tabs) rows.push({ pane, tab })
-  }
-  return rows
-}
-
-function rowKey(row) {
-  return `${row.pane.id}:${row.tab.id || ''}`
+function rowKey(paneId, tabId) {
+  return `${paneId}:${tabId || ''}`
 }
 
 async function loadPanes() {
@@ -29,34 +18,74 @@ async function loadPanes() {
     return
   }
 
-  const rows = flattenRows(panes)
   listEl.innerHTML = ''
-  rows.forEach((row, i) => {
-    const { pane, tab } = row
-    const label = tab.label && tab.label !== pane.label ? `${pane.label} › ${tab.label}` : pane.label
-    const item = document.createElement('div')
-    item.className = 'pane-item' + (rowKey(row) === currentRowKey ? ' active' : '')
-    const badgeTitle = pane.type === 'browser' && pane.tabs && pane.tabs.length > 1
+  panes.forEach((pane, i) => {
+    // Panes with no explicit tabs (or just one) render as a single row,
+    // same as before this grouping existed — no expand step needed.
+    const tabs = pane.tabs && pane.tabs.length ? pane.tabs : [{ id: undefined, label: pane.label, active: true, connected: pane.connected }]
+    const multi = tabs.length > 1
+    const expanded = expandedPaneIds.has(pane.id)
+    const anyConnected = tabs.some(t => t.connected)
+
+    const header = document.createElement('div')
+    header.className = 'pane-item' + (!multi && rowKey(pane.id, tabs[0].id) === currentRowKey ? ' active' : '')
+    const badgeTitle = pane.type === 'browser' && multi
       ? 'title="Selecting a background tab also makes it active on the local screen"'
       : ''
-    item.innerHTML = `
-      <div class="pane-num">${i + 1}</div>
-      <div class="dot ${tab.connected ? 'connected' : ''}"></div>
-      <div class="label">${escapeHtml(label)}</div>
-      <div class="type-badge" ${badgeTitle}>${pane.type}</div>
-    `
-    item.addEventListener('click', () => selectRow(row))
-    listEl.appendChild(item)
+    header.innerHTML = multi
+      ? `
+        <div class="pane-num">${i + 1}</div>
+        <div class="dot ${anyConnected ? 'connected' : ''}"></div>
+        <div class="label">${escapeHtml(pane.label)}</div>
+        <div class="tab-count" ${badgeTitle}>${tabs.length}</div>
+        <div class="chevron">${expanded ? '▾' : '▸'}</div>
+      `
+      : `
+        <div class="pane-num">${i + 1}</div>
+        <div class="dot ${anyConnected ? 'connected' : ''}"></div>
+        <div class="label">${escapeHtml(pane.label)}</div>
+        <div class="type-badge">${pane.type}</div>
+      `
+    header.addEventListener('click', () => {
+      if (multi) {
+        if (expandedPaneIds.has(pane.id)) expandedPaneIds.delete(pane.id)
+        else expandedPaneIds.add(pane.id)
+        loadPanes()
+      } else {
+        selectTab(pane, tabs[0])
+      }
+    })
+    listEl.appendChild(header)
+
+    if (multi && expanded) {
+      const tabsWrap = document.createElement('div')
+      tabsWrap.className = 'pane-tabs'
+      tabs.forEach(tab => {
+        const tabItem = document.createElement('div')
+        tabItem.className = 'tab-item' + (rowKey(pane.id, tab.id) === currentRowKey ? ' active' : '')
+        tabItem.innerHTML = `
+          <div class="dot ${tab.connected ? 'connected' : ''}"></div>
+          <div class="label">${escapeHtml(tab.label)}</div>
+          <div class="type-badge">${pane.type}</div>
+        `
+        tabItem.addEventListener('click', e => {
+          e.stopPropagation()
+          selectTab(pane, tab)
+        })
+        tabsWrap.appendChild(tabItem)
+      })
+      listEl.appendChild(tabsWrap)
+    }
   })
 
-  if (!rows.length) {
+  if (!panes.length) {
     listEl.innerHTML = '<div class="pane-item">No panes in the active workspace</div>'
   }
 }
 
-async function selectRow(row) {
-  const { pane, tab } = row
-  currentRowKey = rowKey(row)
+async function selectTab(pane, tab) {
+  currentRowKey = rowKey(pane.id, tab.id)
+  expandedPaneIds.add(pane.id) // keep this pane's group open once something inside it is selected
   loadPanes() // re-render for the active-highlight; the panes list is small
 
   const content = document.getElementById('viewer-content')

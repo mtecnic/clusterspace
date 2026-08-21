@@ -130,6 +130,48 @@ body {
 }
 .pane-item .dot.connected { background: #4ade80; }
 
+.tab-count {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: #3f3f46;
+  color: #d4d4d8;
+  flex-shrink: 0;
+}
+.chevron {
+  color: #71717a;
+  font-size: 11px;
+  flex-shrink: 0;
+  width: 12px;
+  text-align: center;
+}
+
+.pane-tabs {
+  background: #19191c;
+  border-bottom: 1px solid #232328;
+}
+.tab-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px 8px 44px;
+  cursor: pointer;
+  border-top: 1px solid #232328;
+}
+.tab-item:first-child { border-top: none; }
+.tab-item:hover { background: #26262c; }
+.tab-item.active { background: #2d2d63; }
+.tab-item .label { font-size: 12px; color: #d4d4d8; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tab-item .dot { width: 6px; height: 6px; border-radius: 50%; background: #52525b; flex-shrink: 0; }
+.tab-item .dot.connected { background: #4ade80; }
+.tab-item .type-badge {
+  font-size: 9px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: #3f3f46;
+  color: #a1a1aa;
+}
+
 .viewer {
   flex: 1;
   display: flex;
