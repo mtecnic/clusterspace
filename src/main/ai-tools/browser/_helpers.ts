@@ -23,6 +23,21 @@ export async function saveScreenshotToDisk(
   return { success: true, path: fullPath, width, height, bytes: pngBuffer.length }
 }
 
+/**
+ * Dispatches one real trusted keyboard event (keyDown [+char for a single
+ * printable character] + keyUp) via webContents.sendInputEvent. Shared by
+ * browser_keypress and the remote-access server's live browser-pane
+ * keyboard relay (src/main/remote-server/ws-browser.ts) — a real remote
+ * keyboard naturally produces one key event at a time, the same shape this
+ * already existed in for the AI tool.
+ */
+export function dispatchKeyEvent(wc: WebContents, key: string, modifiers: Array<'control' | 'shift' | 'alt' | 'meta'> = []): void {
+  const isPrintable = key.length === 1
+  wc.sendInputEvent({ type: 'keyDown', keyCode: key, modifiers })
+  if (isPrintable) wc.sendInputEvent({ type: 'char', keyCode: key, modifiers })
+  wc.sendInputEvent({ type: 'keyUp', keyCode: key, modifiers })
+}
+
 export interface ElementLocatorOptions {
   selector?: string
   ariaLabel?: string

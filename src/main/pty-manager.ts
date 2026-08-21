@@ -18,8 +18,48 @@ export class PtyManager {
   private window: BrowserWindow
   private maxScrollbackLines: number = 1000 // Keep last 1000 lines for restore
 
+  // Additional output/exit subscribers beyond the single hardcoded
+  // BrowserWindow above — added for remote-access (src/main/remote-server),
+  // so a WebSocket relay can mirror a pty's live output without touching
+  // the existing local-renderer push path at all. Deliberately separate
+  // from `window`: local push still goes through PTY_DATA/PTY_EXIT IPC
+  // exactly as before; this is purely additive.
+  private subscribers: Map<string, Set<(data: string) => void>> = new Map()
+  private exitSubscribers: Map<string, Set<() => void>> = new Map()
+
   constructor(window: BrowserWindow) {
     this.window = window
+  }
+
+  /** Notified on every data chunk from this pty, regardless of isBackground
+   *  (remote viewing of a currently-backgrounded pane is in scope — a
+   *  deliberate difference from the local-window gate, not an oversight).
+   *  Returns an unsubscribe function. */
+  subscribe(ptyId: string, cb: (data: string) => void): () => void {
+    let set = this.subscribers.get(ptyId)
+    if (!set) {
+      set = new Set()
+      this.subscribers.set(ptyId, set)
+    }
+    set.add(cb)
+    return () => {
+      set?.delete(cb)
+      if (set && set.size === 0) this.subscribers.delete(ptyId)
+    }
+  }
+
+  /** Notified once when this pty exits. Returns an unsubscribe function. */
+  subscribeExit(ptyId: string, cb: () => void): () => void {
+    let set = this.exitSubscribers.get(ptyId)
+    if (!set) {
+      set = new Set()
+      this.exitSubscribers.set(ptyId, set)
+    }
+    set.add(cb)
+    return () => {
+      set?.delete(cb)
+      if (set && set.size === 0) this.exitSubscribers.delete(ptyId)
+    }
   }
 
   spawn(config: PtySpawnConfig & { workspaceId?: string }): string {
@@ -79,6 +119,9 @@ export class PtyManager {
         if (!instance.isBackground && !this.window.isDestroyed()) {
           this.window.webContents.send(IPC_CHANNELS.PTY_DATA, ptyId, data)
         }
+
+        // Remote-access subscribers get every chunk regardless of isBackground.
+        this.subscribers.get(ptyId)?.forEach(cb => cb(data))
       }
     })
 
@@ -87,6 +130,9 @@ export class PtyManager {
       if (!this.window.isDestroyed()) {
         this.window.webContents.send(IPC_CHANNELS.PTY_EXIT, ptyId, exitCode, signal)
       }
+      this.exitSubscribers.get(ptyId)?.forEach(cb => cb())
+      this.subscribers.delete(ptyId)
+      this.exitSubscribers.delete(ptyId)
       this.ptys.delete(ptyId)
     })
 

@@ -7,6 +7,7 @@ import { saveScreenshotToDisk } from './browser/_helpers'
 import { notifyWorkspaceChanged } from './browser/advanced'
 import { sendPaneControl } from '../pane-control-ack'
 import type { PtyManager } from '../pty-manager'
+import type { WorkspaceStore } from '../workspace-store'
 import type { PaneConfig } from '../../shared/types'
 
 // Build the tab inventory for a pane (tmux tabs for terminals, browser tabs for
@@ -53,6 +54,37 @@ function buildPaneTabs(pane: PaneConfig, ptyManager: PtyManager): { tabs: AIPane
  * Pane / window / screenshot tools — the renderer-facing controls and the
  * workspace-level inventory.
  */
+/**
+ * Full pane inventory for the active workspace, unpaginated — shared by
+ * list_panes (which pages it for the model's context budget) and the
+ * remote-access server's GET /api/panes (which wants the whole list; a
+ * human's pane count is nowhere near list_panes' char-budget concern).
+ */
+export function getPaneListForActiveWorkspace(workspaceStore: WorkspaceStore, ptyManager: PtyManager): AIPaneInfo[] {
+  const settings = workspaceStore.getSettings()
+  if (!settings.activeWorkspaceId) return []
+  const workspace = workspaceStore.get(settings.activeWorkspaceId)
+  if (!workspace) return []
+  return workspace.panes.map(pane => {
+    const type = pane.type ?? 'terminal'
+    const { tabs, activeTabId } = buildPaneTabs(pane, ptyManager)
+    // A pane is "connected" if any of its tabs has a live backend.
+    const isConnected = tabs.some(t => t.connected)
+    return {
+      id: pane.id,
+      label: pane.label,
+      command: pane.command,
+      isConnected,
+      workspaceId: workspace.id,
+      type,
+      url: pane.url,
+      position: pane.position,
+      tabs,
+      activeTabId
+    }
+  })
+}
+
 export function registerPaneTools(): void {
   toolRegistry.register<{ cursor?: number; limit?: number }, AIPaneListResult>({
     name: 'list_panes',
@@ -65,36 +97,13 @@ export function registerPaneTools(): void {
       }
     },
     run: async (args, { workspaceStore, ptyManager }) => {
-      const settings = workspaceStore.getSettings()
-      if (!settings.activeWorkspaceId) return { items: [], hasMore: false, totalCount: 0 }
-      const workspace = workspaceStore.get(settings.activeWorkspaceId)
-      if (!workspace) return { items: [], hasMore: false, totalCount: 0 }
-
-      const totalCount = workspace.panes.length
+      const allItems = getPaneListForActiveWorkspace(workspaceStore, ptyManager)
+      const totalCount = allItems.length
       const cursor = Math.max(0, args.cursor ?? 0)
       const limit = Math.min(Math.max(1, args.limit ?? 50), 50)
-      const page = workspace.panes.slice(cursor, cursor + limit)
-      const end = cursor + page.length
+      const items = allItems.slice(cursor, cursor + limit)
+      const end = cursor + items.length
       const hasMore = end < totalCount
-
-      const items = page.map(pane => {
-        const type = pane.type ?? 'terminal'
-        const { tabs, activeTabId } = buildPaneTabs(pane, ptyManager)
-        // A pane is "connected" if any of its tabs has a live backend.
-        const isConnected = tabs.some(t => t.connected)
-        return {
-          id: pane.id,
-          label: pane.label,
-          command: pane.command,
-          isConnected,
-          workspaceId: workspace.id,
-          type,
-          url: pane.url,
-          position: pane.position,
-          tabs,
-          activeTabId
-        } satisfies AIPaneInfo
-      })
 
       return { items, hasMore, nextCursor: hasMore ? end : undefined, totalCount }
     }

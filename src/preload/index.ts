@@ -90,6 +90,15 @@ export interface ElectronAPI {
 
   // Dialog operations
   openDirectoryDialog: () => Promise<string | null>
+  openFileDialog: (filters?: { name: string; extensions: string[] }[]) => Promise<string | null>
+
+  // Remote access
+  remoteAccess: {
+    getStatus: () => Promise<{ running: boolean; port?: number; bindAddress?: string; connectedClients: number }>
+    hasCredentials: () => Promise<boolean>
+    setCredentials: (username: string, password: string) => Promise<void>
+    regenerateSecret: () => Promise<void>
+  }
 
   // App info
   getAppPath: (name: string) => Promise<string>
@@ -373,6 +382,19 @@ const electronAPI: ElectronAPI = {
   // Dialog operations
   openDirectoryDialog: () => {
     return ipcRenderer.invoke(IPC_CHANNELS.DIALOG_OPEN_DIRECTORY)
+  },
+
+  openFileDialog: (filters?: { name: string; extensions: string[] }[]) => {
+    return ipcRenderer.invoke(IPC_CHANNELS.DIALOG_OPEN_FILE, filters)
+  },
+
+  // Remote access
+  remoteAccess: {
+    getStatus: () => ipcRenderer.invoke(IPC_CHANNELS.REMOTE_ACCESS_GET_STATUS),
+    hasCredentials: () => ipcRenderer.invoke(IPC_CHANNELS.REMOTE_ACCESS_HAS_CREDENTIALS),
+    setCredentials: (username: string, password: string) =>
+      ipcRenderer.invoke(IPC_CHANNELS.REMOTE_ACCESS_SET_CREDENTIALS, username, password),
+    regenerateSecret: () => ipcRenderer.invoke(IPC_CHANNELS.REMOTE_ACCESS_REGENERATE_SECRET)
   },
 
   // App info

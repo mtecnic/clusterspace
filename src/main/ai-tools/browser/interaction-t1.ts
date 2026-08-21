@@ -1,6 +1,6 @@
 import { getBrowserWebContents } from '../../browser-pane-registry'
 import { toolRegistry } from '../registry'
-import { cdpClickAt, buildElementLocatorJs } from './_helpers'
+import { cdpClickAt, buildElementLocatorJs, dispatchKeyEvent } from './_helpers'
 
 // Candidate pool for browser_type's "match_text alone" resolver tier —
 // text-entry targets, not the clickable-elements list browser_smart_click
@@ -250,13 +250,7 @@ export function registerBrowserInteractionT1Tools(): void {
       const wc = getBrowserWebContents(pane_id)
       if (!wc) return { success: false, error: `No browser pane ${pane_id}` }
       try {
-        const mods = modifiers ?? []
-        // Single-character keys ('a', 'A', etc.) need a 'char' event between keyDown/keyUp.
-        // Named keys like 'Enter', 'Tab', etc. should not.
-        const isPrintable = key.length === 1
-        wc.sendInputEvent({ type: 'keyDown', keyCode: key, modifiers: mods })
-        if (isPrintable) wc.sendInputEvent({ type: 'char', keyCode: key, modifiers: mods })
-        wc.sendInputEvent({ type: 'keyUp', keyCode: key, modifiers: mods })
+        dispatchKeyEvent(wc, key, modifiers ?? [])
         return { success: true }
       } catch (error) {
         return { success: false, error: error instanceof Error ? error.message : String(error) }

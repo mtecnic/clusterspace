@@ -25,6 +25,9 @@ import { resolveApproval } from './browser-approval'
 import { classifyError } from '../shared/ai-error-classifier'
 import { resolvePaneControlAck } from './pane-control-ack'
 import { RecipeStore } from './browser-recipes'
+import { RemoteAccessStore } from './remote-access-store'
+import { RemoteServer } from './remote-server/server'
+import { getPaneListForActiveWorkspace } from './ai-tools/pane'
 import {
   IPC_CHANNELS,
   PtySpawnConfig,
@@ -33,6 +36,7 @@ import {
   AIMessage,
   AIToolCall,
   DEFAULT_AI_SETTINGS,
+  DEFAULT_REMOTE_ACCESS_SETTINGS,
   AgentTask,
   DownloadInfo
 } from '../shared/types'
@@ -63,6 +67,8 @@ let configLoader: ConfigLoader | null = null
 let browserStore: BrowserStore | null = null
 let browserCredentialsStore: BrowserCredentialsStore | null = null
 let recipeStore: RecipeStore | null = null
+let remoteAccessStore: RemoteAccessStore | null = null
+let remoteServer: RemoteServer | null = null
 const activeDownloads = new Map<string, DownloadInfo>()
 
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged
@@ -143,6 +149,23 @@ function createWindow() {
   browserStore = new BrowserStore()
   browserCredentialsStore = new BrowserCredentialsStore()
   recipeStore = new RecipeStore()
+  remoteAccessStore = new RemoteAccessStore()
+  remoteServer = new RemoteServer({
+    remoteAccessStore,
+    getScrollback: ptyId => ptyManager?.getScrollbackBuffer(ptyId) ?? [],
+    subscribePty: (ptyId, cb) => ptyManager?.subscribe(ptyId, cb) ?? (() => {}),
+    subscribePtyExit: (ptyId, cb) => ptyManager?.subscribeExit(ptyId, cb) ?? (() => {}),
+    writePty: (ptyId, data) => ptyManager?.write(ptyId, data),
+    resizePty: (ptyId, cols, rows) => ptyManager?.resize(ptyId, cols, rows),
+    getPtyIdForPane: key => ptyManager?.getPtyIdForPane(key),
+    listPanes: () => (workspaceStore && ptyManager ? getPaneListForActiveWorkspace(workspaceStore, ptyManager) : []),
+    getBrowserWebContents: paneId => getBrowserWebContents(paneId),
+    captureFrame: async paneId => (mainWindow ? capturePaneImage(mainWindow, paneId, { maxWidth: 1280 }) : null)
+  })
+  const remoteAccessSettings = workspaceStore?.getSettings().remoteAccess
+  if (remoteAccessSettings?.enabled) {
+    remoteServer.start(remoteAccessSettings).catch(err => console.error('[remote-server] failed to start on boot:', err))
+  }
 
   // Forward action-log entries to the renderer for live ticker display.
   subscribeActionLog(entry => {
@@ -337,7 +360,8 @@ function registerIpcHandlers() {
         theme: 'dark',
         fontSize: 14,
         fontFamily: 'Cascadia Code, Consolas, monospace',
-        defaultBrowserUrl: 'https://www.google.com'
+        defaultBrowserUrl: 'https://www.google.com',
+        remoteAccess: DEFAULT_REMOTE_ACCESS_SETTINGS
       }
     } catch (error) {
       console.error('Settings get error:', error)
@@ -348,7 +372,8 @@ function registerIpcHandlers() {
         theme: 'dark',
         fontSize: 14,
         fontFamily: 'Cascadia Code, Consolas, monospace',
-        defaultBrowserUrl: 'https://www.google.com'
+        defaultBrowserUrl: 'https://www.google.com',
+        remoteAccess: DEFAULT_REMOTE_ACCESS_SETTINGS
       }
     }
   })
@@ -358,7 +383,17 @@ function registerIpcHandlers() {
       if (!workspaceStore) {
         throw new Error('Workspace store not initialized')
       }
-      return workspaceStore.updateSettings(updates)
+      const updated = workspaceStore.updateSettings(updates)
+      // Start/stop the remote-access server live when its settings change —
+      // no app restart needed to toggle it on/off or change port/bind/TLS.
+      if ('remoteAccess' in updates && remoteServer) {
+        if (updated.remoteAccess.enabled) {
+          await remoteServer.start(updated.remoteAccess)
+        } else {
+          await remoteServer.stop()
+        }
+      }
+      return updated
     } catch (error) {
       console.error('Settings update error:', error)
       throw error
@@ -379,6 +414,40 @@ function registerIpcHandlers() {
       console.error('Dialog error:', error)
       return null
     }
+  })
+
+  ipcMain.handle(IPC_CHANNELS.DIALOG_OPEN_FILE, async (_event, filters?: { name: string; extensions: string[] }[]) => {
+    try {
+      if (!mainWindow) return null
+      const result = await dialog.showOpenDialog(mainWindow, {
+        properties: ['openFile'],
+        filters: filters ?? []
+      })
+      return result.canceled ? null : result.filePaths[0]
+    } catch (error) {
+      console.error('Dialog error:', error)
+      return null
+    }
+  })
+
+  // Remote-access handlers
+  ipcMain.handle(IPC_CHANNELS.REMOTE_ACCESS_GET_STATUS, async () => {
+    return remoteServer?.getStatus() ?? { running: false, connectedClients: 0 }
+  })
+
+  ipcMain.handle(IPC_CHANNELS.REMOTE_ACCESS_HAS_CREDENTIALS, async () => {
+    return remoteAccessStore?.hasCredentials() ?? false
+  })
+
+  ipcMain.handle(IPC_CHANNELS.REMOTE_ACCESS_SET_CREDENTIALS, async (_event, username: string, password: string) => {
+    if (!remoteAccessStore) throw new Error('Remote access store not initialized')
+    remoteAccessStore.setCredentials(username, password)
+    // A credential change should invalidate anyone already logged in under the old password.
+    remoteServer?.invalidateAllSessions()
+  })
+
+  ipcMain.handle(IPC_CHANNELS.REMOTE_ACCESS_REGENERATE_SECRET, async () => {
+    remoteServer?.invalidateAllSessions()
   })
 
   // App info handlers
@@ -1575,6 +1644,8 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   ptyManager?.killAll()
+  remoteServer?.stop().catch(() => {})
+  remoteServer?.dispose()
 })
 
 // Handle uncaught exceptions
