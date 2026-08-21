@@ -8,8 +8,15 @@
 <link rel="stylesheet" href="vendor/xterm.css">
 </head>
 <body>
+<div class="mobile-topbar">
+  <button id="menu-toggle" class="menu-toggle" aria-label="Open pane list">
+    <span></span><span></span><span></span>
+  </button>
+  <span class="mobile-topbar-title">ClusterSpace Remote</span>
+</div>
+<div class="sidebar-backdrop" id="sidebar-backdrop"></div>
 <div class="app">
-  <div class="pane-list">
+  <div class="pane-list" id="pane-list">
     <div class="pane-list-header">
       <span>Panes</span>
       <button id="logout-btn">Log out</button>

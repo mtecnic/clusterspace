@@ -87,6 +87,7 @@ async function selectTab(pane, tab) {
   currentRowKey = rowKey(pane.id, tab.id)
   expandedPaneIds.add(pane.id) // keep this pane's group open once something inside it is selected
   loadPanes() // re-render for the active-highlight; the panes list is small
+  closeSidebar() // no-op on desktop (the off-canvas classes only apply under the mobile breakpoint)
 
   const content = document.getElementById('viewer-content')
   if (currentView) {
@@ -142,6 +143,24 @@ document.getElementById('logout-btn').addEventListener('click', async () => {
   await api.logout()
   location.href = '/login'
 })
+
+// Mobile off-canvas sidebar — the toggle/backdrop are only visible under
+// the mobile CSS breakpoint, but wiring them unconditionally is harmless
+// (the 'open' class has no effect on desktop's non-fixed .pane-list).
+const paneListEl = document.getElementById('pane-list')
+const sidebarBackdropEl = document.getElementById('sidebar-backdrop')
+function closeSidebar() {
+  paneListEl.classList.remove('open')
+  sidebarBackdropEl.classList.remove('open')
+}
+function openSidebar() {
+  paneListEl.classList.add('open')
+  sidebarBackdropEl.classList.add('open')
+}
+document.getElementById('menu-toggle').addEventListener('click', () => {
+  paneListEl.classList.contains('open') ? closeSidebar() : openSidebar()
+})
+sidebarBackdropEl.addEventListener('click', closeSidebar)
 
 api.me().then(me => {
   if (!me) { location.href = '/login'; return }
