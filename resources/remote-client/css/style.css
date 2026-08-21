@@ -1,0 +1,173 @@
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background: #1a1a1e;
+  color: #e4e4e7;
+}
+
+/* ---- login ---- */
+.login-page {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.login-card {
+  width: 320px;
+  padding: 32px;
+  background: #232328;
+  border: 1px solid #333338;
+  border-radius: 10px;
+}
+.login-card h1 {
+  font-size: 18px;
+  margin: 0 0 20px;
+  color: #f4f4f5;
+}
+.login-card label {
+  display: block;
+  font-size: 12px;
+  color: #a1a1aa;
+  margin: 12px 0 4px;
+}
+.login-card input {
+  width: 100%;
+  padding: 8px 10px;
+  background: #18181b;
+  border: 1px solid #3f3f46;
+  border-radius: 6px;
+  color: #f4f4f5;
+  font-size: 14px;
+}
+.login-card button {
+  width: 100%;
+  margin-top: 20px;
+  padding: 9px;
+  background: #6366f1;
+  border: none;
+  border-radius: 6px;
+  color: white;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.login-card button:disabled { opacity: 0.6; cursor: default; }
+.login-error {
+  margin-top: 12px;
+  font-size: 13px;
+  color: #f87171;
+  min-height: 16px;
+}
+
+/* ---- app shell ---- */
+.app {
+  height: 100%;
+  display: flex;
+}
+.pane-list {
+  width: 260px;
+  flex-shrink: 0;
+  background: #1e1e22;
+  border-right: 1px solid #2f2f35;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+.pane-list-header {
+  padding: 14px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #a1a1aa;
+  border-bottom: 1px solid #2f2f35;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.pane-list-header button {
+  background: none;
+  border: 1px solid #3f3f46;
+  color: #a1a1aa;
+  border-radius: 5px;
+  padding: 3px 8px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.pane-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  cursor: pointer;
+  border-bottom: 1px solid #232328;
+}
+.pane-item:hover { background: #26262c; }
+.pane-item.active { background: #2d2d63; }
+.pane-num {
+  width: 22px;
+  height: 22px;
+  border-radius: 5px;
+  background: #35353c;
+  color: #d4d4d8;
+  font-size: 11px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.pane-item .label { font-size: 13px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pane-item .type-badge {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: #3f3f46;
+  color: #a1a1aa;
+}
+.pane-item .dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: #52525b;
+  flex-shrink: 0;
+}
+.pane-item .dot.connected { background: #4ade80; }
+
+.viewer {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.viewer-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #71717a;
+  font-size: 14px;
+}
+.viewer-content {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+}
+
+/* terminal view */
+.terminal-container {
+  height: 100%;
+  padding: 8px;
+}
+
+/* browser view */
+.browser-view {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #000;
+  overflow: auto;
+}
+.browser-frame {
+  max-width: 100%;
+  max-height: 100%;
+  outline: none;
+  cursor: default;
+}
