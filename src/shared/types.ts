@@ -494,6 +494,31 @@ export interface AppSettings {
   ai: AISettings
   defaultBrowserUrl: string
   windowState?: WindowState
+  remoteAccess: RemoteAccessSettings
+}
+
+// Remote web access (port 4444 by default) — lets a browser view/control
+// panes in the active workspace. Off by default since enabling it opens a
+// network port; credentials live in remote-access-store.ts (hashed), not
+// here. bindAddress defaults to all-interfaces since the intended use is a
+// router port-forward — the app itself doesn't attempt any WAN detection or
+// safety gating beyond the Settings UI's explicit confirmation checkbox.
+export interface RemoteAccessSettings {
+  enabled: boolean
+  port: number
+  bindAddress: string
+  tls: {
+    enabled: boolean
+    certPath?: string
+    keyPath?: string
+  }
+}
+
+export const DEFAULT_REMOTE_ACCESS_SETTINGS: RemoteAccessSettings = {
+  enabled: false,
+  port: 4444,
+  bindAddress: '0.0.0.0',
+  tls: { enabled: false }
 }
 
 // Persisted main-window geometry so launches restore the user's last size/position.
@@ -560,6 +585,13 @@ export const IPC_CHANNELS = {
 
   // Dialog channels
   DIALOG_OPEN_DIRECTORY: 'dialog:open-directory',
+  DIALOG_OPEN_FILE: 'dialog:open-file',
+
+  // Remote access channels
+  REMOTE_ACCESS_GET_STATUS: 'remote-access:get-status',
+  REMOTE_ACCESS_HAS_CREDENTIALS: 'remote-access:has-credentials',
+  REMOTE_ACCESS_SET_CREDENTIALS: 'remote-access:set-credentials',
+  REMOTE_ACCESS_REGENERATE_SECRET: 'remote-access:regenerate-secret',
 
   // App channels
   APP_GET_PATH: 'app:get-path',
