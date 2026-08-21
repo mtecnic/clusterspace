@@ -548,6 +548,12 @@ export interface PtySpawnConfig {
   cols: number
   rows: number
   workspaceId?: string
+  // When set, the main process watches this pty's own output for an SSH
+  // password prompt and auto-fills the saved credential (main/index.ts's
+  // PTY_SPAWN handler) -- centralized there (not in the renderer) so it
+  // fires regardless of whether a local pane, a remote-access web client,
+  // both, or neither is currently watching this pty.
+  sshServerId?: string
 }
 
 // IPC Channel names
@@ -608,7 +614,6 @@ export const IPC_CHANNELS = {
   SSH_SERVERS_UPDATE: 'ssh:servers:update',
   SSH_SERVERS_DELETE: 'ssh:servers:delete',
   SSH_SERVERS_TEST: 'ssh:servers:test',
-  SSH_GET_PASSWORD: 'ssh:get-password',
   SSH_GET_COMMAND: 'ssh:get-command',
 
   // AI channels

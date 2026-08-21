@@ -213,6 +213,38 @@ function registerIpcHandlers() {
         return { success: false, error: 'PTY manager not initialized' }
       }
       const ptyId = ptyManager.spawn(config)
+
+      // SSH password auto-fill, centralized here rather than in the
+      // renderer (see PtySpawnConfig.sshServerId's doc comment) -- fires
+      // once per pty regardless of whether a local pane, a remote-access
+      // web client, both, or neither ever subscribes to watch it. Reuses
+      // the subscribe()/subscribeExit() API built for remote-access rather
+      // than adding new PtyManager surface for this.
+      if (config.sshServerId) {
+        const serverId = config.sshServerId
+        let sent = false
+        const unsubscribeData = ptyManager.subscribe(ptyId, data => {
+          if (sent) return
+          const lowerData = data.toLowerCase()
+          if (!lowerData.includes('password:') && !lowerData.includes('password for') && !lowerData.includes("'s password")) return
+          const server = credentialsStore?.getServer(serverId)
+          if (!server || server.authMethod !== 'password') return
+          const password = credentialsStore?.getPassword(serverId)
+          if (!password) return
+          sent = true
+          // Small delay to ensure the prompt is ready, matching the
+          // renderer-side timing this replaces.
+          setTimeout(() => {
+            ptyManager?.write(ptyId, password + '\r')
+            unsubscribeData()
+            unsubscribeExit()
+          }, 100)
+        })
+        const unsubscribeExit = ptyManager.subscribeExit(ptyId, () => {
+          unsubscribeData()
+        })
+      }
+
       return { success: true, ptyId }
     } catch (error) {
       console.error('PTY spawn error:', error)
@@ -587,19 +619,6 @@ function registerIpcHandlers() {
     }
   })
 
-  // Get SSH password for auto-entry
-  ipcMain.handle(IPC_CHANNELS.SSH_GET_PASSWORD, async (_event, serverId: string) => {
-    try {
-      const server = credentialsStore?.getServer(serverId)
-      if (!server || server.authMethod !== 'password') {
-        return null
-      }
-      return credentialsStore?.getPassword(serverId) || null
-    } catch (error) {
-      console.error('Failed to get SSH password:', error)
-      return null
-    }
-  })
 
   // Get fresh SSH command (always rebuilds with latest settings like tmux).
   // paneId, when provided, gives the pane a unique tmux session — without it

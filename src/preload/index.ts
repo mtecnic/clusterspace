@@ -127,7 +127,6 @@ export interface ElectronAPI {
   ) => Promise<SSHServer | null>
   deleteSSHServer: (id: string) => Promise<boolean>
   testSSHServer: (id: string) => Promise<{ success: boolean; command?: string; args?: string[]; password?: string; error?: string }>
-  getSSHPassword: (serverId: string) => Promise<string | null>
   getSSHCommand: (serverId: string, paneId?: string, sessionOverride?: string) => Promise<{ command: string; args: string[]; sessionName: string } | null>
   destroyRemoteTmuxSession: (serverId: string, sessionName: string) => Promise<{ success: boolean; error?: string }>
   listRemoteTmuxSessions: (serverId: string) => Promise<{ success: boolean; error?: string; sessions: Array<{ name: string; attached: boolean; created: number }>; authHint?: string }>
@@ -459,10 +458,6 @@ const electronAPI: ElectronAPI = {
 
   testSSHServer: (id: string) => {
     return ipcRenderer.invoke(IPC_CHANNELS.SSH_SERVERS_TEST, id)
-  },
-
-  getSSHPassword: (serverId: string) => {
-    return ipcRenderer.invoke(IPC_CHANNELS.SSH_GET_PASSWORD, serverId)
   },
 
   getSSHCommand: (serverId: string, paneId?: string, sessionOverride?: string) => {

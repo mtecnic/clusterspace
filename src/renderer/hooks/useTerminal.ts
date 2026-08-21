@@ -195,7 +195,8 @@ export function useTerminal({
       cwd: config.cwd,
       cols: dims?.cols || 80,
       rows: dims?.rows || 24,
-      workspaceId
+      workspaceId,
+      sshServerId: config.sshServerId
     })
 
     if (result.success && result.ptyId) {
@@ -410,9 +411,6 @@ export function useTerminal({
     }
   }, []) // Only run on mount
 
-  // Track if we've already sent SSH password (to avoid sending multiple times)
-  const sshPasswordSentRef = useRef(false)
-
   // When disableAppMouse flips on, force xterm out of any active mouse mode
   // so the next drag triggers native selection without needing reconnect.
   useEffect(() => {
@@ -422,11 +420,6 @@ export function useTerminal({
       )
     }
   }, [config.disableAppMouse])
-
-  // Reset password sent flag when command changes (e.g., new SSH connection)
-  useEffect(() => {
-    sshPasswordSentRef.current = false
-  }, [config.command])
 
   // Handle PTY data
   useEffect(() => {
@@ -444,34 +437,17 @@ export function useTerminal({
     //   ?1016 = pixel motion
     const MOUSE_MODE_TOGGLE = /\x1b\[\?(1000|1002|1003|1004|1005|1006|1015|1016)[hl]/g
 
-    const unsubscribeData = window.electronAPI.onPtyData(async (ptyId, data) => {
+    const unsubscribeData = window.electronAPI.onPtyData((ptyId, data) => {
       if (ptyId === ptyIdRef.current && terminalInstanceRef.current) {
         const cleaned = disableAppMouseRef.current
           ? data.replace(MOUSE_MODE_TOGGLE, '')
           : data
         terminalInstanceRef.current.write(cleaned)
         onActivityRef.current?.()
-
-        // Check for SSH password prompt and auto-send password
-        if (config.sshServerId && !sshPasswordSentRef.current) {
-          const lowerData = data.toLowerCase()
-          if (lowerData.includes('password:') || lowerData.includes('password for') || lowerData.includes("'s password")) {
-            try {
-              const password = await window.electronAPI.getSSHPassword(config.sshServerId)
-              if (password && ptyIdRef.current) {
-                // Small delay to ensure prompt is ready
-                setTimeout(() => {
-                  if (ptyIdRef.current) {
-                    window.electronAPI.writePty(ptyIdRef.current, password + '\r')
-                    sshPasswordSentRef.current = true
-                  }
-                }, 100)
-              }
-            } catch {
-              // Password retrieval failed, user will need to enter manually
-            }
-          }
-        }
+        // SSH password auto-fill is centralized in the main process now
+        // (main/index.ts's PTY_SPAWN handler, via config.sshServerId) --
+        // it fires once per pty regardless of whether this renderer pane
+        // is even mounted, instead of only when it is.
       }
     })
 
@@ -531,12 +507,10 @@ export function useTerminal({
       if (terminalInstanceRef.current) {
         terminalInstanceRef.current.clear()
       }
-      // A restart is a brand-new SSH connection that will prompt for the password
-      // again. The auto-send guard is otherwise only cleared on config.command
-      // change (which doesn't happen on restart), so reset it here — without this,
-      // reconnect/restart hangs at the password prompt and the PTY never gets a
-      // working shell.
-      sshPasswordSentRef.current = false
+      // A restart spawns a brand-new ptyId, so the main process's auto-fill
+      // watcher (main/index.ts's PTY_SPAWN handler) subscribes fresh and
+      // will fire again for this connection's own password prompt --
+      // no stale-guard reset needed here now that it's centralized there.
       setIsConnected(false)
       await spawnPty({ ...overrides, forceFresh: true })
     })()
