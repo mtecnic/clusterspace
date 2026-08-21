@@ -32,6 +32,7 @@ export interface RemoteServerDeps {
   resizePty: (ptyId: string, cols: number, rows: number) => void
   getPtyIdForPane: (key: string) => string | undefined
   listPanes: () => AIPaneInfo[]
+  switchBrowserTab: (paneId: string, tabId: string) => Promise<boolean>
   getBrowserWebContents: (paneId: string) => WebContents | null
   captureFrame: (paneId: string) => Promise<string | null>
 }
@@ -66,7 +67,7 @@ export class RemoteServer {
       rateLimiter: this.rateLimiter,
       isSecure: () => !!this.currentSettings?.tls.enabled
     })
-    registerApiRoutes(this.router, { sessions: this.sessions, listPanes: deps.listPanes })
+    registerApiRoutes(this.router, { sessions: this.sessions, listPanes: deps.listPanes, switchBrowserTab: deps.switchBrowserTab })
   }
 
   async start(settings: RemoteAccessSettings): Promise<void> {

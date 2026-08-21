@@ -2,7 +2,7 @@
 // terminal, not a screenshot. Mirrors the local renderer's
 // onPtyData/writePty/resizePty relationship 1:1, just over a WebSocket
 // instead of Electron IPC.
-function createTerminalView(container, pane) {
+function createTerminalView(container, pane, tabId) {
   const term = new Terminal({
     cursorBlink: true,
     fontFamily: 'Consolas, "Cascadia Code", monospace',
@@ -14,7 +14,7 @@ function createTerminalView(container, pane) {
   term.open(container)
   try { fitAddon.fit() } catch { /* container may not have layout yet */ }
 
-  const ws = new WebSocket(api.wsUrl('/ws/terminal', { paneId: pane.id }))
+  const ws = new WebSocket(api.wsUrl('/ws/terminal', { paneId: pane.id, tabId }))
 
   const sendResize = () => {
     try { fitAddon.fit() } catch { return }

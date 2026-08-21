@@ -23,7 +23,7 @@ import { capturePaneImage } from './pane-screenshot'
 import { getActionLog, subscribeActionLog } from './browser-action-log'
 import { resolveApproval } from './browser-approval'
 import { classifyError } from '../shared/ai-error-classifier'
-import { resolvePaneControlAck } from './pane-control-ack'
+import { resolvePaneControlAck, sendPaneControl } from './pane-control-ack'
 import { RecipeStore } from './browser-recipes'
 import { RemoteAccessStore } from './remote-access-store'
 import { RemoteServer } from './remote-server/server'
@@ -159,6 +159,13 @@ function createWindow() {
     resizePty: (ptyId, cols, rows) => ptyManager?.resize(ptyId, cols, rows),
     getPtyIdForPane: key => ptyManager?.getPtyIdForPane(key),
     listPanes: () => (workspaceStore && ptyManager ? getPaneListForActiveWorkspace(workspaceStore, ptyManager) : []),
+    // Same request/ack round-trip the AI's switch_browser_tab tool already
+    // uses (ai-tools/controls.ts) -- reusing it rather than inventing a
+    // second mechanism. Note this also switches the tab active on the
+    // local screen, since browser-pane-registry.ts only ever tracks one
+    // webContents per pane (the active tab) regardless of caller.
+    switchBrowserTab: (paneId, tabId) =>
+      mainWindow ? sendPaneControl(mainWindow, IPC_CHANNELS.AI_BROWSER_TAB_ACTION, { paneId, action: 'switch', tabId }) : Promise.resolve(false),
     getBrowserWebContents: paneId => getBrowserWebContents(paneId),
     captureFrame: async paneId => (mainWindow ? capturePaneImage(mainWindow, paneId, { maxWidth: 1280 }) : null)
   })
