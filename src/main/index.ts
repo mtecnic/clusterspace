@@ -74,6 +74,10 @@ let recipeStore: RecipeStore | null = null
 let remoteAccessStore: RemoteAccessStore | null = null
 let remoteServer: RemoteServer | null = null
 const activeDownloads = new Map<string, DownloadInfo>()
+// Parallel map of live DownloadItem references, so BROWSER_DOWNLOAD_CANCEL
+// can actually stop the transfer — activeDownloads only holds the plain-data
+// snapshot sent to the renderer, not the Electron object with .cancel() on it.
+const activeDownloadItems = new Map<string, Electron.DownloadItem>()
 
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged
 
@@ -1461,7 +1465,10 @@ function registerIpcHandlers() {
   })
 
   ipcMain.handle(IPC_CHANNELS.BROWSER_DOWNLOAD_CANCEL, async (_e, id: string) => {
-    // Best-effort: we no longer hold the DownloadItem reference, so just clear UI state.
+    const item = activeDownloadItems.get(id)
+    if (item) {
+      try { item.cancel() } catch { /* already finished/cancelled */ }
+    }
     const dl = activeDownloads.get(id)
     if (dl && dl.state === 'progressing') {
       dl.state = 'cancelled'
@@ -1581,6 +1588,7 @@ app.whenReady().then(() => {
       startedAt: Date.now()
     }
     activeDownloads.set(id, info)
+    activeDownloadItems.set(id, item)
 
     item.on('updated', (_e, state) => {
       info.state = state === 'progressing' ? 'progressing' : 'interrupted'
@@ -1596,6 +1604,7 @@ app.whenReady().then(() => {
       info.receivedBytes = item.getReceivedBytes()
       info.totalBytes = item.getTotalBytes() || info.receivedBytes
       mainWindow?.webContents.send(IPC_CHANNELS.BROWSER_DOWNLOAD_UPDATE, { ...info })
+      activeDownloadItems.delete(id)
     })
   })
 

@@ -10,9 +10,10 @@ export interface BrowserWsDeps {
 
 // ~6-7fps — capturePage() is a full compositor readback with no damage
 // tracking (see pane-screenshot.ts), so this is a deliberate remote-desktop-
-// style tradeoff, not a video stream. Cheap to tune later (skip-send on an
-// unchanged frame, pause when no client has moved the mouse recently) but
-// not needed for a working v1.
+// style tradeoff, not a video stream. Frames identical to the last one sent
+// are skipped below (an idling, unchanged page shouldn't cost bandwidth/CPU
+// every poll) — further tuning (e.g. pausing entirely when no client has
+// moved the mouse recently) can wait for a real need.
 const FRAME_INTERVAL_MS = 150
 
 const VALID_MODIFIERS = new Set(['control', 'shift', 'alt', 'meta'])
@@ -48,11 +49,17 @@ export function handleBrowserConnection(ws: WebSocket, paneId: string, deps: Bro
     return
   }
 
+  // Skip sending a frame identical to the last one — a byte-for-byte
+  // comparison of the (already downscaled) JPEG data URL is cheap next to
+  // the compositor readback + WS send it avoids, and unlike a hash it has
+  // zero collision risk.
+  let lastFrame: string | null = null
   const interval = setInterval(async () => {
     if (ws.readyState !== ws.OPEN) return
     try {
       const dataUrl = await deps.captureFrame(paneId)
-      if (dataUrl && ws.readyState === ws.OPEN) {
+      if (dataUrl && dataUrl !== lastFrame && ws.readyState === ws.OPEN) {
+        lastFrame = dataUrl
         ws.send(JSON.stringify({ type: 'frame', dataUrl, ts: Date.now() }))
       }
     } catch {
