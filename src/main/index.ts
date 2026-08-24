@@ -17,7 +17,10 @@ import { BrowserStore } from './browser-store'
 import {
   registerBrowserPane,
   unregisterBrowserPane,
-  getBrowserWebContents
+  getBrowserWebContents,
+  registerBrowserPaneTab,
+  unregisterBrowserPaneTab,
+  getPaneIdForWebContents
 } from './browser-pane-registry'
 import { capturePaneImage } from './pane-screenshot'
 import { getActionLog, subscribeActionLog } from './browser-action-log'
@@ -1498,6 +1501,12 @@ function registerIpcHandlers() {
   ipcMain.on(IPC_CHANNELS.BROWSER_PANE_UNREGISTER, (_e, paneId: string) => {
     unregisterBrowserPane(paneId)
   })
+  ipcMain.on(IPC_CHANNELS.BROWSER_PANE_TAB_REGISTER, (_e, paneId: string, tabId: string, webContentsId: number) => {
+    registerBrowserPaneTab(paneId, tabId, webContentsId)
+  })
+  ipcMain.on(IPC_CHANNELS.BROWSER_PANE_TAB_UNREGISTER, (_e, paneId: string, tabId: string) => {
+    unregisterBrowserPaneTab(paneId, tabId)
+  })
 
   // Action log read access
   ipcMain.handle(IPC_CHANNELS.BROWSER_ACTION_LOG_GET, async (_e, paneId?: string, limit?: number) => {
@@ -1590,20 +1599,66 @@ app.whenReady().then(() => {
       webPreferences.nodeIntegration = false
       webPreferences.contextIsolation = true
     })
-    contents.setWindowOpenHandler(({ url }) => {
-      // For browser-pane webviews: route popups (target=_blank, window.open)
-      // to navigate the SAME webview, so AI automation and in-app browsing
-      // see the new page in-context. Otherwise these clicks silently bounce
-      // out to the OS browser and the AI thinks "nothing happened."
-      // The right-click "Open in default browser" item is still the escape
-      // hatch when the user explicitly wants an external window.
-      if (contents.getType() === 'webview' && /^https?:/i.test(url)) {
-        contents.loadURL(url).catch(() => {})
+    contents.setWindowOpenHandler(({ url, features }) => {
+      if (!(contents.getType() === 'webview' && /^https?:/i.test(url))) {
+        // Host renderer popups still go to the OS browser as before.
+        if (/^https?:/i.test(url)) shell.openExternal(url)
         return { action: 'deny' }
       }
-      // Host renderer popups still go to the OS browser as before.
-      if (/^https?:/i.test(url)) shell.openExternal(url)
+
+      // Popup vs. new-tab heuristic, biased toward classifying ambiguous
+      // cases as popups: a non-empty `features` string (width=,height=,...)
+      // is what window.open() sends for a real popup (OAuth "Sign in with
+      // Google/GitHub" etc.), while target="_blank" links and features-less
+      // window.open() calls leave it empty. Wrongly tabifying a real OAuth
+      // popup silently breaks login; wrongly popup'ing a plain link just
+      // costs an extra small window — so the asymmetry favors this bias.
+      if (features && features.trim().length > 0) {
+        const widthMatch = /width=(\d+)/.exec(features)
+        const heightMatch = /height=(\d+)/.exec(features)
+        return {
+          action: 'allow',
+          overrideBrowserWindowOptions: {
+            width: widthMatch ? parseInt(widthMatch[1], 10) : 500,
+            height: heightMatch ? parseInt(heightMatch[1], 10) : 640,
+            parent: mainWindow ?? undefined,
+            webPreferences: {
+              contextIsolation: true,
+              nodeIntegration: false,
+              sandbox: true
+              // No `partition` override — inherits the opener's
+              // persist:browser-pane session so SSO cookies are visible,
+              // which OAuth completion requires.
+            }
+          }
+        }
+      }
+
+      // New tab: resolve which pane this webview belongs to (all-tabs
+      // reverse lookup, not just the active-tab map — the webview asking
+      // for a new tab isn't necessarily the active one) and reuse the same
+      // pane-control round trip the AI's open_browser_tab tool already
+      // drives. If no pane resolves (tab closed mid-flight), fall back to
+      // the OS browser rather than silently dropping it.
+      const paneId = getPaneIdForWebContents(contents.id)
+      if (paneId && mainWindow) {
+        sendPaneControl(mainWindow, IPC_CHANNELS.AI_BROWSER_TAB_ACTION, { paneId, action: 'open', url }).catch(() => {})
+      } else {
+        shell.openExternal(url)
+      }
       return { action: 'deny' }
+    })
+
+    // Real popup windows (the 'allow' branch above) are intentionally
+    // unmanaged: not registered in browser-pane-registry, not addressable by
+    // AI tools or remote access. OAuth SDKs call window.close() on their own
+    // completion page (Electron honors this on a real BrowserWindow), and
+    // `parent: mainWindow` keeps it correctly behaved without a destroy
+    // hook. Just deny any further nested popup from the child as cheap
+    // self-documenting insurance (the outer web-contents-created hook above
+    // already covers it either way, since it fires for every WebContents).
+    contents.on('did-create-window', (childWindow) => {
+      childWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
     })
 
     // Don't let browser-pane webviews trap the user with beforeunload prompts.

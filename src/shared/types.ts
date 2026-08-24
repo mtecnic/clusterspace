@@ -720,6 +720,8 @@ export const IPC_CHANNELS = {
   // (and the AI tool dispatcher) can drive the webview directly.
   BROWSER_PANE_REGISTER: 'browser:pane:register',
   BROWSER_PANE_UNREGISTER: 'browser:pane:unregister',
+  BROWSER_PANE_TAB_REGISTER: 'browser:pane:tab-register',
+  BROWSER_PANE_TAB_UNREGISTER: 'browser:pane:tab-unregister',
 
 } as const
 

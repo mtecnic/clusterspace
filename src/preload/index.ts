@@ -266,6 +266,8 @@ export interface ElectronAPI {
   // BrowserPane registration (so main/AI can address the webview by paneId)
   registerBrowserPane: (paneId: string, webContentsId: number) => void
   unregisterBrowserPane: (paneId: string) => void
+  registerBrowserPaneTab: (paneId: string, tabId: string, webContentsId: number) => void
+  unregisterBrowserPaneTab: (paneId: string, tabId: string) => void
 
   // Tier 3: action log + approval gates + recipes
   getBrowserActionLog: (paneId?: string, limit?: number) => Promise<Array<{ id: number; paneId: string; tool: string; args: Record<string, unknown>; ok: boolean; durationMs: number; error?: string; timestamp: number }>>
@@ -854,6 +856,8 @@ const electronAPI: ElectronAPI = {
 
   registerBrowserPane: (paneId, webContentsId) => ipcRenderer.send(IPC_CHANNELS.BROWSER_PANE_REGISTER, paneId, webContentsId),
   unregisterBrowserPane: (paneId) => ipcRenderer.send(IPC_CHANNELS.BROWSER_PANE_UNREGISTER, paneId),
+  registerBrowserPaneTab: (paneId, tabId, webContentsId) => ipcRenderer.send(IPC_CHANNELS.BROWSER_PANE_TAB_REGISTER, paneId, tabId, webContentsId),
+  unregisterBrowserPaneTab: (paneId, tabId) => ipcRenderer.send(IPC_CHANNELS.BROWSER_PANE_TAB_UNREGISTER, paneId, tabId),
 
   getBrowserActionLog: (paneId, limit) => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_ACTION_LOG_GET, paneId, limit),
   onBrowserActionLog: (callback) => {

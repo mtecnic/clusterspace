@@ -197,6 +197,12 @@ export function BrowserPane({
   }, [activeTabId, persistTabs])
 
   const handleWebContentsId = useCallback((tabId: string, id: number | null) => {
+    // All-tabs reverse registration (not just the active tab) so main-process
+    // popup handling can resolve "which pane does this background tab belong
+    // to" — separate from the active-only registerBrowserPane effect below.
+    if (id == null) window.electronAPI.unregisterBrowserPaneTab(config.id, tabId)
+    else window.electronAPI.registerBrowserPaneTab(config.id, tabId, id)
+
     setWebContentsIds(prev => {
       if (id == null) {
         if (!(tabId in prev)) return prev
@@ -207,7 +213,7 @@ export function BrowserPane({
       if (prev[tabId] === id) return prev
       return { ...prev, [tabId]: id }
     })
-  }, [])
+  }, [config.id])
 
   const handleTabStatus = useCallback((tabId: string, status: BrowserTabStatus) => {
     setStatusByTab(prev => ({ ...prev, [tabId]: status }))
