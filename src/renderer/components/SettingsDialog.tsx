@@ -30,12 +30,14 @@ export function SettingsDialog({
   const [scrollbackLines, setScrollbackLines] = useState(settings?.scrollbackLines || 5000)
   const [fontSize, setFontSize] = useState(settings?.fontSize || 14)
   const [theme, setTheme] = useState(settings?.theme || 'dark')
+  const [browserTabIdleDiscardMinutes, setBrowserTabIdleDiscardMinutes] = useState(settings?.browserTabIdleDiscardMinutes ?? 15)
 
   useEffect(() => {
     if (settings) {
       setScrollbackLines(settings.scrollbackLines)
       setFontSize(settings.fontSize)
       setTheme(settings.theme)
+      setBrowserTabIdleDiscardMinutes(settings.browserTabIdleDiscardMinutes)
     }
   }, [settings])
 
@@ -56,7 +58,8 @@ export function SettingsDialog({
     onUpdateSettings({
       scrollbackLines,
       fontSize,
-      theme: theme as 'dark' | 'light'
+      theme: theme as 'dark' | 'light',
+      browserTabIdleDiscardMinutes
     })
     onClose()
   }
@@ -118,6 +121,26 @@ export function SettingsDialog({
                   </button>
                 ))}
               </div>
+            </div>
+          </div>
+
+          <div className="mb-6">
+            <h3 className="text-sm font-semibold text-cs-text mb-3">Browser</h3>
+
+            <div className="form-group">
+              <label className="form-label">Background tab idle discard (minutes)</label>
+              <input
+                type="number"
+                min="0"
+                max="180"
+                value={browserTabIdleDiscardMinutes}
+                onChange={(e) => setBrowserTabIdleDiscardMinutes(parseInt(e.target.value) || 0)}
+                className="form-input w-24"
+              />
+              <p className="text-sm text-cs-text-muted mt-1">
+                Background browser tabs unload after this long inactive, to save memory. Pinned
+                tabs and tabs playing audio/video are never discarded. Set to 0 to disable.
+              </p>
             </div>
           </div>
 

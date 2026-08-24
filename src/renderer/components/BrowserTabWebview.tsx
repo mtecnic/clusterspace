@@ -71,6 +71,11 @@ interface BrowserTabWebviewProps {
   onNavigated: (tabId: string, patch: Partial<Pick<BrowserTab, 'url' | 'title' | 'favicon'>>) => void
   onWebContentsId: (tabId: string, id: number | null) => void
   onStatus: (tabId: string, status: BrowserTabStatus) => void
+  // Background-tab memory management. pinned and an idleThresholdMs <= 0
+  // both opt a tab out of auto-discard entirely.
+  pinned?: boolean
+  idleThresholdMs: number
+  onDiscardedChange?: (tabId: string, discarded: boolean) => void
 }
 
 // Owns one tab's live <webview> guest — its navigation state, lifecycle
@@ -79,7 +84,7 @@ interface BrowserTabWebviewProps {
 // loadURL() call — the previous single-shared-webview design reloaded the
 // page (and lost scroll position / in-page state) on every tab switch.
 export const BrowserTabWebview = forwardRef<BrowserTabWebviewHandle, BrowserTabWebviewProps>(
-  function BrowserTabWebview({ tabId, initialUrl, isActive, onNavigated, onWebContentsId, onStatus }, ref) {
+  function BrowserTabWebview({ tabId, initialUrl, isActive, onNavigated, onWebContentsId, onStatus, pinned, idleThresholdMs, onDiscardedChange }, ref) {
     const webviewRef = useRef<WebviewElement | null>(null)
     // Snapshotted at mount so the src isn't re-set on every re-render (which
     // would cause reload loops) — navigation calls webview.loadURL() instead.
@@ -97,8 +102,17 @@ export const BrowserTabWebview = forwardRef<BrowserTabWebviewHandle, BrowserTabW
     // Tracks the latest favicon so onStopLoading's history entry can include
     // it without needing to re-subscribe listeners on every favicon change.
     const faviconRef = useRef<string | undefined>(undefined)
-    // Tracks the latest known URL for the crash overlay's fallback detail line.
+    // Tracks the latest known URL for the crash overlay's fallback detail line
+    // and as the URL a discarded tab restores to.
     const lastUrlRef = useRef<string>(initialUrl)
+    // Background-tab memory management (idle discard).
+    const [discarded, setDiscarded] = useState(false)
+    const [isAudible, setIsAudible] = useState(false)
+    // One-shot guard around discard()'s about:blank load so its navigation
+    // events don't get tracked as if the user actually navigated there —
+    // cleared when that load's terminal did-stop-loading fires.
+    const suppressTrackingRef = useRef(false)
+    const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
     useEffect(() => {
       onStatus(tabId, { isLoading, canGoBack, canGoForward, crashState, findMatches })
@@ -117,6 +131,13 @@ export const BrowserTabWebview = forwardRef<BrowserTabWebviewHandle, BrowserTabW
       }
       const onStopLoading: EventListener = () => {
         setIsLoading(false)
+        if (suppressTrackingRef.current) {
+          // Terminal event for discard()'s about:blank load — stop suppressing
+          // and skip tracking this one navigation, but don't touch lastUrlRef
+          // (it still holds the real page discard is standing in for).
+          suppressTrackingRef.current = false
+          return
+        }
         try {
           setCanGoBack(webview.canGoBack())
           setCanGoForward(webview.canGoForward())
@@ -130,6 +151,7 @@ export const BrowserTabWebview = forwardRef<BrowserTabWebviewHandle, BrowserTabW
         } catch { /* webview may have detached */ }
       }
       const onNavigate: EventListener = (evt) => {
+        if (suppressTrackingRef.current) return
         const url = (evt as Event & { url?: string }).url
         if (url) {
           lastUrlRef.current = url
@@ -182,6 +204,10 @@ export const BrowserTabWebview = forwardRef<BrowserTabWebviewHandle, BrowserTabW
         const r = (evt as Event & { result?: { activeMatchOrdinal: number; matches: number; finalUpdate: boolean } }).result
         if (r) setFindMatches({ active: r.activeMatchOrdinal, total: r.matches })
       }
+      // Documented <webview> DOM events — drive isAudible so the idle-discard
+      // effect below exempts tabs actively playing audio/video.
+      const onMediaPlaying: EventListener = () => setIsAudible(true)
+      const onMediaPaused: EventListener = () => setIsAudible(false)
 
       webview.addEventListener('did-start-loading', onStartLoading)
       webview.addEventListener('did-stop-loading', onStopLoading)
@@ -196,6 +222,8 @@ export const BrowserTabWebview = forwardRef<BrowserTabWebviewHandle, BrowserTabW
       webview.addEventListener('responsive', onResponsive)
       webview.addEventListener('dom-ready', onDomReady)
       webview.addEventListener('found-in-page', onFoundInPage)
+      webview.addEventListener('media-started-playing', onMediaPlaying)
+      webview.addEventListener('media-paused', onMediaPaused)
 
       return () => {
         webview.removeEventListener('did-start-loading', onStartLoading)
@@ -211,6 +239,8 @@ export const BrowserTabWebview = forwardRef<BrowserTabWebviewHandle, BrowserTabW
         webview.removeEventListener('responsive', onResponsive)
         webview.removeEventListener('dom-ready', onDomReady)
         webview.removeEventListener('found-in-page', onFoundInPage)
+        webview.removeEventListener('media-started-playing', onMediaPlaying)
+        webview.removeEventListener('media-paused', onMediaPaused)
       }
       // webviewKey is in deps so these listeners rebind to the recreated element
       // after a recovery (recreateWebview bumps the key).
@@ -253,6 +283,51 @@ export const BrowserTabWebview = forwardRef<BrowserTabWebviewHandle, BrowserTabW
       setIsLoading(true)
       setWebviewKey(k => k + 1)
     }, [mountUrl])
+
+    // Background-tab memory management: navigate a hidden tab's guest to
+    // about:blank to free its DOM/JS heap, without touching lastUrlRef (the
+    // real page to restore to) or persisted tab state (suppressTrackingRef).
+    const discard = useCallback(() => {
+      const webview = webviewRef.current
+      if (!webview || discarded) return
+      suppressTrackingRef.current = true
+      try { webview.loadURL('about:blank').catch(() => {}) } catch { /* ignore */ }
+      setDiscarded(true)
+      onDiscardedChange?.(tabId, true)
+    }, [tabId, discarded, onDiscardedChange])
+
+    const restore = useCallback(() => {
+      const webview = webviewRef.current
+      if (!webview || !discarded) return
+      try { webview.loadURL(lastUrlRef.current).catch(() => {}) } catch { /* ignore */ }
+      setDiscarded(false)
+      onDiscardedChange?.(tabId, false)
+    }, [tabId, discarded, onDiscardedChange])
+
+    // Idle timer: starts counting down when this tab goes inactive, discards
+    // on expiry unless pinned or already exempt (audio playing). Restores
+    // immediately on reactivation — by construction a discarded tab is never
+    // AI-addressable, since switch_browser_tab (the only way an AI tool
+    // reaches a non-active tab) flips isActive true first.
+    useEffect(() => {
+      if (idleTimerRef.current) {
+        clearTimeout(idleTimerRef.current)
+        idleTimerRef.current = null
+      }
+      if (idleThresholdMs <= 0 || pinned) return
+      if (isActive) {
+        if (discarded) restore()
+        return
+      }
+      if (discarded || isAudible) return
+      idleTimerRef.current = setTimeout(discard, idleThresholdMs)
+      return () => {
+        if (idleTimerRef.current) {
+          clearTimeout(idleTimerRef.current)
+          idleTimerRef.current = null
+        }
+      }
+    }, [isActive, pinned, idleThresholdMs, discarded, isAudible, discard, restore])
 
     useImperativeHandle(ref, () => ({
       navigate: (url: string) => { webviewRef.current?.loadURL(url).catch(() => {}) },

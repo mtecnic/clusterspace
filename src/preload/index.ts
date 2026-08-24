@@ -254,6 +254,7 @@ export interface ElectronAPI {
   openExternal: (url: string) => Promise<boolean>
   addWordToDictionary: (word: string) => Promise<boolean>
   copyImageAt: (paneId: string, x: number, y: number) => Promise<boolean>
+  detachBrowserTabDebugger: (webContentsId: number) => void
 
   // Browser pane: saved logins (encrypted via OS keychain)
   listBrowserCredentials: () => Promise<BrowserCredentialMeta[]>
@@ -846,6 +847,7 @@ const electronAPI: ElectronAPI = {
   openExternal: (url: string) => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_OPEN_EXTERNAL, url),
   addWordToDictionary: (word: string) => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_ADD_DICTIONARY_WORD, word),
   copyImageAt: (paneId: string, x: number, y: number) => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_COPY_IMAGE_AT, paneId, x, y),
+  detachBrowserTabDebugger: (webContentsId: number) => ipcRenderer.send(IPC_CHANNELS.BROWSER_TAB_CDP_DETACH, webContentsId),
 
   listBrowserCredentials: () => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_CREDENTIALS_LIST),
   saveBrowserCredential: (input) => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_CREDENTIALS_SAVE, input),

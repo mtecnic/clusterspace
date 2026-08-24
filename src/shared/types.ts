@@ -49,6 +49,9 @@ export interface BrowserTab {
   url: string
   title?: string
   favicon?: string
+  // User-set escape hatch from idle background-tab discarding (Chrome
+  // pin-tab equivalent) — a deliberate preference worth surviving restarts.
+  pinned?: boolean
 }
 
 // Pane configuration
@@ -495,6 +498,10 @@ export interface AppSettings {
   defaultBrowserUrl: string
   windowState?: WindowState
   remoteAccess: RemoteAccessSettings
+  // Minutes a background browser tab may sit inactive before its guest is
+  // discarded (navigated to about:blank) to free memory/CPU. <=0 disables
+  // the feature entirely. Default 15 matches Chrome Memory Saver's range.
+  browserTabIdleDiscardMinutes: number
 }
 
 // Remote web access (port 4444 by default) — lets a browser view/control
@@ -706,6 +713,7 @@ export const IPC_CHANNELS = {
   BROWSER_OPEN_EXTERNAL: 'browser:open-external',
   BROWSER_ADD_DICTIONARY_WORD: 'browser:add-dictionary-word',
   BROWSER_COPY_IMAGE_AT: 'browser:copy-image-at',
+  BROWSER_TAB_CDP_DETACH: 'browser:tab:cdp-detach',
 
   // Browser automation observability + safety
   BROWSER_ACTION_LOG_GET: 'browser:action-log:get',

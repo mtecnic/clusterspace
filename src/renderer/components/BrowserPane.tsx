@@ -11,6 +11,7 @@ import {
   PaneConfig
 } from '@shared/types'
 import { registerBrowserTabAction, registerReconnect } from './../lib/pane-controls'
+import { useWorkspace } from './../context/WorkspaceContext'
 import { BrowserTabWebview, BrowserTabWebviewHandle, BrowserTabStatus } from './BrowserTabWebview'
 
 // Resolve tabs from a pane config. If `tabs` is absent we synthesize a single
@@ -105,6 +106,18 @@ export function BrowserPane({
 
   const activeStatus = statusByTab[activeTabId] ?? EMPTY_STATUS
   const activeWebContentsId = webContentsIds[activeTabId] ?? null
+
+  // Background-tab idle-discard threshold (Settings-configurable, reactive —
+  // useWorkspace's settings update live so a change takes effect on the next
+  // tab's inactive transition without needing a pane remount).
+  const { settings } = useWorkspace()
+  const idleThresholdMs = (settings?.browserTabIdleDiscardMinutes ?? 15) * 60_000
+
+  const handleDiscardedChange = useCallback((tabId: string, discarded: boolean) => {
+    if (!discarded) return
+    const id = webContentsIds[tabId]
+    if (id != null) window.electronAPI.detachBrowserTabDebugger(id)
+  }, [webContentsIds])
   const currentUrl = activeTab.url
   const pageTitle = activeTab.title ?? ''
   const favicon = activeTab.favicon
@@ -259,6 +272,14 @@ export function BrowserPane({
     // Optimistically reflect the destination in the URL bar.
     setUrlInput(target.url)
   }, [activeTabId, tabs, persistTabs])
+
+  const handleTogglePin = useCallback((tabId: string) => {
+    setTabs(prev => {
+      const next = prev.map(t => t.id === tabId ? { ...t, pinned: !t.pinned } : t)
+      persistTabs(next, activeTabId)
+      return next
+    })
+  }, [activeTabId, persistTabs])
 
   const handleCloseTab = useCallback((tabId: string) => {
     setTabs(prev => {
@@ -564,6 +585,13 @@ export function BrowserPane({
                 </span>
                 <button
                   type="button"
+                  className={`browser-tab-pin ${tab.pinned ? 'pinned' : ''}`}
+                  onClick={(e) => { e.stopPropagation(); handleTogglePin(tab.id) }}
+                  aria-label={tab.pinned ? 'Unpin tab' : 'Pin tab (exempt from background auto-discard)'}
+                  title={tab.pinned ? 'Unpin tab' : 'Pin tab (exempt from background auto-discard)'}
+                >📌</button>
+                <button
+                  type="button"
                   className="browser-tab-close"
                   onClick={(e) => { e.stopPropagation(); handleCloseTab(tab.id) }}
                   aria-label="Close tab"
@@ -708,6 +736,9 @@ export function BrowserPane({
               onNavigated={handleTabNavigated}
               onWebContentsId={handleWebContentsId}
               onStatus={handleTabStatus}
+              pinned={tab.pinned}
+              idleThresholdMs={idleThresholdMs}
+              onDiscardedChange={handleDiscardedChange}
             />
           ))}
         </div>

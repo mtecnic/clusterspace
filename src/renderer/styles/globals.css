@@ -443,6 +443,38 @@ html, body, #root {
   opacity: 1;
 }
 
+.browser-tab-pin {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-size: 10px;
+  line-height: 1;
+  border-radius: 3px;
+  cursor: pointer;
+  opacity: 0;
+  transform: rotate(45deg);
+}
+
+.browser-tab:hover .browser-tab-pin,
+.browser-tab-pin.pinned {
+  opacity: 0.6;
+}
+
+.browser-tab-pin:hover {
+  background-color: rgba(255, 255, 255, 0.12);
+  opacity: 1;
+}
+
+.browser-tab-pin.pinned {
+  transform: rotate(0deg);
+}
+
 .browser-tab-new {
   flex-shrink: 0;
   align-self: center;

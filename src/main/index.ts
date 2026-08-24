@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, clipboard, nativeImage, shell, session } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, clipboard, nativeImage, shell, session, webContents } from 'electron'
 import { join } from 'path'
 import { PtyManager } from './pty-manager'
 import { WorkspaceStore } from './workspace-store'
@@ -27,6 +27,7 @@ import { getActionLog, subscribeActionLog } from './browser-action-log'
 import { resolveApproval } from './browser-approval'
 import { classifyError } from '../shared/ai-error-classifier'
 import { resolvePaneControlAck, sendPaneControl } from './pane-control-ack'
+import { detachCdpIfAttached } from './cdp-helpers'
 import { RecipeStore } from './browser-recipes'
 import { RemoteAccessStore } from './remote-access-store'
 import { RemoteServer } from './remote-server/server'
@@ -1490,6 +1491,13 @@ function registerIpcHandlers() {
     if (!wc) return false
     wc.copyImageAt(x, y)
     return true
+  })
+
+  // Fired when a background tab discards to idle-save memory — detaches its
+  // CDP debugger session rather than leaving it attached indefinitely.
+  ipcMain.on(IPC_CHANNELS.BROWSER_TAB_CDP_DETACH, (_e, webContentsId: number) => {
+    const wc = webContents.fromId(webContentsId)
+    if (wc && !wc.isDestroyed()) detachCdpIfAttached(wc)
   })
 
   // ====== Browser <-> AI bridge ======

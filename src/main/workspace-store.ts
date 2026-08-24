@@ -16,7 +16,8 @@ const defaultSettings: AppSettings = {
   fontFamily: 'Cascadia Code, Consolas, monospace',
   ai: DEFAULT_AI_SETTINGS,
   defaultBrowserUrl: 'https://www.google.com',
-  remoteAccess: DEFAULT_REMOTE_ACCESS_SETTINGS
+  remoteAccess: DEFAULT_REMOTE_ACCESS_SETTINGS,
+  browserTabIdleDiscardMinutes: 15
 }
 
 export class WorkspaceStore {
@@ -215,6 +216,7 @@ export class WorkspaceStore {
     // absent, not per-field — an existing user's persisted settings object
     // (saved before remoteAccess existed) won't have it at all.
     if (!settings.remoteAccess) settings.remoteAccess = DEFAULT_REMOTE_ACCESS_SETTINGS
+    if (settings.browserTabIdleDiscardMinutes == null) settings.browserTabIdleDiscardMinutes = defaultSettings.browserTabIdleDiscardMinutes
     return settings
   }
 

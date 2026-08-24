@@ -22,6 +22,19 @@ export function ensureCdpAttached(wc: WebContents): void {
   }
 }
 
+// Paired with ensureCdpAttached — called when a background tab is discarded
+// to idle-memory-save, so a debugger session doesn't sit attached indefinitely
+// on a tab that's no longer live. ensureCdpAttached lazily reattaches on next
+// use (e.g. the tab is restored and an AI tool targets it again), so this is
+// cheap to reverse.
+export function detachCdpIfAttached(wc: WebContents): void {
+  if (!attached.has(wc)) return
+  attached.delete(wc)
+  try {
+    wc.debugger.detach()
+  } catch { /* already detached, or guest gone — either way we're done */ }
+}
+
 export async function sendCdpCommand<T = unknown>(
   wc: WebContents,
   method: string,
