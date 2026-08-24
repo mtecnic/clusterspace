@@ -252,6 +252,8 @@ export interface ElectronAPI {
   onBrowserShortcut: (callback: (msg: BrowserShortcutMessage) => void) => () => void
   onBrowserContextMenu: (callback: (params: BrowserContextMenuParams) => void) => () => void
   openExternal: (url: string) => Promise<boolean>
+  addWordToDictionary: (word: string) => Promise<boolean>
+  copyImageAt: (paneId: string, x: number, y: number) => Promise<boolean>
 
   // Browser pane: saved logins (encrypted via OS keychain)
   listBrowserCredentials: () => Promise<BrowserCredentialMeta[]>
@@ -840,6 +842,8 @@ const electronAPI: ElectronAPI = {
     return () => { ipcRenderer.removeListener(IPC_CHANNELS.BROWSER_CONTEXT_MENU, handler) }
   },
   openExternal: (url: string) => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_OPEN_EXTERNAL, url),
+  addWordToDictionary: (word: string) => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_ADD_DICTIONARY_WORD, word),
+  copyImageAt: (paneId: string, x: number, y: number) => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_COPY_IMAGE_AT, paneId, x, y),
 
   listBrowserCredentials: () => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_CREDENTIALS_LIST),
   saveBrowserCredential: (input) => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_CREDENTIALS_SAVE, input),

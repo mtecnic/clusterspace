@@ -1472,6 +1472,23 @@ function registerIpcHandlers() {
     return true
   })
 
+  // "Add to dictionary" from the webview context menu's spellcheck suggestions
+  ipcMain.handle(IPC_CHANNELS.BROWSER_ADD_DICTIONARY_WORD, async (_e, word: string) => {
+    session.fromPartition('persist:browser-pane').addWordToSpellCheckerDictionary(word)
+    return true
+  })
+
+  // "Copy image" from the webview context menu — copies the actual image
+  // bytes to the clipboard (distinct from "Copy image address", which just
+  // copies the URL). Not exposed on the <webview> tag itself, so it's
+  // dispatched through the pane's registered WebContents like AI tool calls.
+  ipcMain.handle(IPC_CHANNELS.BROWSER_COPY_IMAGE_AT, async (_e, paneId: string, x: number, y: number) => {
+    const wc = getBrowserWebContents(paneId)
+    if (!wc) return false
+    wc.copyImageAt(x, y)
+    return true
+  })
+
   // ====== Browser <-> AI bridge ======
 
   // BrowserPane registers its webview's webContentsId so we can drive it.
@@ -1620,7 +1637,9 @@ app.whenReady().then(() => {
             canCopy: params.editFlags?.canCopy,
             canPaste: params.editFlags?.canPaste,
             canSelectAll: params.editFlags?.canSelectAll
-          }
+          },
+          misspelledWord: params.misspelledWord || undefined,
+          dictionarySuggestions: params.dictionarySuggestions?.length ? params.dictionarySuggestions : undefined
         })
       })
     }

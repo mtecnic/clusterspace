@@ -25,6 +25,8 @@ interface WebviewElement extends HTMLElement {
   paste: () => void
   selectAll: () => void
   inspectElement: (x: number, y: number) => void
+  replaceMisspelling: (text: string) => void
+  downloadURL: (url: string) => void
 }
 
 export interface BrowserTabCrashState {
@@ -56,6 +58,8 @@ export interface BrowserTabWebviewHandle {
   cut: () => void
   paste: () => void
   selectAll: () => void
+  replaceMisspelling: (text: string) => void
+  downloadURL: (url: string) => void
   getBoundingClientRect: () => DOMRect | null
   recreate: () => void
 }
@@ -278,6 +282,8 @@ export const BrowserTabWebview = forwardRef<BrowserTabWebviewHandle, BrowserTabW
       cut: () => webviewRef.current?.cut(),
       paste: () => webviewRef.current?.paste(),
       selectAll: () => webviewRef.current?.selectAll(),
+      replaceMisspelling: (text) => webviewRef.current?.replaceMisspelling(text),
+      downloadURL: (url) => webviewRef.current?.downloadURL(url),
       getBoundingClientRect: () => webviewRef.current?.getBoundingClientRect() ?? null,
       recreate
     }), [crashState, recreate])

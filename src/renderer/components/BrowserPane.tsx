@@ -423,7 +423,8 @@ export function BrowserPane({
       case 'back': handleBack(); break
       case 'forward': handleForward(); break
       case 'escape':
-        if (showFind) closeFind()
+        if (webviewMenu) setWebviewMenu(null)
+        else if (showFind) closeFind()
         else if (showOverflow) setShowOverflow(false)
         else if (showBookmarks) setShowBookmarks(false)
         else if (showDownloads) setShowDownloads(false)
@@ -433,7 +434,7 @@ export function BrowserPane({
         onUpdateConfig({ type: 'terminal', url: undefined })
         break
     }
-  }, [focusUrlBar, handleReload, handleBack, handleForward, activeHandle, showFind, showOverflow, showBookmarks, showDownloads, closeFind, onUpdateConfig])
+  }, [focusUrlBar, handleReload, handleBack, handleForward, activeHandle, webviewMenu, showFind, showOverflow, showBookmarks, showDownloads, closeFind, onUpdateConfig])
 
   // ---- URL input handlers ----
   const handleUrlSubmit = useCallback((e: React.FormEvent) => {
@@ -884,6 +885,10 @@ export function BrowserPane({
 
         if (params.linkURL) {
           items.push({
+            label: 'Open link in new tab',
+            onClick: () => { void handleOpenNewTab(params.linkURL!); close() }
+          })
+          items.push({
             label: 'Open link in default browser',
             onClick: () => { window.electronAPI.openExternal(params.linkURL!); close() }
           })
@@ -900,8 +905,46 @@ export function BrowserPane({
             onClick: () => { window.electronAPI.openExternal(params.srcURL!); close() }
           })
           items.push({
+            label: 'Save image as…',
+            onClick: () => { handle?.downloadURL(params.srcURL!); close() }
+          })
+          items.push({
+            label: 'Copy image',
+            onClick: () => { window.electronAPI.copyImageAt(config.id, params.x, params.y); close() }
+          })
+          items.push({
             label: 'Copy image address',
             onClick: () => { navigator.clipboard.writeText(params.srcURL!); close() }
+          })
+          items.push('divider')
+        }
+
+        if (params.mediaType === 'video' || params.mediaType === 'audio') {
+          items.push({
+            label: `Save ${params.mediaType} as…`,
+            onClick: () => { handle?.downloadURL(params.srcURL!); close() }
+          })
+          items.push({
+            label: 'Copy video/audio address',
+            onClick: () => { navigator.clipboard.writeText(params.srcURL!); close() }
+          })
+          items.push('divider')
+        }
+
+        if (params.isEditable && params.misspelledWord) {
+          if (params.dictionarySuggestions && params.dictionarySuggestions.length > 0) {
+            for (const suggestion of params.dictionarySuggestions) {
+              items.push({
+                label: suggestion,
+                onClick: () => { handle?.replaceMisspelling(suggestion); close() }
+              })
+            }
+          } else {
+            items.push({ label: 'No spelling suggestions', onClick: () => { close() } })
+          }
+          items.push({
+            label: 'Add to dictionary',
+            onClick: () => { window.electronAPI.addWordToDictionary(params.misspelledWord!); close() }
           })
           items.push('divider')
         }
@@ -938,8 +981,8 @@ export function BrowserPane({
         // Clamp to viewport
         const menuW = 240
         const menuH = items.length * 30
-        const clampedLeft = Math.min(left, window.innerWidth - menuW - 8)
-        const clampedTop = Math.min(top, window.innerHeight - menuH - 8)
+        const clampedLeft = Math.max(0, Math.min(left, window.innerWidth - menuW - 8))
+        const clampedTop = Math.max(0, Math.min(top, window.innerHeight - menuH - 8))
 
         return (
           <div

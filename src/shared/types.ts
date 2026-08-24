@@ -704,6 +704,8 @@ export const IPC_CHANNELS = {
   BROWSER_SHORTCUT: 'browser:shortcut',
   BROWSER_CONTEXT_MENU: 'browser:context-menu',
   BROWSER_OPEN_EXTERNAL: 'browser:open-external',
+  BROWSER_ADD_DICTIONARY_WORD: 'browser:add-dictionary-word',
+  BROWSER_COPY_IMAGE_AT: 'browser:copy-image-at',
 
   // Browser automation observability + safety
   BROWSER_ACTION_LOG_GET: 'browser:action-log:get',
@@ -770,6 +772,8 @@ export interface BrowserContextMenuParams {
     canPaste?: boolean
     canSelectAll?: boolean
   }
+  misspelledWord?: string
+  dictionarySuggestions?: string[]
 }
 
 // Browser pane bookmark
