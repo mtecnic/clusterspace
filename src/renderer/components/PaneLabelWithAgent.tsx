@@ -18,6 +18,7 @@ const statusColors: Record<AgentStatus, string> = {
   idle: 'bg-gray-400',
   working: 'bg-blue-500 animate-pulse',
   blocked: 'bg-yellow-500',
+  paused: 'bg-orange-500',
   complete: 'bg-green-500',
   error: 'bg-red-500'
 }

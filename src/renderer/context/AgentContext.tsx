@@ -200,6 +200,7 @@ export function AgentProvider({ children }: { children: ReactNode }) {
       idle: 0,
       working: 0,
       blocked: 0,
+      paused: 0,
       complete: 0,
       error: 0
     }

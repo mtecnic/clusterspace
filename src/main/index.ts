@@ -188,8 +188,9 @@ function createWindow() {
   })
   orchestrationStore.setWindow(mainWindow)
   orchestrationStore.setAgentStore(agentStore)
-  aiManager = new AIManager(mainWindow, ptyManager, workspaceStore, agentStore, orchestrationStore, aiStore)
-  goalRunner = new GoalRunner(mainWindow, aiManager, aiMemoryStore, aiStore, agentStore, goalStore)
+  aiManager = new AIManager(mainWindow, ptyManager, workspaceStore, agentStore, orchestrationStore, aiStore, goalStore)
+  goalRunner = new GoalRunner(mainWindow, aiManager, aiMemoryStore, aiStore, agentStore, goalStore, workspaceStore)
+  aiManager.setGoalRunner(goalRunner)
 
   // Register IPC handlers
   registerIpcHandlers()

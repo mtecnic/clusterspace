@@ -54,6 +54,20 @@ export interface ToolContext {
   state: ToolRuntimeState
   /** Optional — present when an AI provider with a vision model is active. */
   vision?: VisionHelpers
+  /** Scopes per-run tool state (step-protocol, policy, goal identity). The
+   *  single interactive chat panel uses a fixed sentinel; each running goal
+   *  uses its own checkpoint id — see AIManager's toolStateByCaller/
+   *  policiesByCaller and GoalRunner's `running` map, both keyed by this. */
+  callerId: string
+  /** Lets tools (assign_task/create_goal) start real autonomous goal runs
+   *  instead of only writing bookkeeping records. */
+  goalRunner: import('../goal-runner').GoalRunner
+  goalStore: import('../goal-store').GoalStore
+  /** Non-null exactly when callerId is itself a running goal — i.e. this
+   *  tool call came from inside another goal's loop (a lead agent spawning
+   *  sub-agents), so a new goal it starts can inherit this one's risk tier
+   *  instead of silently escalating. Null for interactive-chat calls. */
+  activePolicy: import('../goal-policy').GoalPolicy | null
 }
 
 /**

@@ -20,6 +20,8 @@ import { AgentStore } from './agent-store'
 import { OrchestrationStore } from './orchestration-store'
 import { ConfigLoader } from './config-loader'
 import { AIStore } from './ai-store'
+import type { GoalStore } from './goal-store'
+import type { GoalRunner } from './goal-runner'
 import { promises as fs } from 'fs'
 import { getBrowserWebContents } from './browser-pane-registry'
 import { capturePaneImage as capturePaneImageHelper } from './pane-screenshot'
@@ -106,6 +108,10 @@ export class AIManager {
   private orchestrationStore: OrchestrationStore
   private configLoader: ConfigLoader
   private aiStore: AIStore
+  private goalStore: GoalStore
+  // Set post-construction via setGoalRunner — GoalRunner's own constructor
+  // takes this AIManager, so the two can't be wired up in one step.
+  private goalRunner: GoalRunner | null = null
   private activeRequests: Map<string, AbortController> = new Map()
 
   // Shared state for tools that need to coordinate across calls (e.g., the
@@ -130,6 +136,13 @@ export class AIManager {
   setPolicyForCaller(callerId: string, policy: import('./goal-policy').GoalPolicy | null): void {
     if (policy) this.policiesByCaller.set(callerId, policy)
     else this.policiesByCaller.delete(callerId)
+  }
+
+  /** Wired up once, right after GoalRunner is constructed in index.ts — lets
+   *  tools (assign_task/create_goal) start real goal runs via ctx.goalRunner
+   *  instead of only writing bookkeeping records. */
+  setGoalRunner(goalRunner: GoalRunner): void {
+    this.goalRunner = goalRunner
   }
 
   /** Set once at the start of a conversation/goal — see ToolRuntimeState.originalIntent. */
@@ -160,7 +173,8 @@ export class AIManager {
     workspaceStore: WorkspaceStore,
     agentStore: AgentStore,
     orchestrationStore: OrchestrationStore,
-    aiStore: AIStore
+    aiStore: AIStore,
+    goalStore: GoalStore
   ) {
     this.window = window
     this.ptyManager = ptyManager
@@ -168,6 +182,7 @@ export class AIManager {
     this.agentStore = agentStore
     this.orchestrationStore = orchestrationStore
     this.aiStore = aiStore
+    this.goalStore = goalStore
     this.configLoader = new ConfigLoader()
     // Populate the global tool registry on first AIManager construction.
     // Migration is incremental — registered tools take precedence; everything
@@ -182,6 +197,14 @@ export class AIManager {
       state = { currentStep: null, originalIntent: null }
       this.toolStateByCaller.set(callerId, state)
     }
+    if (!this.goalRunner) {
+      // Startup-ordering invariant: index.ts calls setGoalRunner() right
+      // after constructing GoalRunner, before any tool call can possibly
+      // reach here. A null goalRunner at this point is a real bug, not a
+      // recoverable state — fail loudly rather than silently no-op tools
+      // that need it (assign_task/create_goal).
+      throw new Error('AIManager.buildToolContext called before setGoalRunner — startup ordering bug')
+    }
     return {
       window: this.window,
       ptyManager: this.ptyManager,
@@ -190,7 +213,11 @@ export class AIManager {
       orchestrationStore: this.orchestrationStore,
       configLoader: this.configLoader,
       state,
-      vision: this.buildVisionHelpers()
+      vision: this.buildVisionHelpers(),
+      callerId,
+      goalRunner: this.goalRunner,
+      goalStore: this.goalStore,
+      activePolicy: this.policiesByCaller.get(callerId) ?? null
     }
   }
 

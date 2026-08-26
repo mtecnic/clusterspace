@@ -11,6 +11,7 @@ import type { AIManager } from './ai-manager'
 import type { AIMemoryStore } from './ai-memory-store'
 import type { AIStore } from './ai-store'
 import type { AgentStore } from './agent-store'
+import type { WorkspaceStore } from './workspace-store'
 import type { GoalCheckpoint, GoalStore, SuccessCriterion } from './goal-store'
 import type { GoalPolicy } from './goal-policy'
 import { toolRegistry } from './ai-tools/registry'
@@ -93,6 +94,17 @@ interface RuntimeGoal {
   verifyNudgesGiven: number
 }
 
+// A goal that's been checkpointed (visible in GoalDashboard as 'pending')
+// but hasn't started its loop yet — either the concurrency cap is full or
+// it's waiting on other goals to complete. Promoted by promoteFromQueue(),
+// which runs whenever any goal ends (the only thing that can free a
+// concurrency slot or satisfy a dependency).
+interface QueuedGoal {
+  checkpoint: GoalCheckpoint
+  input: StartGoalInput
+  waitForGoalIds: string[]
+}
+
 export class GoalRunner {
   private window: BrowserWindow
   private aiManager: AIManager
@@ -100,8 +112,10 @@ export class GoalRunner {
   private aiStore: AIStore
   private agentStore: AgentStore
   private goalStore: GoalStore
+  private workspaceStore: WorkspaceStore
   // Active goals by id, keyed for IPC abort/pause/status.
   private running = new Map<string, RuntimeGoal>()
+  private queue: QueuedGoal[] = []
   private transientToolsRegistered = false
 
   constructor(
@@ -110,7 +124,8 @@ export class GoalRunner {
     aiMemoryStore: AIMemoryStore,
     aiStore: AIStore,
     agentStore: AgentStore,
-    goalStore: GoalStore
+    goalStore: GoalStore,
+    workspaceStore: WorkspaceStore
   ) {
     this.window = window
     this.aiManager = aiManager
@@ -118,6 +133,7 @@ export class GoalRunner {
     this.aiStore = aiStore
     this.agentStore = agentStore
     this.goalStore = goalStore
+    this.workspaceStore = workspaceStore
     this.registerTransientTools()
   }
 
@@ -143,9 +159,9 @@ export class GoalRunner {
         },
         required: ['rationale']
       },
-      run: async ({ rationale }) => {
-        const active = this.findActiveForCurrentCaller()
-        if (!active) {
+      run: async ({ rationale }, ctx) => {
+        const active = this.running.get(ctx.callerId)
+        if (!active || active.state.kind !== 'running') {
           return { success: false, message: 'claim_complete called outside an active goal run. This is a no-op.' }
         }
         active.pendingClaim = { rationale }
@@ -164,9 +180,9 @@ export class GoalRunner {
         },
         required: ['reason', 'what_was_learned']
       },
-      run: async ({ reason, what_was_learned }) => {
-        const active = this.findActiveForCurrentCaller()
-        if (!active) {
+      run: async ({ reason, what_was_learned }, ctx) => {
+        const active = this.running.get(ctx.callerId)
+        if (!active || active.state.kind !== 'running') {
           return { success: false, message: 'abort_with_report called outside an active goal run. This is a no-op.' }
         }
         active.pendingAbort = { reason, report: what_was_learned }
@@ -175,25 +191,19 @@ export class GoalRunner {
     })
   }
 
-  /**
-   * For now we only support a single concurrent goal (most useful first).
-   * If multiple goals are running, this picks the most-recently-started
-   * one — fine for the initial implementation; per-pane disambiguation
-   * can come later when we support concurrent goals.
-   */
-  private findActiveForCurrentCaller(): RuntimeGoal | undefined {
-    let latest: RuntimeGoal | undefined
-    for (const g of this.running.values()) {
-      if (g.state.kind === 'running' && (!latest || g.startedAt > latest.startedAt)) {
-        latest = g
-      }
-    }
-    return latest
-  }
-
   // ---- Public API ----
 
-  async start(input: StartGoalInput): Promise<{ goalId: string; error?: string }> {
+  /**
+   * `waitForGoalIds` (used by assign_task's depends_on) holds this goal in
+   * the queue until every referenced goal reaches 'completed'; if one ends
+   * 'failed'/'aborted' instead, this goal is aborted without ever running.
+   * Enforcing `AppSettings.fleet.maxConcurrentGoals` shares the exact same
+   * queue/promotion mechanism — both are "not ready to run yet, but should
+   * already be visible as a 'pending' checkpoint" — so a fleet launch that
+   * exceeds the cap and a goal waiting on a dependency look identical to
+   * the caller and to GoalDashboard.
+   */
+  async start(input: StartGoalInput, opts?: { waitForGoalIds?: string[] }): Promise<{ goalId: string; error?: string }> {
     // Resolve provider.
     const providerId = input.providerId ?? this.aiStore.getSettings().activeProviderId ?? undefined
     if (!providerId) {
@@ -201,14 +211,13 @@ export class GoalRunner {
     }
     const provider = this.aiStore.getProvider(providerId)
     if (!provider) return { goalId: '', error: `Provider ${providerId} not found` }
-    const apiKey = this.aiStore.getApiKey(providerId)
 
     // Per-pane conversation.
-    const settings = this.aiStore.getSettings()
-    const workspaceId = settings.activeProviderId ? undefined : undefined  // workspace context not surfaced here yet
-    const conversation = this.aiMemoryStore.getOrCreateConversation(providerId, workspaceId, input.paneId)
+    const conversation = this.aiMemoryStore.getOrCreateConversation(providerId, undefined, input.paneId)
 
-    // Checkpoint.
+    // Checkpoint — created up front (status defaults to 'pending' in
+    // GoalStore.create) so a queued goal is visible in GoalDashboard
+    // immediately, not just once it actually starts running.
     const checkpoint = this.goalStore.create({
       paneId: input.paneId,
       goal: input.goal,
@@ -218,7 +227,44 @@ export class GoalRunner {
       personaId: input.personaId,
       conversationId: conversation.id
     })
+    const resolvedInput: StartGoalInput = { ...input, providerId }
 
+    const deadDep = (opts?.waitForGoalIds ?? []).find(id => {
+      const dep = this.goalStore.get(id)
+      return dep != null && (dep.status === 'failed' || dep.status === 'aborted')
+    })
+    if (deadDep) {
+      const msg = `Dependency ${deadDep} did not complete successfully — this goal was never started.`
+      this.goalStore.update(checkpoint.id, { status: 'aborted', finalReport: msg })
+      this.emitEvent({ type: 'ended', goalId: checkpoint.id, status: 'aborted', finalReport: msg })
+      return { goalId: checkpoint.id, error: msg }
+    }
+    const waitForGoalIds = (opts?.waitForGoalIds ?? []).filter(id => this.goalStore.get(id)?.status !== 'completed')
+
+    const maxConcurrent = Math.max(1, this.workspaceStore.getSettings().fleet?.maxConcurrentGoals ?? 3)
+    const canStartNow = waitForGoalIds.length === 0 && this.running.size < maxConcurrent
+
+    if (!canStartNow) {
+      this.queue.push({ checkpoint, input: resolvedInput, waitForGoalIds })
+      return { goalId: checkpoint.id }
+    }
+
+    this.beginRun(checkpoint, resolvedInput, provider, conversation.messages)
+    return { goalId: checkpoint.id }
+  }
+
+  /** Actually kicks off a checkpoint's loop — called either immediately
+   *  from start() or later from promoteFromQueue() once a slot/dependency
+   *  frees up. Resolves apiKey fresh rather than threading it through the
+   *  queue, since it's a cheap lookup and avoids holding a secret in memory
+   *  longer than necessary for a goal that might sit queued a while. */
+  private beginRun(
+    checkpoint: GoalCheckpoint,
+    input: StartGoalInput,
+    provider: ReturnType<AIStore['getProvider']>,
+    conversationMessages: AIMessage[]
+  ): void {
+    const apiKey = this.aiStore.getApiKey(checkpoint.providerId!)
     const runtime: RuntimeGoal = {
       checkpoint,
       state: { kind: 'running', abortRequested: false, pauseRequested: false },
@@ -238,21 +284,74 @@ export class GoalRunner {
     this.agentStore.updateAgentStatus(input.paneId, 'working')
     this.emitEvent({ type: 'started', goalId: checkpoint.id })
 
-    // Kick off the loop. Don't await — return goalId so the caller can
-    // poll status / receive events.
-    this.runLoop(runtime, provider, apiKey, conversation.messages).catch(err => {
+    // Kick off the loop. Don't await — caller already returned goalId so it
+    // can poll status / receive events.
+    this.runLoop(runtime, provider, apiKey, conversationMessages).catch(err => {
       console.error('[goal-runner] loop crashed:', err)
       this.endGoal(runtime, 'failed', `Loop crashed: ${(err as Error).message ?? String(err)}`)
     })
+  }
 
-    return { goalId: checkpoint.id }
+  /** Re-checks the queue whenever a slot might have freed (called from
+   *  endGoal). Promotes what's now eligible, fails entries whose dependency
+   *  died, leaves the rest queued — in FIFO order so an earlier fleet
+   *  launch doesn't get starved by a later one. */
+  private promoteFromQueue(): void {
+    if (this.queue.length === 0) return
+    const maxConcurrent = Math.max(1, this.workspaceStore.getSettings().fleet?.maxConcurrentGoals ?? 3)
+
+    const stillQueued: QueuedGoal[] = []
+    for (const entry of this.queue) {
+      if (this.running.size >= maxConcurrent) {
+        stillQueued.push(entry)
+        continue
+      }
+
+      const deadDep = entry.waitForGoalIds.find(id => {
+        const dep = this.goalStore.get(id)
+        return dep != null && (dep.status === 'failed' || dep.status === 'aborted')
+      })
+      if (deadDep) {
+        const msg = `Dependency ${deadDep} did not complete successfully — this goal was never started.`
+        this.goalStore.update(entry.checkpoint.id, { status: 'aborted', finalReport: msg })
+        this.emitEvent({ type: 'ended', goalId: entry.checkpoint.id, status: 'aborted', finalReport: msg })
+        continue
+      }
+
+      const stillWaiting = entry.waitForGoalIds.filter(id => this.goalStore.get(id)?.status !== 'completed')
+      if (stillWaiting.length > 0) {
+        stillQueued.push({ ...entry, waitForGoalIds: stillWaiting })
+        continue
+      }
+
+      const provider = this.aiStore.getProvider(entry.checkpoint.providerId!)
+      if (!provider) {
+        const msg = `Provider ${entry.checkpoint.providerId} not found`
+        this.goalStore.update(entry.checkpoint.id, { status: 'failed', finalReport: msg })
+        this.emitEvent({ type: 'ended', goalId: entry.checkpoint.id, status: 'failed', finalReport: msg })
+        continue
+      }
+      const conversation = this.aiMemoryStore.getOrCreateConversation(entry.checkpoint.providerId!, undefined, entry.checkpoint.paneId)
+      this.beginRun(entry.checkpoint, entry.input, provider, conversation.messages)
+    }
+    this.queue = stillQueued
   }
 
   abort(goalId: string): boolean {
     const r = this.running.get(goalId)
-    if (!r || r.state.kind !== 'running') return false
-    r.state.abortRequested = true
-    return true
+    if (r && r.state.kind === 'running') {
+      r.state.abortRequested = true
+      return true
+    }
+    const idx = this.queue.findIndex(q => q.checkpoint.id === goalId)
+    if (idx !== -1) {
+      const msg = 'Aborted while queued (never started).'
+      this.queue.splice(idx, 1)
+      this.goalStore.update(goalId, { status: 'aborted', finalReport: msg })
+      this.emitEvent({ type: 'ended', goalId, status: 'aborted', finalReport: msg })
+      return true
+    }
+    return false
   }
 
   // runLoop already checks state.pauseRequested every iteration (sleeps in
@@ -811,6 +910,9 @@ export class GoalRunner {
       'idle'
     this.agentStore.updateAgentStatus(runtime.checkpoint.paneId, agentStatus)
     this.emitEvent({ type: 'ended', goalId: runtime.checkpoint.id, status, finalReport })
+    // A slot just freed and/or this goal might have been someone else's
+    // depends_on target — re-check the queue.
+    this.promoteFromQueue()
   }
 
   private emitEvent(event: GoalRunnerEvent): void {

@@ -263,6 +263,7 @@ export class AgentStore {
       idle: 0,
       working: 0,
       blocked: 0,
+      paused: 0,
       complete: 0,
       error: 0
     }

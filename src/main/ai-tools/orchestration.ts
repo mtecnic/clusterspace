@@ -90,7 +90,7 @@ export function registerOrchestrationTools(): void {
       },
       required: ['pane_id', 'description']
     },
-    run: async ({ pane_id, description, priority, depends_on }, { agentStore, orchestrationStore }) => {
+    run: async ({ pane_id, description, priority, depends_on }, { agentStore, orchestrationStore, goalRunner, activePolicy }) => {
       const dependencies = depends_on ? depends_on.split(',').map(s => s.trim()).filter(Boolean) : []
       const task = agentStore.assignTask(pane_id, {
         description,
@@ -99,7 +99,37 @@ export function registerOrchestrationTools(): void {
       })
       const activeGoal = orchestrationStore.getActiveGoal()
       if (activeGoal) orchestrationStore.addTaskToGoal(activeGoal.id, task)
-      return `Assigned task to ${pane_id}: "${description}" (ID: ${task.id}, priority: ${priority ?? 5})`
+
+      // Actually run it — this used to only write the bookkeeping above,
+      // with nothing ever dequeuing/executing the task. model_question is
+      // the only success-criterion type that works generically without
+      // more info than a tool call has (shell needs a literal command,
+      // json_predicate is unimplemented, manual never really verifies).
+      // Policy: inherit the calling goal's own risk ceiling when this call
+      // came from inside another running goal (a lead agent spawning
+      // sub-agents), so a sub-agent can't silently get a higher tier than
+      // its caller. Otherwise fall back to the same conservative default
+      // GoalCreateDialog's UI uses.
+      const policy = activePolicy ?? { risk: 'write_local' as const }
+      const result = await goalRunner.start(
+        {
+          paneId: pane_id,
+          goal: description,
+          successCriterion: { type: 'model_question', question: `Has the following task been completed: "${description}"?` },
+          policy
+        },
+        dependencies.length > 0 ? { waitForGoalIds: dependencies } : undefined
+      )
+      if (result.error) {
+        return `Assigned task to ${pane_id}: "${description}" (ID: ${task.id}) but it could not start: ${result.error}`
+      }
+      // start() returns immediately whether the goal actually began running
+      // or got queued (concurrency cap / unfinished dependency) — don't
+      // claim "started" when it might just be pending.
+      const statusNote = dependencies.length > 0
+        ? ` — goal ${result.goalId} queued behind: ${dependencies.join(', ')}`
+        : ` — goal ${result.goalId} created (running now, or queued if the concurrent-goal limit is full)`
+      return `Assigned task to ${pane_id}: "${description}" (ID: ${task.id}, priority: ${priority ?? 5})${statusNote}`
     }
   })
 
@@ -199,11 +229,24 @@ export function registerOrchestrationTools(): void {
       },
       required: ['description', 'pane_ids']
     },
-    run: async ({ description, pane_ids }, { agentStore, orchestrationStore }) => {
+    run: async ({ description, pane_ids }, { agentStore, orchestrationStore, goalRunner, activePolicy }) => {
       const paneIds = pane_ids.split(',').map(s => s.trim()).filter(Boolean)
+      // OrchestrationGoal is now just a label/grouping record — the actual
+      // work is N independent GoalRunner runs below, one per pane, all
+      // pursuing the same objective in parallel.
       const goal = orchestrationStore.createGoal(description, paneIds)
-      for (const paneId of paneIds) agentStore.initializeAgent(paneId)
-      return `Created goal "${description}" (ID: ${goal.id}) with ${paneIds.length} assigned agents`
+      const policy = activePolicy ?? { risk: 'write_local' as const }
+      const results = await Promise.all(paneIds.map(async paneId => {
+        agentStore.initializeAgent(paneId)
+        return goalRunner.start({
+          paneId,
+          goal: description,
+          successCriterion: { type: 'model_question', question: `Has this been accomplished: "${description}"?` },
+          policy
+        })
+      }))
+      const started = results.filter(r => !r.error).length
+      return `Created goal "${description}" (ID: ${goal.id}) — started on ${started}/${paneIds.length} panes`
     }
   })
 

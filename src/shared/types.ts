@@ -257,7 +257,7 @@ export interface AIConversation {
 // ============= AGENT ORCHESTRATION TYPES =============
 
 // Agent status
-export type AgentStatus = 'idle' | 'working' | 'blocked' | 'complete' | 'error'
+export type AgentStatus = 'idle' | 'working' | 'blocked' | 'paused' | 'complete' | 'error'
 
 // Task status
 export type TaskStatus = 'pending' | 'in_progress' | 'complete' | 'failed' | 'blocked'
@@ -502,6 +502,14 @@ export interface AppSettings {
   // discarded (navigated to about:blank) to free memory/CPU. <=0 disables
   // the feature entirely. Default 15 matches Chrome Memory Saver's range.
   browserTabIdleDiscardMinutes: number
+  fleet: FleetSettings
+}
+
+// Soft guardrail on how many GoalRunner loops may run concurrently — no AI
+// provider is rate-limited/queued by this app otherwise, so without a cap a
+// large fleet launch would fire every goal's model calls simultaneously.
+export interface FleetSettings {
+  maxConcurrentGoals: number
 }
 
 // Remote web access (port 4444 by default) — lets a browser view/control

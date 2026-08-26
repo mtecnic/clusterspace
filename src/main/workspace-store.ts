@@ -17,7 +17,8 @@ const defaultSettings: AppSettings = {
   ai: DEFAULT_AI_SETTINGS,
   defaultBrowserUrl: 'https://www.google.com',
   remoteAccess: DEFAULT_REMOTE_ACCESS_SETTINGS,
-  browserTabIdleDiscardMinutes: 15
+  browserTabIdleDiscardMinutes: 15,
+  fleet: { maxConcurrentGoals: 3 }
 }
 
 export class WorkspaceStore {
@@ -217,6 +218,7 @@ export class WorkspaceStore {
     // (saved before remoteAccess existed) won't have it at all.
     if (!settings.remoteAccess) settings.remoteAccess = DEFAULT_REMOTE_ACCESS_SETTINGS
     if (settings.browserTabIdleDiscardMinutes == null) settings.browserTabIdleDiscardMinutes = defaultSettings.browserTabIdleDiscardMinutes
+    if (!settings.fleet) settings.fleet = defaultSettings.fleet
     return settings
   }
 

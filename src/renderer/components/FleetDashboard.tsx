@@ -11,6 +11,7 @@ const statusColors: Record<AgentStatus, string> = {
   idle: 'bg-gray-500',
   working: 'bg-blue-500',
   blocked: 'bg-yellow-500',
+  paused: 'bg-orange-500',
   complete: 'bg-green-500',
   error: 'bg-red-500'
 }
@@ -19,6 +20,7 @@ const statusLabels: Record<AgentStatus, string> = {
   idle: 'Idle',
   working: 'Working',
   blocked: 'Blocked',
+  paused: 'Paused',
   complete: 'Complete',
   error: 'Error'
 }
