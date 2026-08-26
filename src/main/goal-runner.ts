@@ -354,6 +354,15 @@ export class GoalRunner {
     return false
   }
 
+  // Lets a tool call in progress for this goal (e.g. wait_for_agent's poll)
+  // notice an abort request without waiting for the next runLoop iteration
+  // — that poll can run for minutes, and abort() alone only sets a flag
+  // runLoop itself checks between turns.
+  isAbortRequested(goalId: string): boolean {
+    const r = this.running.get(goalId)
+    return r?.state.kind === 'running' && r.state.abortRequested === true
+  }
+
   // runLoop already checks state.pauseRequested every iteration (sleeps in
   // POLL_INTERVAL_MS*5 increments while true) — this was dead capability
   // with no public method to actually set the flag. pause/resume just flip
@@ -446,6 +455,22 @@ export class GoalRunner {
         if (runtime.state.kind === 'running' && runtime.state.pauseRequested) {
           await new Promise(r => setTimeout(r, POLL_INTERVAL_MS * 5))
           continue
+        }
+
+        // Fold in anything queued via share_context (another agent) or a
+        // human steering nudge from the Fleet Dashboard — both land in the
+        // same AgentStore.context queue. Placed after the pause check so it
+        // can't accumulate silently while paused; drained immediately so
+        // it's delivered once, not repeated on every subsequent step.
+        const sharedContext = this.agentStore.getAgent(runtime.checkpoint.paneId)?.context
+        if (sharedContext && sharedContext.length > 0) {
+          messages.push({
+            id: uuidv4(),
+            role: 'system',
+            content: sharedContext.join('\n'),
+            timestamp: Date.now()
+          })
+          this.agentStore.clearContext(runtime.checkpoint.paneId)
         }
 
         // One model turn.

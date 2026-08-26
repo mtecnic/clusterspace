@@ -195,9 +195,42 @@ export function registerOrchestrationTools(): void {
       },
       required: ['waiting_pane_id', 'target_pane_id']
     },
-    run: async ({ waiting_pane_id, target_pane_id }, { orchestrationStore }) => {
+    // Actually blocks the calling goal's own loop until the target's goal
+    // finishes — this used to just flip a status label and return
+    // immediately, so "wait" never meant anything at the execution level.
+    // Works because this poll runs inside the tool dispatch that runLoop
+    // already awaits before the model's next turn: blocking here blocks
+    // the loop for free, no separate pause plumbing needed.
+    run: async ({ waiting_pane_id, target_pane_id }, { orchestrationStore, goalStore, goalRunner, callerId }) => {
       orchestrationStore.waitFor(waiting_pane_id, target_pane_id)
-      return `Agent ${waiting_pane_id} is now waiting for ${target_pane_id} to complete`
+
+      const isTerminal = (s: string) => s === 'completed' || s === 'failed' || s === 'aborted'
+      const targetGoal = goalStore.list({ paneId: target_pane_id })[0]
+      if (!targetGoal || isTerminal(targetGoal.status)) {
+        orchestrationStore.notifyComplete(target_pane_id)
+        return `${target_pane_id} has no active goal to wait for — proceeding immediately.`
+      }
+
+      const POLL_MS = 2000
+      const MAX_WAIT_MS = 30 * 60 * 1000 // bounded so a target that never finishes can't hang the waiter forever
+      const startedAt = Date.now()
+      while (Date.now() - startedAt < MAX_WAIT_MS) {
+        // callerId is this waiting goal's own id when running inside a goal
+        // loop — lets a user abort of *this* goal interrupt a long wait
+        // instead of it silently running to the cap.
+        if (goalRunner.isAbortRequested(callerId)) {
+          orchestrationStore.notifyComplete(target_pane_id)
+          return `Stopped waiting for ${target_pane_id} — this goal was aborted.`
+        }
+        await new Promise(r => setTimeout(r, POLL_MS))
+        const latest = goalStore.get(targetGoal.id)
+        if (!latest || isTerminal(latest.status)) {
+          orchestrationStore.notifyComplete(target_pane_id)
+          return `${target_pane_id}'s goal finished (${latest?.status ?? 'gone'}) — proceeding.`
+        }
+      }
+      orchestrationStore.notifyComplete(target_pane_id)
+      return `Gave up waiting for ${target_pane_id} after 30 minutes — proceeding anyway.`
     }
   })
 

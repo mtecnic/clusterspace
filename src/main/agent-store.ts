@@ -237,7 +237,9 @@ export class AgentStore {
     this.saveAgent(agent)
   }
 
-  // Clear context for an agent
+  // Clear context for an agent — also the drain point GoalRunner calls once
+  // it's folded pending entries into the next model turn, so they aren't
+  // re-injected on every subsequent step.
   clearContext(paneId: string): void {
     const agent = this.getAgent(paneId)
     if (!agent) return
