@@ -531,6 +531,7 @@ function AppContent({ onRegisterFocusPane, onRegisterMaximizePane }: AppContentP
       <FleetDashboard
         isOpen={showFleetDashboard}
         onClose={() => setShowFleetDashboard(false)}
+        panes={activeWorkspace?.panes ?? []}
       />
     </div>
   )

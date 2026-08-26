@@ -1,10 +1,12 @@
-import React from 'react'
+import React, { useState } from 'react'
 import { useAgent } from '../context/AgentContext'
-import { AgentStatus, PaneAgentState, OrchestrationEvent } from '@shared/types'
+import { AgentStatus, PaneAgentState, OrchestrationEvent, PaneConfig } from '@shared/types'
+import { FleetComposer } from './FleetComposer'
 
 interface FleetDashboardProps {
   isOpen: boolean
   onClose: () => void
+  panes: PaneConfig[]
 }
 
 const statusColors: Record<AgentStatus, string> = {
@@ -144,8 +146,9 @@ function EventItem({ event }: { event: OrchestrationEvent }) {
   )
 }
 
-export function FleetDashboard({ isOpen, onClose }: FleetDashboardProps) {
+export function FleetDashboard({ isOpen, onClose, panes }: FleetDashboardProps) {
   const { agents, activeGoal, recentEvents, getStatusCounts } = useAgent()
+  const [showComposer, setShowComposer] = useState(false)
 
   if (!isOpen) return null
 
@@ -170,14 +173,22 @@ export function FleetDashboard({ isOpen, onClose }: FleetDashboardProps) {
               ))}
             </div>
           </div>
-          <button
-            onClick={onClose}
-            className="text-cs-text-muted hover:text-cs-text transition-colors"
-          >
-            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setShowComposer(true)}
+              className="px-3 py-1.5 text-sm bg-blue-600 hover:bg-blue-500 text-white rounded transition-colors"
+            >
+              Launch Fleet
+            </button>
+            <button
+              onClick={onClose}
+              className="text-cs-text-muted hover:text-cs-text transition-colors"
+            >
+              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
         </div>
 
         {/* Content */}
@@ -249,6 +260,14 @@ export function FleetDashboard({ isOpen, onClose }: FleetDashboardProps) {
           </div>
         </div>
       </div>
+
+      {showComposer && (
+        <FleetComposer
+          panes={panes}
+          onClose={() => setShowComposer(false)}
+          onLaunched={() => setShowComposer(false)}
+        />
+      )}
     </div>
   )
 }

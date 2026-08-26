@@ -66,7 +66,24 @@ export function AgentProvider({ children }: { children: ReactNode }) {
       }
     })
 
-    return cleanup
+    // GoalRunner is now the real driver of agent status (see goal-runner.ts's
+    // syncFromGoalStep/updateAgentStatus calls) but it pushes on a separate
+    // 'goal:event' channel that GoalDashboard already listens to — without
+    // this, Fleet Dashboard's agent cards would only refresh on the old
+    // orchestration events above, which nothing goal-driven emits anymore.
+    // 'step' is intentionally excluded — it fires on every tool call, and a
+    // full agents refetch per step would be excessive for a compact overview
+    // that already drills into GoalDashboard for real-time detail.
+    const cleanupGoal = window.electronAPI.onGoalEvent((event) => {
+      if (event.type === 'started' || event.type === 'ended' || event.type === 'paused' || event.type === 'resumed') {
+        refreshAgents()
+      }
+    })
+
+    return () => {
+      cleanup()
+      cleanupGoal()
+    }
   }, [])
 
   const loadInitialData = async () => {
