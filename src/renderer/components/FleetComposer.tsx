@@ -54,6 +54,9 @@ export function FleetComposer({ panes, onClose, onLaunched }: FleetComposerProps
     }
 
     const policy: GoalPolicy = { risk }
+    // Only a real "fleet" (multiple agents launched together) gets a
+    // shared fleetId — a single-pane launch has nothing to group with.
+    const fleetId = selectedList.length > 1 ? crypto.randomUUID() : undefined
 
     setSubmitting(true)
     try {
@@ -67,7 +70,8 @@ export function FleetComposer({ panes, onClose, onLaunched }: FleetComposerProps
           paneId: p.id,
           goal: task,
           successCriterion: { type: 'model_question', question: `Has this been accomplished: "${task}"?` },
-          policy
+          policy,
+          fleetId
         })
       }))
       const goalIds = results.filter(r => !r.error).map(r => r.goalId)

@@ -391,6 +391,10 @@ export interface GoalCheckpoint {
   finalReport?: string
   createdAt: number
   updatedAt: number
+  // Links sibling goals launched together (Fleet Composer / create_goal)
+  // so the dashboard can group them and bulk pause/resume/abort as one
+  // unit. Absent for solo goals (GoalCreateDialog, assign_task).
+  fleetId?: string
 }
 
 export type GoalRunnerEvent =

@@ -45,9 +45,10 @@ interface AgentCardProps {
   onPause: (goalId: string) => void
   onResume: (goalId: string) => void
   onAbort: (goalId: string) => void
+  onRetry: (goal: GoalCheckpoint) => void
 }
 
-function AgentCard({ agent, paneLabel, goal, onDrillIn, onPause, onResume, onAbort }: AgentCardProps) {
+function AgentCard({ agent, paneLabel, goal, onDrillIn, onPause, onResume, onAbort, onRetry }: AgentCardProps) {
   const clickable = goal != null
   const isWorking = agent.status === 'working'
 
@@ -133,6 +134,94 @@ function AgentCard({ agent, paneLabel, goal, onDrillIn, onPause, onResume, onAbo
           </button>
         </div>
       )}
+
+      {/* Relaunch a failed/aborted goal with the exact same paneId/goal/
+          criterion/policy/fleetId already sitting on the checkpoint — pure
+          re-submission, no form to refill. */}
+      {goal && (goal.status === 'failed' || goal.status === 'aborted') && (
+        <div className="mt-2" onClick={e => e.stopPropagation()}>
+          <button
+            onClick={() => onRetry(goal)}
+            className="px-2 py-1 text-xs bg-cs-accent hover:bg-cs-accent-hover text-white rounded transition-colors"
+          >
+            Retry
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+interface FleetGroupProps {
+  fleetId: string
+  agents: PaneAgentState[]
+  paneGoals: Record<string, GoalCheckpoint>
+  paneLabelFor: (paneId: string) => string
+  onDrillIn: (goalId: string) => void
+  onPause: (goalId: string) => void
+  onResume: (goalId: string) => void
+  onAbort: (goalId: string) => void
+  onRetry: (goal: GoalCheckpoint) => void
+}
+
+// Renders sibling goals launched together (Fleet Composer / create_goal,
+// linked via GoalCheckpoint.fleetId) as one group with bulk controls,
+// instead of N indistinguishable loose cards.
+function FleetGroup({ agents, paneGoals, paneLabelFor, onDrillIn, onPause, onResume, onAbort, onRetry }: FleetGroupProps) {
+  const goals = agents.map(a => paneGoals[a.paneId]).filter((g): g is GoalCheckpoint => g != null)
+  const anyRunning = goals.some(g => g.status === 'running')
+  const anyPaused = goals.some(g => g.status === 'paused')
+  const anyActive = anyRunning || anyPaused
+  const sameTask = goals.length > 0 && goals.every(g => g.goal === goals[0].goal)
+
+  const pauseAll = () => goals.filter(g => g.status === 'running').forEach(g => onPause(g.id))
+  const resumeAll = () => goals.filter(g => g.status === 'paused').forEach(g => onResume(g.id))
+  const abortAll = () => goals.filter(g => g.status === 'running' || g.status === 'paused').forEach(g => onAbort(g.id))
+
+  return (
+    <div className="mb-4 border border-cs-border rounded-lg overflow-hidden">
+      <div className="flex items-center justify-between gap-2 px-3 py-2 bg-cs-surface border-b border-cs-border">
+        <div className="min-w-0">
+          <span className="text-xs font-semibold text-cs-text">Fleet — {agents.length} agents</span>
+          {sameTask && (
+            <p className="text-xs text-cs-text-muted truncate max-w-[360px]" title={goals[0].goal}>
+              {goals[0].goal}
+            </p>
+          )}
+        </div>
+        <div className="flex gap-2 shrink-0">
+          {anyRunning && (
+            <button onClick={pauseAll} className="px-2 py-1 text-xs bg-yellow-600 hover:bg-yellow-500 text-white rounded transition-colors">
+              Pause All
+            </button>
+          )}
+          {anyPaused && (
+            <button onClick={resumeAll} className="px-2 py-1 text-xs bg-blue-600 hover:bg-blue-500 text-white rounded transition-colors">
+              Resume All
+            </button>
+          )}
+          {anyActive && (
+            <button onClick={abortAll} className="px-2 py-1 text-xs bg-red-700 hover:bg-red-600 text-white rounded transition-colors">
+              Abort All
+            </button>
+          )}
+        </div>
+      </div>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 p-3">
+        {agents.map(agent => (
+          <AgentCard
+            key={agent.paneId}
+            agent={agent}
+            paneLabel={paneLabelFor(agent.paneId)}
+            goal={paneGoals[agent.paneId] ?? null}
+            onDrillIn={onDrillIn}
+            onPause={onPause}
+            onResume={onResume}
+            onAbort={onAbort}
+            onRetry={onRetry}
+          />
+        ))}
+      </div>
     </div>
   )
 }
@@ -226,6 +315,34 @@ export function FleetDashboard({ isOpen, onClose, panes, onDrillIntoGoal }: Flee
   const handlePause = async (goalId: string) => { await window.electronAPI.pauseGoalRun(goalId); refreshPaneGoals() }
   const handleResume = async (goalId: string) => { await window.electronAPI.resumeGoalRun(goalId); refreshPaneGoals() }
   const handleAbort = async (goalId: string) => { await window.electronAPI.abortGoal(goalId); refreshPaneGoals() }
+  const handleRetry = async (goal: GoalCheckpoint) => {
+    await window.electronAPI.startGoal({
+      paneId: goal.paneId,
+      goal: goal.goal,
+      successCriterion: goal.successCriterion,
+      policy: goal.policy,
+      fleetId: goal.fleetId
+    })
+    refreshPaneGoals()
+  }
+
+  // Group by fleetId (Fleet Composer / create_goal batches) — a fleetId
+  // shared by only one currently-visible agent (its siblings finished or
+  // aren't agents anymore) renders as a solo card, same as no fleetId at all.
+  const byFleet = new Map<string, PaneAgentState[]>()
+  const soloAgents: PaneAgentState[] = []
+  for (const agent of agentList) {
+    const fleetId = paneGoals[agent.paneId]?.fleetId
+    if (!fleetId) { soloAgents.push(agent); continue }
+    const list = byFleet.get(fleetId) ?? []
+    list.push(agent)
+    byFleet.set(fleetId, list)
+  }
+  const fleetGroups: [string, PaneAgentState[]][] = []
+  for (const [fleetId, list] of byFleet) {
+    if (list.length > 1) fleetGroups.push([fleetId, list])
+    else soloAgents.push(...list)
+  }
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
@@ -277,20 +394,39 @@ export function FleetDashboard({ isOpen, onClose, panes, onDrillIntoGoal }: Flee
             {agentList.length === 0 ? (
               <p className="text-cs-text-muted text-sm">No agents initialized yet.</p>
             ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                {agentList.map(agent => (
-                  <AgentCard
-                    key={agent.paneId}
-                    agent={agent}
-                    paneLabel={paneLabelFor(agent.paneId)}
-                    goal={paneGoals[agent.paneId] ?? null}
+              <>
+                {fleetGroups.map(([fleetId, groupAgents]) => (
+                  <FleetGroup
+                    key={fleetId}
+                    fleetId={fleetId}
+                    agents={groupAgents}
+                    paneGoals={paneGoals}
+                    paneLabelFor={paneLabelFor}
                     onDrillIn={onDrillIntoGoal}
                     onPause={handlePause}
                     onResume={handleResume}
                     onAbort={handleAbort}
+                    onRetry={handleRetry}
                   />
                 ))}
-              </div>
+                {soloAgents.length > 0 && (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    {soloAgents.map(agent => (
+                      <AgentCard
+                        key={agent.paneId}
+                        agent={agent}
+                        paneLabel={paneLabelFor(agent.paneId)}
+                        goal={paneGoals[agent.paneId] ?? null}
+                        onDrillIn={onDrillIntoGoal}
+                        onPause={handlePause}
+                        onResume={handleResume}
+                        onAbort={handleAbort}
+                        onRetry={handleRetry}
+                      />
+                    ))}
+                  </div>
+                )}
+              </>
             )}
           </div>
 

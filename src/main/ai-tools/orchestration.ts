@@ -277,7 +277,11 @@ export function registerOrchestrationTools(): void {
           paneId,
           goal: description,
           successCriterion: { type: 'model_question', question: `Has this been accomplished: "${description}"?` },
-          policy
+          policy,
+          // Reuse the OrchestrationGoal's own id as fleetId — links these N
+          // runs together for Fleet Dashboard grouping / bulk pause-resume-
+          // abort without generating a second id for the same batch.
+          fleetId: goal.id
         })
       }))
       const started = results.filter(r => !r.error).length

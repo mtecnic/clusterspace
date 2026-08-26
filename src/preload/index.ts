@@ -53,6 +53,7 @@ export interface StartGoalInput {
   wallClockMs?: number
   criticIntervalSteps?: number
   criticProviderId?: string
+  fleetId?: string
 }
 
 // Type for the exposed API

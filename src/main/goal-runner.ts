@@ -64,6 +64,8 @@ export interface StartGoalInput {
   /** Hard cap on non-transient tool-call steps, independent of wall clock.
    *  Default 300. */
   maxSteps?: number
+  /** Links sibling goals launched together — see GoalCheckpoint.fleetId. */
+  fleetId?: string
 }
 
 type RunnerState =
@@ -225,7 +227,8 @@ export class GoalRunner {
       policy: input.policy,
       providerId,
       personaId: input.personaId,
-      conversationId: conversation.id
+      conversationId: conversation.id,
+      fleetId: input.fleetId
     })
     const resolvedInput: StartGoalInput = { ...input, providerId }
 
