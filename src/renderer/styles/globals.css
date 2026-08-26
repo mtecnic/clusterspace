@@ -1293,7 +1293,8 @@ img.ac-favicon { object-fit: contain; }
 }
 
 .terminal-pane.ai-working,
-.browser-pane.ai-working {
+.browser-pane.ai-working,
+.agent-card.ai-working {
   animation: ai-pane-glow 2s ease-in-out infinite;
   border-color: var(--cs-accent);
 }

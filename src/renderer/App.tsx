@@ -51,6 +51,10 @@ function AppContent({ onRegisterFocusPane, onRegisterMaximizePane }: AppContentP
   const [showAISettingsDialog, setShowAISettingsDialog] = useState(false)
   const [showFleetDashboard, setShowFleetDashboard] = useState(false)
   const [showGoalDashboard, setShowGoalDashboard] = useState(false)
+  // Set when a Fleet Dashboard card is clicked to drill into that pane's
+  // goal — swaps which dashboard is open and tells GoalDashboard which
+  // goal to pre-select, instead of duplicating its detail view.
+  const [drillGoalId, setDrillGoalId] = useState<string | null>(null)
   const [runningGoalCount, setRunningGoalCount] = useState(0)
   const [focusedPaneId, setFocusedPaneId] = useState<string | null>(null)
   const [broadcastEnabled, setBroadcastEnabled] = useState(false)
@@ -524,14 +528,20 @@ function AppContent({ onRegisterFocusPane, onRegisterMaximizePane }: AppContentP
       {/* Fleet Dashboard */}
       <GoalDashboard
         isOpen={showGoalDashboard}
-        onClose={() => setShowGoalDashboard(false)}
+        onClose={() => { setShowGoalDashboard(false); setDrillGoalId(null) }}
         panes={activeWorkspace?.panes ?? []}
+        initialSelectedGoalId={drillGoalId ?? undefined}
       />
 
       <FleetDashboard
         isOpen={showFleetDashboard}
         onClose={() => setShowFleetDashboard(false)}
         panes={activeWorkspace?.panes ?? []}
+        onDrillIntoGoal={(goalId) => {
+          setShowFleetDashboard(false)
+          setDrillGoalId(goalId)
+          setShowGoalDashboard(true)
+        }}
       />
     </div>
   )

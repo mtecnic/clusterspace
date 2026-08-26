@@ -1,21 +1,26 @@
-import React, { useState } from 'react'
+import React, { useCallback, useEffect, useState } from 'react'
 import { useAgent } from '../context/AgentContext'
-import { AgentStatus, PaneAgentState, OrchestrationEvent, PaneConfig } from '@shared/types'
+import { AgentStatus, PaneAgentState, OrchestrationEvent, PaneConfig, GoalCheckpoint } from '@shared/types'
 import { FleetComposer } from './FleetComposer'
 
 interface FleetDashboardProps {
   isOpen: boolean
   onClose: () => void
   panes: PaneConfig[]
+  onDrillIntoGoal: (goalId: string) => void
 }
 
+// cs-* tokens where a real semantic match exists; kept as the existing
+// arbitrary colors (orange/yellow) where it doesn't, matching what
+// PaneLabelWithAgent.tsx already uses for the same statuses so a pane's
+// tab-strip badge and its Fleet Dashboard card agree.
 const statusColors: Record<AgentStatus, string> = {
   idle: 'bg-gray-500',
-  working: 'bg-blue-500',
+  working: 'bg-cs-accent',
   blocked: 'bg-yellow-500',
   paused: 'bg-orange-500',
-  complete: 'bg-green-500',
-  error: 'bg-red-500'
+  complete: 'bg-cs-success',
+  error: 'bg-cs-error'
 }
 
 const statusLabels: Record<AgentStatus, string> = {
@@ -32,26 +37,46 @@ function formatTime(timestamp: number): string {
   return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
 }
 
-function AgentCard({ agent }: { agent: PaneAgentState }) {
-  const progressWidth = agent.progress.total > 0
-    ? `${agent.progress.percentage}%`
-    : '0%'
+interface AgentCardProps {
+  agent: PaneAgentState
+  paneLabel: string
+  goal: GoalCheckpoint | null
+  onDrillIn: (goalId: string) => void
+  onPause: (goalId: string) => void
+  onResume: (goalId: string) => void
+  onAbort: (goalId: string) => void
+}
+
+function AgentCard({ agent, paneLabel, goal, onDrillIn, onPause, onResume, onAbort }: AgentCardProps) {
+  const clickable = goal != null
+  const isWorking = agent.status === 'working'
 
   return (
-    <div className="bg-cs-surface rounded-lg p-3 border border-cs-border">
+    <div
+      className={`agent-card bg-cs-surface rounded-lg p-3 border border-cs-border transition-colors ${isWorking ? 'ai-working' : ''} ${clickable ? 'cursor-pointer hover:border-cs-accent-hover' : ''}`}
+      onClick={() => { if (goal) onDrillIn(goal.id) }}
+      title={clickable ? 'Click to view the full step log' : undefined}
+    >
       <div className="flex items-center justify-between mb-2">
-        <div className="flex items-center gap-2">
-          <span className="font-medium text-cs-text truncate max-w-[120px]">
-            {agent.paneId.slice(0, 8)}
+        <div className="flex items-center gap-2 min-w-0">
+          <span className="font-medium text-cs-text truncate max-w-[140px]" title={paneLabel}>
+            {paneLabel}
           </span>
           {agent.role !== 'General' && (
-            <span className="px-1.5 py-0.5 text-xs font-medium rounded bg-blue-600 text-white">
+            <span className="px-1.5 py-0.5 text-xs font-medium rounded bg-blue-600 text-white shrink-0">
               {agent.role}
             </span>
           )}
         </div>
-        <div className="flex items-center gap-2">
-          <span className={`w-2 h-2 rounded-full ${statusColors[agent.status]}`} />
+        <div className="flex items-center gap-1.5 shrink-0">
+          {isWorking ? (
+            // Indeterminate — a goal has no fixed step target, only a soft
+            // cap, so a real current/total fraction isn't available here.
+            // Tailwind's built-in animate-spin needs no new CSS.
+            <span className="w-2.5 h-2.5 border-2 border-cs-accent border-t-transparent rounded-full animate-spin" />
+          ) : (
+            <span className={`w-2 h-2 rounded-full ${statusColors[agent.status]} ${agent.status === 'paused' ? 'activity-badge' : ''}`} />
+          )}
           <span className="text-xs text-cs-text-muted">{statusLabels[agent.status]}</span>
         </div>
       </div>
@@ -62,28 +87,13 @@ function AgentCard({ agent }: { agent: PaneAgentState }) {
         </p>
       )}
 
-      {/* Progress bar */}
-      {agent.progress.total > 0 && (
-        <div className="mb-2">
-          <div className="flex justify-between text-xs text-cs-text-muted mb-1">
-            <span>Progress</span>
-            <span>{agent.progress.current}/{agent.progress.total}</span>
-          </div>
-          <div className="h-1.5 bg-cs-bg rounded-full overflow-hidden">
-            <div
-              className="h-full bg-blue-500 transition-all duration-300"
-              style={{ width: progressWidth }}
-            />
-          </div>
-        </div>
-      )}
-
-      {/* Current task */}
+      {/* Current task — the live step snippet GoalRunner keeps in sync
+          (syncFromGoalStep), not a fabricated progress fraction. */}
       {agent.currentTask && (
         <div className="mt-2 p-2 bg-cs-bg rounded text-xs">
           <div className="flex items-center gap-1 mb-1">
             <span className={`w-1.5 h-1.5 rounded-full ${statusColors[agent.status]}`} />
-            <span className="font-medium text-cs-text">Current Task</span>
+            <span className="font-medium text-cs-text">Current</span>
           </div>
           <p className="text-cs-text-muted truncate" title={agent.currentTask.description}>
             {agent.currentTask.description}
@@ -96,10 +106,31 @@ function AgentCard({ agent }: { agent: PaneAgentState }) {
         </div>
       )}
 
-      {/* Task queue count */}
-      {agent.taskQueue.length > 0 && (
-        <div className="mt-2 text-xs text-cs-text-muted">
-          {agent.taskQueue.length} task{agent.taskQueue.length !== 1 ? 's' : ''} queued
+      {/* Real per-agent controls — wired to this pane's actual GoalRunner
+          run, not the old cosmetic OrchestrationGoal pause/resume. */}
+      {goal && (goal.status === 'running' || goal.status === 'paused') && (
+        <div className="mt-2 flex gap-2" onClick={e => e.stopPropagation()}>
+          {goal.status === 'running' ? (
+            <button
+              onClick={() => onPause(goal.id)}
+              className="px-2 py-1 text-xs bg-yellow-600 hover:bg-yellow-500 text-white rounded transition-colors"
+            >
+              Pause
+            </button>
+          ) : (
+            <button
+              onClick={() => onResume(goal.id)}
+              className="px-2 py-1 text-xs bg-blue-600 hover:bg-blue-500 text-white rounded transition-colors"
+            >
+              Resume
+            </button>
+          )}
+          <button
+            onClick={() => onAbort(goal.id)}
+            className="px-2 py-1 text-xs bg-red-700 hover:bg-red-600 text-white rounded transition-colors"
+          >
+            Abort
+          </button>
         </div>
       )}
     </div>
@@ -146,14 +177,55 @@ function EventItem({ event }: { event: OrchestrationEvent }) {
   )
 }
 
-export function FleetDashboard({ isOpen, onClose, panes }: FleetDashboardProps) {
+export function FleetDashboard({ isOpen, onClose, panes, onDrillIntoGoal }: FleetDashboardProps) {
   const { agents, activeGoal, recentEvents, getStatusCounts } = useAgent()
   const [showComposer, setShowComposer] = useState(false)
+  const [paneGoals, setPaneGoals] = useState<Record<string, GoalCheckpoint>>({})
+
+  const agentList = Object.values(agents)
+  const paneLabelFor = useCallback(
+    (paneId: string) => panes.find(p => p.id === paneId)?.label ?? paneId.slice(0, 8),
+    [panes]
+  )
+
+  // Resolve each agent's most recent goal (goalStore returns most-recent-
+  // first per pane) so cards can show real pause/resume/abort controls and
+  // drill into GoalDashboard — refreshed on the same goal lifecycle events
+  // AgentContext already reacts to, plus on open.
+  const refreshPaneGoals = useCallback(async () => {
+    const ids = agentList.map(a => a.paneId)
+    if (ids.length === 0) { setPaneGoals({}); return }
+    const results = await Promise.all(ids.map(id => window.electronAPI.listGoals({ paneId: id })))
+    const next: Record<string, GoalCheckpoint> = {}
+    ids.forEach((id, i) => {
+      const latest = results[i]?.[0]
+      if (latest) next[id] = latest
+    })
+    setPaneGoals(next)
+    // agentList is derived fresh every render from the agents record — depending
+    // on its identity would refetch every render, so depend on the pane id set instead.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agentList.map(a => a.paneId).join(',')])
+
+  useEffect(() => {
+    if (!isOpen) return
+    refreshPaneGoals()
+    const cleanup = window.electronAPI.onGoalEvent(event => {
+      if (event.type === 'started' || event.type === 'ended' || event.type === 'paused' || event.type === 'resumed') {
+        refreshPaneGoals()
+      }
+    })
+    return cleanup
+  }, [isOpen, refreshPaneGoals])
 
   if (!isOpen) return null
 
-  const agentList = Object.values(agents)
   const counts = getStatusCounts()
+  const workingCount = counts.working ?? 0
+
+  const handlePause = async (goalId: string) => { await window.electronAPI.pauseGoalRun(goalId); refreshPaneGoals() }
+  const handleResume = async (goalId: string) => { await window.electronAPI.resumeGoalRun(goalId); refreshPaneGoals() }
+  const handleAbort = async (goalId: string) => { await window.electronAPI.abortGoal(goalId); refreshPaneGoals() }
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
@@ -162,9 +234,14 @@ export function FleetDashboard({ isOpen, onClose, panes }: FleetDashboardProps) 
         <div className="flex items-center justify-between p-4 border-b border-cs-border">
           <div className="flex items-center gap-4">
             <h2 className="text-lg font-semibold text-cs-text">Fleet Dashboard</h2>
+            {workingCount > 0 && (
+              <span className="px-2 py-0.5 text-xs rounded bg-cs-accent/20 text-cs-accent animate-pulse">
+                {workingCount} working
+              </span>
+            )}
             <div className="flex items-center gap-3">
               {Object.entries(counts).map(([status, count]) => (
-                count > 0 && (
+                count > 0 && status !== 'working' && (
                   <div key={status} className="flex items-center gap-1">
                     <span className={`w-2 h-2 rounded-full ${statusColors[status as AgentStatus]}`} />
                     <span className="text-xs text-cs-text-muted">{count}</span>
@@ -202,7 +279,16 @@ export function FleetDashboard({ isOpen, onClose, panes }: FleetDashboardProps) 
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                 {agentList.map(agent => (
-                  <AgentCard key={agent.paneId} agent={agent} />
+                  <AgentCard
+                    key={agent.paneId}
+                    agent={agent}
+                    paneLabel={paneLabelFor(agent.paneId)}
+                    goal={paneGoals[agent.paneId] ?? null}
+                    onDrillIn={onDrillIntoGoal}
+                    onPause={handlePause}
+                    onResume={handleResume}
+                    onAbort={handleAbort}
+                  />
                 ))}
               </div>
             )}
@@ -234,10 +320,10 @@ export function FleetDashboard({ isOpen, onClose, panes }: FleetDashboardProps) 
                     {activeGoal.taskBreakdown.length} tasks
                   </p>
                   {/* Per-agent pause/resume/abort lives on each agent's card
-                      now (see AgentCard), wired to the real GoalRunner
-                      controlling that pane — this record is just a label
-                      grouping which panes share this objective, not
-                      something with its own runnable lifecycle to pause. */}
+                      now, wired to the real GoalRunner controlling that
+                      pane — this record is just a label grouping which
+                      panes share this objective, not something with its
+                      own runnable lifecycle to pause. */}
                 </div>
               ) : (
                 <p className="text-cs-text-muted text-sm">No active goal.</p>
@@ -265,7 +351,7 @@ export function FleetDashboard({ isOpen, onClose, panes }: FleetDashboardProps) 
         <FleetComposer
           panes={panes}
           onClose={() => setShowComposer(false)}
-          onLaunched={() => setShowComposer(false)}
+          onLaunched={() => { setShowComposer(false); refreshPaneGoals() }}
         />
       )}
     </div>

@@ -6,6 +6,9 @@ interface GoalDashboardProps {
   isOpen: boolean
   onClose: () => void
   panes: PaneConfig[]
+  /** Set by Fleet Dashboard's card-click drill-in — pre-selects this goal
+   *  instead of the default "most recently active" pick below. */
+  initialSelectedGoalId?: string
 }
 
 const STATUS_BADGE: Record<GoalStatus, string> = {
@@ -51,7 +54,7 @@ function toolColor(tool: string): string {
   return 'text-cs-text'
 }
 
-export function GoalDashboard({ isOpen, onClose, panes }: GoalDashboardProps) {
+export function GoalDashboard({ isOpen, onClose, panes, initialSelectedGoalId }: GoalDashboardProps) {
   const [goals, setGoals] = useState<GoalCheckpoint[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [criticEvents, setCriticEvents] = useState<Record<string, Array<{ verdict: string; reason: string; at: number }>>>({})
@@ -112,13 +115,20 @@ export function GoalDashboard({ isOpen, onClose, panes }: GoalDashboardProps) {
     return unsubscribe
   }, [isOpen])
 
-  // Auto-select the most recently active goal when nothing is selected.
+  // Drill-in from Fleet Dashboard wins over the default pick below.
   useEffect(() => {
+    if (initialSelectedGoalId) setSelectedId(initialSelectedGoalId)
+  }, [initialSelectedGoalId])
+
+  // Auto-select the most recently active goal when nothing is selected —
+  // skipped when a drill-in target was requested.
+  useEffect(() => {
+    if (initialSelectedGoalId) return
     if (!selectedId && goals.length > 0) {
       const running = goals.find(g => g.status === 'running')
       setSelectedId(running?.id ?? goals[0].id)
     }
-  }, [goals, selectedId])
+  }, [goals, selectedId, initialSelectedGoalId])
 
   // Keep step log scrolled to bottom when selected goal updates.
   useEffect(() => {
