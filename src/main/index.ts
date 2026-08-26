@@ -28,6 +28,7 @@ import { resolveApproval } from './browser-approval'
 import { classifyError } from '../shared/ai-error-classifier'
 import { resolvePaneControlAck, sendPaneControl } from './pane-control-ack'
 import { detachCdpIfAttached } from './cdp-helpers'
+import { setWorkspaceStoreForNotify } from './notify'
 import { RecipeStore } from './browser-recipes'
 import { RemoteAccessStore } from './remote-access-store'
 import { RemoteServer } from './remote-server/server'
@@ -98,6 +99,7 @@ function createWindow() {
 
   // Settings must exist before BrowserWindow so we can restore window geometry.
   workspaceStore = new WorkspaceStore()
+  setWorkspaceStoreForNotify(workspaceStore)
   const persistedWindow = workspaceStore.getSettings().windowState
 
   mainWindow = new BrowserWindow({

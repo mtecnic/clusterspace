@@ -15,6 +15,7 @@ import type { WorkspaceStore } from './workspace-store'
 import type { GoalCheckpoint, GoalStore, SuccessCriterion } from './goal-store'
 import type { GoalPolicy } from './goal-policy'
 import { toolRegistry } from './ai-tools/registry'
+import { notify } from './notify'
 
 /**
  * GoalRunner — the headline of the autonomous roadmap.
@@ -944,6 +945,10 @@ export class GoalRunner {
       'idle'
     this.agentStore.updateAgentStatus(runtime.checkpoint.paneId, agentStatus)
     this.emitEvent({ type: 'ended', goalId: runtime.checkpoint.id, status, finalReport })
+    notify(
+      status === 'completed' ? 'Agent finished' : status === 'failed' ? 'Agent failed' : 'Agent aborted',
+      runtime.checkpoint.goal
+    )
     // A slot just freed and/or this goal might have been someone else's
     // depends_on target — re-check the queue.
     this.promoteFromQueue()

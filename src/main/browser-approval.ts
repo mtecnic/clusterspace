@@ -7,6 +7,7 @@
 import { BrowserWindow } from 'electron'
 import { v4 as uuidv4 } from 'uuid'
 import { IPC_CHANNELS } from '../shared/types'
+import { notify } from './notify'
 
 export interface ApprovalRequest {
   id: string
@@ -50,6 +51,7 @@ export async function requestApproval(
   if (!window || window.isDestroyed()) return false
   const id = uuidv4()
   const full: ApprovalRequest = { ...req, id }
+  notify('Agent needs approval', `${req.tool}: ${req.description}`)
   return new Promise<boolean>(resolve => {
     pending.set(id, approved => {
       if (approved && approvalKey) approvedThisSession.add(approvalKey)

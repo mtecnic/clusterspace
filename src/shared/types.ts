@@ -514,6 +514,9 @@ export interface AppSettings {
 // large fleet launch would fire every goal's model calls simultaneously.
 export interface FleetSettings {
   maxConcurrentGoals: number
+  // Native OS notification when a goal finishes/fails/aborts or needs
+  // approval — lets the dashboard stay closed while a fleet runs.
+  desktopNotifications: boolean
 }
 
 // Remote web access (port 4444 by default) — lets a browser view/control
