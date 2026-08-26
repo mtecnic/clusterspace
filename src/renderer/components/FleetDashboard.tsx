@@ -51,6 +51,18 @@ interface AgentCardProps {
 function AgentCard({ agent, paneLabel, goal, onDrillIn, onPause, onResume, onAbort, onRetry }: AgentCardProps) {
   const clickable = goal != null
   const isWorking = agent.status === 'working'
+  const [steerText, setSteerText] = useState('')
+  const [steerSent, setSteerSent] = useState(false)
+
+  const sendSteer = async () => {
+    if (!goal || !steerText.trim()) return
+    const ok = await window.electronAPI.steerGoal(goal.id, steerText.trim())
+    if (ok) {
+      setSteerText('')
+      setSteerSent(true)
+      setTimeout(() => setSteerSent(false), 2000)
+    }
+  }
 
   return (
     <div
@@ -131,6 +143,29 @@ function AgentCard({ agent, paneLabel, goal, onDrillIn, onPause, onResume, onAbo
             className="px-2 py-1 text-xs bg-red-700 hover:bg-red-600 text-white rounded transition-colors"
           >
             Abort
+          </button>
+        </div>
+      )}
+
+      {/* Steer — injects a follow-up instruction into the agent's next
+          turn without aborting it (reuses the same context queue
+          share_context writes to). */}
+      {goal && (goal.status === 'running' || goal.status === 'paused') && (
+        <div className="mt-2 flex gap-1.5" onClick={e => e.stopPropagation()}>
+          <input
+            type="text"
+            value={steerText}
+            onChange={e => setSteerText(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') sendSteer() }}
+            placeholder={steerSent ? 'Sent — picked up next turn' : 'Nudge this agent…'}
+            className="flex-1 min-w-0 px-2 py-1 bg-cs-bg border border-cs-border rounded text-cs-text text-xs"
+          />
+          <button
+            onClick={sendSteer}
+            disabled={!steerText.trim()}
+            className="px-2 py-1 text-xs bg-cs-surface hover:bg-cs-border disabled:opacity-40 text-cs-text rounded transition-colors shrink-0"
+          >
+            Send
           </button>
         </div>
       )}

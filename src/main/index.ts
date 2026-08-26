@@ -1058,6 +1058,20 @@ function registerIpcHandlers() {
     catch { return false }
   })
 
+  // Steer a running/paused goal without aborting it — reuses the same
+  // AgentStore.context queue share_context writes to and runLoop already
+  // drains into the next model turn (see goal-runner.ts).
+  ipcMain.handle('goal:steer', async (_e, id: string, message: string) => {
+    try {
+      const checkpoint = goalStore?.get(id)
+      if (!checkpoint || checkpoint.status === 'completed' || checkpoint.status === 'failed' || checkpoint.status === 'aborted') {
+        return false
+      }
+      agentStore?.addContext(checkpoint.paneId, `[From user]: ${message}`)
+      return true
+    } catch { return false }
+  })
+
   ipcMain.handle('goal:status', async (_e, id: string) => {
     try { return goalRunner?.status(id) ?? null }
     catch { return null }

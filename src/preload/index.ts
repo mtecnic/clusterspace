@@ -201,6 +201,7 @@ export interface ElectronAPI {
   abortGoal: (id: string) => Promise<boolean>
   pauseGoalRun: (id: string) => Promise<boolean>
   resumeGoalRun: (id: string) => Promise<boolean>
+  steerGoal: (id: string, message: string) => Promise<boolean>
   goalStatus: (id: string) => Promise<{ status: GoalStatus; step: number; lastStep?: GoalCheckpoint['steps'][number] } | null>
   onGoalEvent: (cb: (event: GoalRunnerEvent) => void) => () => void
 
@@ -694,6 +695,9 @@ const electronAPI: ElectronAPI = {
   },
   resumeGoalRun: (id: string) => {
     return ipcRenderer.invoke('goal:resume', id)
+  },
+  steerGoal: (id: string, message: string) => {
+    return ipcRenderer.invoke('goal:steer', id, message)
   },
   goalStatus: (id: string) => {
     return ipcRenderer.invoke('goal:status', id)
