@@ -145,7 +145,7 @@ function EventItem({ event }: { event: OrchestrationEvent }) {
 }
 
 export function FleetDashboard({ isOpen, onClose }: FleetDashboardProps) {
-  const { agents, activeGoal, recentEvents, getStatusCounts, pauseGoal, resumeGoal } = useAgent()
+  const { agents, activeGoal, recentEvents, getStatusCounts } = useAgent()
 
   if (!isOpen) return null
 
@@ -222,25 +222,11 @@ export function FleetDashboard({ isOpen, onClose }: FleetDashboardProps) {
                   <p className="text-xs text-cs-text-muted mt-2">
                     {activeGoal.taskBreakdown.length} tasks
                   </p>
-                  {(activeGoal.status === 'executing' || activeGoal.status === 'paused') && (
-                    <div className="mt-2 flex gap-2">
-                      {activeGoal.status === 'executing' ? (
-                        <button
-                          onClick={() => pauseGoal(activeGoal.id)}
-                          className="px-2 py-1 text-xs bg-yellow-600 hover:bg-yellow-500 text-white rounded transition-colors"
-                        >
-                          Pause
-                        </button>
-                      ) : (
-                        <button
-                          onClick={() => resumeGoal(activeGoal.id)}
-                          className="px-2 py-1 text-xs bg-blue-600 hover:bg-blue-500 text-white rounded transition-colors"
-                        >
-                          Resume
-                        </button>
-                      )}
-                    </div>
-                  )}
+                  {/* Per-agent pause/resume/abort lives on each agent's card
+                      now (see AgentCard), wired to the real GoalRunner
+                      controlling that pane — this record is just a label
+                      grouping which panes share this objective, not
+                      something with its own runnable lifecycle to pause. */}
                 </div>
               ) : (
                 <p className="text-cs-text-muted text-sm">No active goal.</p>

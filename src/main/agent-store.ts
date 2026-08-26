@@ -83,6 +83,27 @@ export class AgentStore {
     }
   }
 
+  // Called by GoalRunner on every dispatched tool-call step, so a pane's
+  // "current task" snippet reflects what its goal is actually doing right
+  // now instead of the static goal text repeated for the whole run. Doesn't
+  // touch `progress` — a goal has no fixed step target (only a soft cap),
+  // so a real current/total fraction isn't available here; the UI treats
+  // 'working' as indeterminate instead of fabricating a percentage.
+  syncFromGoalStep(paneId: string, description: string): void {
+    const agent = this.getAgent(paneId)
+    if (!agent) return
+    agent.currentTask = {
+      id: agent.currentTask?.id ?? uuidv4(),
+      description,
+      status: 'in_progress',
+      priority: agent.currentTask?.priority ?? 5,
+      dependencies: agent.currentTask?.dependencies ?? [],
+      startedAt: agent.currentTask?.startedAt ?? Date.now()
+    }
+    agent.lastActivity = Date.now()
+    this.saveAgent(agent)
+  }
+
   // Set agent role and purpose
   setRole(paneId: string, role: string, purpose: string): PaneAgentState | null {
     let agent = this.getAgent(paneId)

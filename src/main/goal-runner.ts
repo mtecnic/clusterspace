@@ -364,6 +364,7 @@ export class GoalRunner {
     if (!r || r.state.kind !== 'running' || r.state.pauseRequested) return false
     r.state.pauseRequested = true
     this.goalStore.update(goalId, { status: 'paused' })
+    this.agentStore.updateAgentStatus(r.checkpoint.paneId, 'paused')
     this.emitEvent({ type: 'paused', goalId })
     return true
   }
@@ -373,6 +374,7 @@ export class GoalRunner {
     if (!r || r.state.kind !== 'running' || !r.state.pauseRequested) return false
     r.state.pauseRequested = false
     this.goalStore.update(goalId, { status: 'running' })
+    this.agentStore.updateAgentStatus(r.checkpoint.paneId, 'working')
     this.emitEvent({ type: 'resumed', goalId })
     return true
   }
@@ -512,6 +514,10 @@ export class GoalRunner {
             ok,
             preview: resultPreview
           })
+          // Keep the pane's Fleet-visible "current task" snippet live — this
+          // is what PaneLabelWithAgent/FleetDashboard show without either
+          // component needing to know about goals at all.
+          this.agentStore.syncFromGoalStep(runtime.checkpoint.paneId, `${tc.name}: ${resultPreview}`.slice(0, 140))
           messages.push({
             id: uuidv4(),
             role: 'tool',

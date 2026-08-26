@@ -27,8 +27,6 @@ interface AgentContextValue {
 
   // Goal actions
   createGoal: (description: string, paneIds: string[]) => Promise<OrchestrationGoal>
-  pauseGoal: (goalId: string) => Promise<void>
-  resumeGoal: (goalId: string) => Promise<void>
 
   // Coordination actions
   waitForAgent: (waitingPaneId: string, targetPaneId: string) => Promise<void>
@@ -170,16 +168,6 @@ export function AgentProvider({ children }: { children: ReactNode }) {
     return goal
   }, [])
 
-  const pauseGoal = useCallback(async (goalId: string) => {
-    await window.electronAPI.pauseOrchestration(goalId)
-    await refreshAgents()
-  }, [refreshAgents])
-
-  const resumeGoal = useCallback(async (goalId: string) => {
-    await window.electronAPI.resumeOrchestration(goalId)
-    await refreshAgents()
-  }, [refreshAgents])
-
   const waitForAgent = useCallback(async (waitingPaneId: string, targetPaneId: string) => {
     await window.electronAPI.coordinationWaitFor(waitingPaneId, targetPaneId)
     await refreshAgents()
@@ -229,8 +217,6 @@ export function AgentProvider({ children }: { children: ReactNode }) {
     completeTask,
     failTask,
     createGoal,
-    pauseGoal,
-    resumeGoal,
     waitForAgent,
     notifyComplete,
     shareContext,

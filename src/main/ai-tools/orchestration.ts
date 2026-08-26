@@ -144,17 +144,20 @@ export function registerOrchestrationTools(): void {
       },
       required: ['pane_id']
     },
-    run: async ({ pane_id, result }, { agentStore, orchestrationStore }) => {
-      const task = agentStore.completeCurrentTask(pane_id, result)
-      if (!task) throw new Error(`No active task to complete for pane ${pane_id}`)
+    // Cross-pane coordination bookkeeping only — for a pane reporting on
+    // itself, use claim_complete instead (it actually ends the goal and
+    // gets verified). This intentionally no longer touches AgentStore's
+    // currentTask/taskQueue: those are now owned live by GoalRunner
+    // (syncFromGoalStep/endGoal), and completeCurrentTask nulling them out
+    // here could lie about a goal that's still actually running.
+    run: async ({ pane_id, result }, { orchestrationStore }) => {
       const unblocked = orchestrationStore.notifyComplete(pane_id)
       orchestrationStore.logEvent('task_completed', {
         paneId: pane_id,
-        taskId: task.id,
         details: result || 'Task completed'
       })
-      let response = `Completed task "${task.description}" for ${pane_id}`
-      if (unblocked.length > 0) response += `. Unblocked agents: ${unblocked.join(', ')}`
+      let response = `Noted task completion for ${pane_id}.`
+      if (unblocked.length > 0) response += ` Unblocked agents: ${unblocked.join(', ')}`
       return response
     }
   })
@@ -170,15 +173,14 @@ export function registerOrchestrationTools(): void {
       },
       required: ['pane_id', 'error']
     },
-    run: async ({ pane_id, error }, { agentStore, orchestrationStore }) => {
-      const task = agentStore.failCurrentTask(pane_id, error)
-      if (!task) throw new Error(`No active task to fail for pane ${pane_id}`)
+    // Cross-pane bookkeeping only — see complete_task's comment above;
+    // self-reporting should use abort_with_report instead.
+    run: async ({ pane_id, error }, { orchestrationStore }) => {
       orchestrationStore.logEvent('task_failed', {
         paneId: pane_id,
-        taskId: task.id,
         details: error
       })
-      return `Marked task "${task.description}" as failed: ${error}`
+      return `Noted task failure for ${pane_id}: ${error}`
     }
   })
 
