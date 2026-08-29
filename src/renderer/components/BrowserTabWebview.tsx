@@ -29,6 +29,7 @@ interface WebviewElement extends HTMLElement {
   downloadURL: (url: string) => void
   setZoomFactor: (factor: number) => void
   getZoomFactor: () => number
+  print: () => void
 }
 
 export interface BrowserTabCrashState {
@@ -64,6 +65,7 @@ export interface BrowserTabWebviewHandle {
   downloadURL: (url: string) => void
   setZoomFactor: (factor: number) => void
   getZoomFactor: () => number
+  print: () => void
   getBoundingClientRect: () => DOMRect | null
   recreate: () => void
 }
@@ -401,6 +403,7 @@ export const BrowserTabWebview = forwardRef<BrowserTabWebviewHandle, BrowserTabW
         onZoomChanged?.(tabId, factor)
       },
       getZoomFactor: () => webviewRef.current?.getZoomFactor() ?? 1,
+      print: () => webviewRef.current?.print(),
       getBoundingClientRect: () => webviewRef.current?.getBoundingClientRect() ?? null,
       recreate
     }), [crashState, recreate, tabId, onZoomChanged])
@@ -419,7 +422,7 @@ export const BrowserTabWebview = forwardRef<BrowserTabWebviewHandle, BrowserTabW
           src={mountUrl}
           partition="persist:browser-pane"
           allowpopups={true}
-          webpreferences="contextIsolation=yes,nodeIntegration=no,sandbox=yes"
+          webpreferences="contextIsolation=yes,nodeIntegration=no,sandbox=yes,plugins=yes"
           style={{ flex: '1 1 auto', width: '100%', height: '100%' }}
         />
 

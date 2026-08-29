@@ -516,6 +516,9 @@ export function BrowserPane({
       case 'zoomReset':
         activeHandle()?.setZoomFactor(1)
         break
+      case 'print':
+        activeHandle()?.print()
+        break
     }
   }, [focusUrlBar, handleReload, handleBack, handleForward, activeHandle, webviewMenu, showFind, showOverflow, showBookmarks, showDownloads, closeFind, onUpdateConfig])
 
@@ -913,6 +916,12 @@ export function BrowserPane({
               setTimeout(() => findInputRef.current?.focus(), 0)
             }}>
               <span>Find in page</span><span className="kbd">Ctrl+F</span>
+            </div>
+            <div className="context-menu-item" onClick={() => {
+              activeHandle()?.print()
+              setShowOverflow(false)
+            }}>
+              <span>Print...</span><span className="kbd">Ctrl+P</span>
             </div>
             <div className="context-menu-item" onClick={() => {
               activeHandle()?.toggleDevTools()

@@ -792,6 +792,7 @@ export type BrowserShortcut =
   | 'zoomIn'
   | 'zoomOut'
   | 'zoomReset'
+  | 'print'
 
 export interface BrowserShortcutMessage {
   webContentsId: number

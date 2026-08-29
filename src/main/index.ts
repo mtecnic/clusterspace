@@ -1795,6 +1795,7 @@ app.whenReady().then(() => {
         else if (ctrl && (input.key === '=' || input.key === '+')) shortcut = 'zoomIn'
         else if (ctrl && input.key === '-') shortcut = 'zoomOut'
         else if (ctrl && input.key === '0') shortcut = 'zoomReset'
+        else if (ctrl && !input.shift && !input.alt && (input.key === 'p' || input.key === 'P')) shortcut = 'print'
         if (shortcut) {
           event.preventDefault()
           mainWindow?.webContents.send(IPC_CHANNELS.BROWSER_SHORTCUT, {
