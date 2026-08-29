@@ -1796,6 +1796,19 @@ app.on('login', (event, webContents, _details, authInfo, callback) => {
   })
 })
 
+// Invalid/self-signed certificates — without this handler Electron denies
+// by default with no way to click through, unlike a real browser's "your
+// connection is not private" interstitial. Scoped to browser-pane webviews
+// only, same as the login handler above.
+app.on('certificate-error', (event, webContents, url, error, certificate, callback) => {
+  if (webContents.getType() !== 'webview') return
+  event.preventDefault()
+  let hostname = url
+  try { hostname = new URL(url).hostname } catch { /* keep raw url as the key */ }
+  const bypassKey = `cert-bypass:${hostname}:${certificate.fingerprint}`
+  requestCertBypass(mainWindow, { url, error }, bypassKey).then(callback)
+})
+
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit()

@@ -19,6 +19,7 @@ import { FleetDashboard } from './components/FleetDashboard'
 import { GoalDashboard } from './components/GoalDashboard'
 import { BrowserApprovalModal } from './components/BrowserApprovalModal'
 import { LoginPromptModal } from './components/LoginPromptModal'
+import { CertWarningModal } from './components/CertWarningModal'
 import { GridConfig, PaneConfig } from '@shared/types'
 import { dispatchBrowserTabAction } from './lib/pane-controls'
 
@@ -581,6 +582,7 @@ export function App() {
         <AppWithAI />
         <BrowserApprovalModal />
         <LoginPromptModal />
+        <CertWarningModal />
       </AgentProvider>
     </WorkspaceProvider>
   )
