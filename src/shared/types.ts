@@ -733,6 +733,7 @@ export const IPC_CHANNELS = {
   BROWSER_DOWNLOAD_RESUME: 'browser:download:resume',
   BROWSER_DOWNLOAD_UPDATE: 'browser:download:update',
   BROWSER_SHORTCUT: 'browser:shortcut',
+  BROWSER_HTML_FULLSCREEN: 'browser:html-fullscreen',
   BROWSER_CONTEXT_MENU: 'browser:context-menu',
   BROWSER_OPEN_EXTERNAL: 'browser:open-external',
   BROWSER_ADD_DICTIONARY_WORD: 'browser:add-dictionary-word',

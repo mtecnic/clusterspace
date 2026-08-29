@@ -254,6 +254,7 @@ export interface ElectronAPI {
   resumeDownload: (id: string) => Promise<boolean>
   onDownloadUpdate: (callback: (info: DownloadInfo) => void) => () => void
   onBrowserShortcut: (callback: (msg: BrowserShortcutMessage) => void) => () => void
+  onBrowserHtmlFullscreen: (callback: (msg: { paneId: string; entering: boolean }) => void) => () => void
   onBrowserContextMenu: (callback: (params: BrowserContextMenuParams) => void) => () => void
   openExternal: (url: string) => Promise<boolean>
   addWordToDictionary: (word: string) => Promise<boolean>
@@ -851,6 +852,11 @@ const electronAPI: ElectronAPI = {
     const handler = (_event: IpcRendererEvent, msg: BrowserShortcutMessage) => callback(msg)
     ipcRenderer.on(IPC_CHANNELS.BROWSER_SHORTCUT, handler)
     return () => { ipcRenderer.removeListener(IPC_CHANNELS.BROWSER_SHORTCUT, handler) }
+  },
+  onBrowserHtmlFullscreen: (callback) => {
+    const handler = (_event: IpcRendererEvent, msg: Parameters<typeof callback>[0]) => callback(msg)
+    ipcRenderer.on(IPC_CHANNELS.BROWSER_HTML_FULLSCREEN, handler)
+    return () => { ipcRenderer.removeListener(IPC_CHANNELS.BROWSER_HTML_FULLSCREEN, handler) }
   },
   onBrowserContextMenu: (callback) => {
     const handler = (_event: IpcRendererEvent, params: BrowserContextMenuParams) => callback(params)

@@ -1804,6 +1804,19 @@ app.whenReady().then(() => {
           })
         }
       })
+
+      // In-page video fullscreen (YouTube's fullscreen button etc.) — the
+      // pane itself owns maximize state, keyed by paneId not webContentsId,
+      // so resolve that here via the same registry lookup already used for
+      // the popup-vs-new-tab flow above.
+      contents.on('enter-html-full-screen', () => {
+        const paneId = getPaneIdForWebContents(contents.id)
+        if (paneId) mainWindow?.webContents.send(IPC_CHANNELS.BROWSER_HTML_FULLSCREEN, { paneId, entering: true })
+      })
+      contents.on('leave-html-full-screen', () => {
+        const paneId = getPaneIdForWebContents(contents.id)
+        if (paneId) mainWindow?.webContents.send(IPC_CHANNELS.BROWSER_HTML_FULLSCREEN, { paneId, entering: false })
+      })
     }
   })
 
