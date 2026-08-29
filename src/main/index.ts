@@ -1494,6 +1494,20 @@ function registerIpcHandlers() {
     return true
   })
 
+  ipcMain.handle(IPC_CHANNELS.BROWSER_DOWNLOAD_PAUSE, async (_e, id: string) => {
+    const item = activeDownloadItems.get(id)
+    if (!item) return false
+    try { item.pause() } catch { return false }
+    return true
+  })
+
+  ipcMain.handle(IPC_CHANNELS.BROWSER_DOWNLOAD_RESUME, async (_e, id: string) => {
+    const item = activeDownloadItems.get(id)
+    if (!item || !item.canResume()) return false
+    try { item.resume() } catch { return false }
+    return true
+  })
+
   // Open URL in the user's OS default browser (used by webview context menu)
   ipcMain.handle(IPC_CHANNELS.BROWSER_OPEN_EXTERNAL, async (_e, url: string) => {
     if (!/^https?:/i.test(url)) return false
@@ -1611,15 +1625,33 @@ app.whenReady().then(() => {
       state: 'progressing',
       receivedBytes: 0,
       totalBytes: item.getTotalBytes(),
-      startedAt: Date.now()
+      startedAt: Date.now(),
+      canResume: false
     }
     activeDownloads.set(id, info)
     activeDownloadItems.set(id, item)
 
+    if (workspaceStore?.getSettings().browserDownloadsAskLocation) {
+      // Electron holds the item open while this resolves — setSavePath()
+      // shortly after will-download fires (even asynchronously) is the
+      // documented way to redirect a download before it writes to disk.
+      const dialogPromise = mainWindow
+        ? dialog.showSaveDialog(mainWindow, { defaultPath: item.getFilename() })
+        : dialog.showSaveDialog({ defaultPath: item.getFilename() })
+      dialogPromise.then(result => {
+        if (result.canceled || !result.filePath) {
+          item.cancel()
+        } else {
+          item.setSavePath(result.filePath)
+        }
+      })
+    }
+
     item.on('updated', (_e, state) => {
-      info.state = state === 'progressing' ? 'progressing' : 'interrupted'
+      info.state = item.isPaused() ? 'paused' : state === 'progressing' ? 'progressing' : 'interrupted'
       info.receivedBytes = item.getReceivedBytes()
       info.totalBytes = item.getTotalBytes()
+      info.canResume = item.canResume()
       mainWindow?.webContents.send(IPC_CHANNELS.BROWSER_DOWNLOAD_UPDATE, { ...info })
     })
     item.once('done', (_e, state) => {
@@ -1629,6 +1661,7 @@ app.whenReady().then(() => {
       info.savePath = item.getSavePath()
       info.receivedBytes = item.getReceivedBytes()
       info.totalBytes = item.getTotalBytes() || info.receivedBytes
+      info.canResume = false
       mainWindow?.webContents.send(IPC_CHANNELS.BROWSER_DOWNLOAD_UPDATE, { ...info })
       activeDownloadItems.delete(id)
     })

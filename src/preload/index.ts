@@ -250,6 +250,8 @@ export interface ElectronAPI {
   openDownload: (id: string) => Promise<boolean>
   revealDownload: (id: string) => Promise<boolean>
   cancelDownload: (id: string) => Promise<boolean>
+  pauseDownload: (id: string) => Promise<boolean>
+  resumeDownload: (id: string) => Promise<boolean>
   onDownloadUpdate: (callback: (info: DownloadInfo) => void) => () => void
   onBrowserShortcut: (callback: (msg: BrowserShortcutMessage) => void) => () => void
   onBrowserContextMenu: (callback: (params: BrowserContextMenuParams) => void) => () => void
@@ -838,6 +840,8 @@ const electronAPI: ElectronAPI = {
   openDownload: (id) => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_DOWNLOAD_OPEN, id),
   revealDownload: (id) => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_DOWNLOAD_REVEAL, id),
   cancelDownload: (id) => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_DOWNLOAD_CANCEL, id),
+  pauseDownload: (id) => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_DOWNLOAD_PAUSE, id),
+  resumeDownload: (id) => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_DOWNLOAD_RESUME, id),
   onDownloadUpdate: (callback) => {
     const handler = (_event: IpcRendererEvent, info: DownloadInfo) => callback(info)
     ipcRenderer.on(IPC_CHANNELS.BROWSER_DOWNLOAD_UPDATE, handler)

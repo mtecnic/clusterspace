@@ -507,6 +507,10 @@ export interface AppSettings {
   // the feature entirely. Default 15 matches Chrome Memory Saver's range.
   browserTabIdleDiscardMinutes: number
   fleet: FleetSettings
+  // When true, every browser-pane download prompts for a save location via
+  // the native OS dialog. Off by default — matches the existing behavior
+  // (auto-save to Electron's default downloads folder).
+  browserDownloadsAskLocation: boolean
 }
 
 // Soft guardrail on how many GoalRunner loops may run concurrently — no AI
@@ -722,6 +726,8 @@ export const IPC_CHANNELS = {
   BROWSER_DOWNLOAD_OPEN: 'browser:download:open',
   BROWSER_DOWNLOAD_REVEAL: 'browser:download:reveal',
   BROWSER_DOWNLOAD_CANCEL: 'browser:download:cancel',
+  BROWSER_DOWNLOAD_PAUSE: 'browser:download:pause',
+  BROWSER_DOWNLOAD_RESUME: 'browser:download:resume',
   BROWSER_DOWNLOAD_UPDATE: 'browser:download:update',
   BROWSER_SHORTCUT: 'browser:shortcut',
   BROWSER_CONTEXT_MENU: 'browser:context-menu',
@@ -830,11 +836,12 @@ export interface DownloadInfo {
   url: string
   filename: string
   savePath: string
-  state: 'progressing' | 'completed' | 'cancelled' | 'interrupted'
+  state: 'progressing' | 'paused' | 'completed' | 'cancelled' | 'interrupted'
   receivedBytes: number
   totalBytes: number
   startedAt: number
   paneId?: string
+  canResume: boolean
 }
 
 // SSH Server configuration

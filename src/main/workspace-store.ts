@@ -18,7 +18,8 @@ const defaultSettings: AppSettings = {
   defaultBrowserUrl: 'https://www.google.com',
   remoteAccess: DEFAULT_REMOTE_ACCESS_SETTINGS,
   browserTabIdleDiscardMinutes: 15,
-  fleet: { maxConcurrentGoals: 3, desktopNotifications: true }
+  fleet: { maxConcurrentGoals: 3, desktopNotifications: true },
+  browserDownloadsAskLocation: false
 }
 
 export class WorkspaceStore {
@@ -220,6 +221,7 @@ export class WorkspaceStore {
     if (settings.browserTabIdleDiscardMinutes == null) settings.browserTabIdleDiscardMinutes = defaultSettings.browserTabIdleDiscardMinutes
     if (!settings.fleet) settings.fleet = defaultSettings.fleet
     else if (settings.fleet.desktopNotifications == null) settings.fleet.desktopNotifications = defaultSettings.fleet.desktopNotifications
+    if (settings.browserDownloadsAskLocation == null) settings.browserDownloadsAskLocation = defaultSettings.browserDownloadsAskLocation
     return settings
   }
 
