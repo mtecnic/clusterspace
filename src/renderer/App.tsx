@@ -20,6 +20,7 @@ import { GoalDashboard } from './components/GoalDashboard'
 import { BrowserApprovalModal } from './components/BrowserApprovalModal'
 import { LoginPromptModal } from './components/LoginPromptModal'
 import { CertWarningModal } from './components/CertWarningModal'
+import { ScreenSharePickerModal } from './components/ScreenSharePickerModal'
 import { GridConfig, PaneConfig } from '@shared/types'
 import { dispatchBrowserTabAction } from './lib/pane-controls'
 
@@ -583,6 +584,7 @@ export function App() {
         <BrowserApprovalModal />
         <LoginPromptModal />
         <CertWarningModal />
+        <ScreenSharePickerModal />
       </AgentProvider>
     </WorkspaceProvider>
   )

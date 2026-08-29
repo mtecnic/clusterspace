@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, clipboard, nativeImage, shell, session, webContents } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, clipboard, nativeImage, shell, session, webContents, desktopCapturer } from 'electron'
 import { join } from 'path'
 import { PtyManager } from './pty-manager'
 import { WorkspaceStore } from './workspace-store'
@@ -26,6 +26,7 @@ import { capturePaneImage } from './pane-screenshot'
 import { getActionLog, subscribeActionLog } from './browser-action-log'
 import { resolveApproval } from './browser-approval'
 import { requestCredentials, resolveLoginPrompt, requestCertBypass, resolveCertWarning } from './browser-security-prompts'
+import { requestScreenShareSource, resolveScreenShare } from './browser-screen-share'
 import { classifyError } from '../shared/ai-error-classifier'
 import { resolvePaneControlAck, sendPaneControl } from './pane-control-ack'
 import { detachCdpIfAttached } from './cdp-helpers'
@@ -1573,6 +1574,11 @@ function registerIpcHandlers() {
     resolveCertWarning(id, proceed)
   })
 
+  // Screen-share picker response from renderer
+  ipcMain.on(IPC_CHANNELS.BROWSER_SCREEN_SHARE_RESPONSE, (_e, id: string, sourceId: string | null) => {
+    resolveScreenShare(id, sourceId)
+  })
+
   // Pane-control ack from renderer (switch tab / reconnect / browser tab
   // action / focus / maximize actually found a registered handler or not)
   ipcMain.on(IPC_CHANNELS.PANE_CONTROL_ACK, (_e, requestId: string, ok: boolean) => {
@@ -1612,6 +1618,27 @@ app.whenReady().then(() => {
       'display-capture'
     ])
     callback(allow.has(permission))
+  })
+
+  // Screen/window sharing (Google Meet, Zoom-web, Discord-web "present
+  // screen"). display-capture is auto-allowed above, but Electron still
+  // requires this handler to actually supply a source — without it,
+  // getDisplayMedia() just hangs. Video-only for v1; system-audio loopback
+  // capture is deferred (Windows-specific, not needed for the core
+  // share-my-screen-in-a-call use case).
+  browserSession.setDisplayMediaRequestHandler(async (_request, callback) => {
+    try {
+      const sources = await desktopCapturer.getSources({
+        types: ['screen', 'window'],
+        thumbnailSize: { width: 300, height: 200 }
+      })
+      const list = sources.map(s => ({ id: s.id, name: s.name, thumbnail: s.thumbnail.toDataURL() }))
+      const pickedId = await requestScreenShareSource(mainWindow, list)
+      const picked = pickedId ? sources.find(s => s.id === pickedId) : undefined
+      callback(picked ? { video: picked } : {})
+    } catch {
+      callback({})
+    }
   })
 
   // Download wiring: track every download and emit progress to the renderer.

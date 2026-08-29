@@ -284,6 +284,8 @@ export interface ElectronAPI {
   respondBrowserLogin: (id: string, creds: { username: string; password: string } | null) => void
   onBrowserCertWarning: (callback: (req: { id: string; url: string; error: string }) => void) => () => void
   respondBrowserCertWarning: (id: string, proceed: boolean) => void
+  onBrowserScreenShareRequest: (callback: (req: { id: string; sources: Array<{ id: string; name: string; thumbnail: string }> }) => void) => () => void
+  respondBrowserScreenShare: (id: string, sourceId: string | null) => void
   listBrowserRecipes: () => Promise<Array<{ id?: string; name: string; description?: string; steps: Array<{ tool: string; args: Record<string, unknown>; retry?: number; on_fail?: string }> }>>
   saveBrowserRecipe: (recipe: { name: string; description?: string; steps: Array<{ tool: string; args: Record<string, unknown>; retry?: number; on_fail?: string }> }) => Promise<unknown>
   deleteBrowserRecipe: (idOrName: string) => Promise<boolean>
@@ -904,6 +906,12 @@ const electronAPI: ElectronAPI = {
     return () => { ipcRenderer.removeListener(IPC_CHANNELS.BROWSER_CERT_WARNING_REQUEST, handler) }
   },
   respondBrowserCertWarning: (id, proceed) => ipcRenderer.send(IPC_CHANNELS.BROWSER_CERT_WARNING_RESPONSE, id, proceed),
+  onBrowserScreenShareRequest: (callback) => {
+    const handler = (_event: IpcRendererEvent, req: Parameters<typeof callback>[0]) => callback(req)
+    ipcRenderer.on(IPC_CHANNELS.BROWSER_SCREEN_SHARE_REQUEST, handler)
+    return () => { ipcRenderer.removeListener(IPC_CHANNELS.BROWSER_SCREEN_SHARE_REQUEST, handler) }
+  },
+  respondBrowserScreenShare: (id, sourceId) => ipcRenderer.send(IPC_CHANNELS.BROWSER_SCREEN_SHARE_RESPONSE, id, sourceId),
   listBrowserRecipes: () => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_RECIPES_LIST),
   saveBrowserRecipe: (recipe) => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_RECIPES_SAVE, recipe),
   deleteBrowserRecipe: (idOrName) => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_RECIPES_DELETE, idOrName)
