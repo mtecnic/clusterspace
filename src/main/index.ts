@@ -1792,6 +1792,9 @@ app.whenReady().then(() => {
         else if (input.alt && !ctrl && input.key === 'ArrowRight') shortcut = 'forward'
         else if (input.key === 'Escape') shortcut = 'escape'
         else if (ctrl && !input.shift && !input.alt && (input.key === 'w' || input.key === 'W')) shortcut = 'closePane'
+        else if (ctrl && (input.key === '=' || input.key === '+')) shortcut = 'zoomIn'
+        else if (ctrl && input.key === '-') shortcut = 'zoomOut'
+        else if (ctrl && input.key === '0') shortcut = 'zoomReset'
         if (shortcut) {
           event.preventDefault()
           mainWindow?.webContents.send(IPC_CHANNELS.BROWSER_SHORTCUT, {

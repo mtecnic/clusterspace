@@ -52,6 +52,9 @@ export interface BrowserTab {
   // User-set escape hatch from idle background-tab discarding (Chrome
   // pin-tab equivalent) — a deliberate preference worth surviving restarts.
   pinned?: boolean
+  // Per-tab page zoom factor (1 = 100%), set via Ctrl+/Ctrl-/Ctrl+0.
+  // Absent/undefined means default (1).
+  zoomLevel?: number
 }
 
 // Pane configuration
@@ -786,6 +789,9 @@ export type BrowserShortcut =
   | 'forward'
   | 'escape'
   | 'closePane'
+  | 'zoomIn'
+  | 'zoomOut'
+  | 'zoomReset'
 
 export interface BrowserShortcutMessage {
   webContentsId: number

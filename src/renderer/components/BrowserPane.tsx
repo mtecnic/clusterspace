@@ -312,6 +312,16 @@ export function BrowserPane({
     })
   }, [activeTabId, persistTabs])
 
+  // Persists a tab's zoom factor as it changes via Ctrl+/Ctrl-/Ctrl+0 —
+  // same shape as handleTogglePin, just a different field.
+  const handleZoomChanged = useCallback((tabId: string, zoomLevel: number) => {
+    setTabs(prev => {
+      const next = prev.map(t => t.id === tabId ? { ...t, zoomLevel } : t)
+      persistTabs(next, activeTabId)
+      return next
+    })
+  }, [activeTabId, persistTabs])
+
   const handleCloseTab = useCallback((tabId: string) => {
     setTabs(prev => {
       if (prev.length === 1) {
@@ -490,6 +500,21 @@ export function BrowserPane({
       case 'closePane':
         // Convert back to terminal — same effect as the context-menu action.
         onUpdateConfig({ type: 'terminal', url: undefined })
+        break
+      case 'zoomIn': {
+        const handle = activeHandle()
+        const current = handle?.getZoomFactor() ?? 1
+        handle?.setZoomFactor(Math.min(3, +(current + 0.1).toFixed(2)))
+        break
+      }
+      case 'zoomOut': {
+        const handle = activeHandle()
+        const current = handle?.getZoomFactor() ?? 1
+        handle?.setZoomFactor(Math.max(0.25, +(current - 0.1).toFixed(2)))
+        break
+      }
+      case 'zoomReset':
+        activeHandle()?.setZoomFactor(1)
         break
     }
   }, [focusUrlBar, handleReload, handleBack, handleForward, activeHandle, webviewMenu, showFind, showOverflow, showBookmarks, showDownloads, closeFind, onUpdateConfig])
@@ -771,6 +796,8 @@ export function BrowserPane({
               pinned={tab.pinned}
               idleThresholdMs={idleThresholdMs}
               onDiscardedChange={handleDiscardedChange}
+              initialZoom={tab.zoomLevel}
+              onZoomChanged={handleZoomChanged}
             />
           ))}
         </div>

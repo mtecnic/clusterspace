@@ -27,6 +27,8 @@ interface WebviewElement extends HTMLElement {
   inspectElement: (x: number, y: number) => void
   replaceMisspelling: (text: string) => void
   downloadURL: (url: string) => void
+  setZoomFactor: (factor: number) => void
+  getZoomFactor: () => number
 }
 
 export interface BrowserTabCrashState {
@@ -60,6 +62,8 @@ export interface BrowserTabWebviewHandle {
   selectAll: () => void
   replaceMisspelling: (text: string) => void
   downloadURL: (url: string) => void
+  setZoomFactor: (factor: number) => void
+  getZoomFactor: () => number
   getBoundingClientRect: () => DOMRect | null
   recreate: () => void
 }
@@ -83,6 +87,9 @@ interface BrowserTabWebviewProps {
   pinned?: boolean
   idleThresholdMs: number
   onDiscardedChange?: (tabId: string, discarded: boolean) => void
+  // Persisted per-tab page zoom (1 = 100%), restored once the guest attaches.
+  initialZoom?: number
+  onZoomChanged?: (tabId: string, zoomLevel: number) => void
 }
 
 // Owns one tab's live <webview> guest — its navigation state, lifecycle
@@ -91,7 +98,7 @@ interface BrowserTabWebviewProps {
 // loadURL() call — the previous single-shared-webview design reloaded the
 // page (and lost scroll position / in-page state) on every tab switch.
 export const BrowserTabWebview = forwardRef<BrowserTabWebviewHandle, BrowserTabWebviewProps>(
-  function BrowserTabWebview({ tabId, initialUrl, isActive, onNavigated, onWebContentsId, onStatus, onWebviewFocus, pinned, idleThresholdMs, onDiscardedChange }, ref) {
+  function BrowserTabWebview({ tabId, initialUrl, isActive, onNavigated, onWebContentsId, onStatus, onWebviewFocus, pinned, idleThresholdMs, onDiscardedChange, initialZoom, onZoomChanged }, ref) {
     const webviewRef = useRef<WebviewElement | null>(null)
     // Snapshotted at mount so the src isn't re-set on every re-render (which
     // would cause reload loops) — navigation calls webview.loadURL() instead.
@@ -120,6 +127,12 @@ export const BrowserTabWebview = forwardRef<BrowserTabWebviewHandle, BrowserTabW
     // cleared when that load's terminal did-stop-loading fires.
     const suppressTrackingRef = useRef(false)
     const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+    // Guards the persisted-zoom restore in onDomReady to once per guest
+    // (dom-ready fires on every navigation, not just the first) — reset
+    // only when the guest is actually recreated, not on every re-render of
+    // the surrounding navigation-events effect.
+    const zoomAppliedRef = useRef(false)
+    useEffect(() => { zoomAppliedRef.current = false }, [webviewKey])
 
     useEffect(() => {
       onStatus(tabId, { isLoading, canGoBack, canGoForward, crashState, findMatches })
@@ -206,6 +219,16 @@ export const BrowserTabWebview = forwardRef<BrowserTabWebviewHandle, BrowserTabW
         try {
           onWebContentsId(tabId, webview.getWebContentsId())
         } catch { /* ignore */ }
+        // Apply the persisted zoom once per mount, not on every navigation
+        // within the tab (dom-ready fires for each one) — otherwise a live
+        // Ctrl+/Ctrl- change would get reset back to the saved value the
+        // next time the page navigates.
+        if (!zoomAppliedRef.current) {
+          zoomAppliedRef.current = true
+          if (initialZoom && initialZoom !== 1) {
+            try { webview.setZoomFactor(initialZoom) } catch { /* ignore */ }
+          }
+        }
       }
       const onFoundInPage: EventListener = (evt) => {
         const r = (evt as Event & { result?: { activeMatchOrdinal: number; matches: number; finalUpdate: boolean } }).result
@@ -373,9 +396,14 @@ export const BrowserTabWebview = forwardRef<BrowserTabWebviewHandle, BrowserTabW
       selectAll: () => webviewRef.current?.selectAll(),
       replaceMisspelling: (text) => webviewRef.current?.replaceMisspelling(text),
       downloadURL: (url) => webviewRef.current?.downloadURL(url),
+      setZoomFactor: (factor) => {
+        webviewRef.current?.setZoomFactor(factor)
+        onZoomChanged?.(tabId, factor)
+      },
+      getZoomFactor: () => webviewRef.current?.getZoomFactor() ?? 1,
       getBoundingClientRect: () => webviewRef.current?.getBoundingClientRect() ?? null,
       recreate
-    }), [crashState, recreate])
+    }), [crashState, recreate, tabId, onZoomChanged])
 
     return (
       <div
