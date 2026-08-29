@@ -71,6 +71,13 @@ interface BrowserTabWebviewProps {
   onNavigated: (tabId: string, patch: Partial<Pick<BrowserTab, 'url' | 'title' | 'favicon'>>) => void
   onWebContentsId: (tabId: string, id: number | null) => void
   onStatus: (tabId: string, status: BrowserTabStatus) => void
+  // Fired when the guest's content gains focus (e.g. the user clicked into
+  // the page). Unlike a plain DOM click, `focus` is one of the few events
+  // Electron actually dispatches on the host <webview> element when focus
+  // moves into the guest process — ordinary mousedown/click never bubble
+  // out of a webview's guest content, so a host-side "click outside to
+  // close this popover" listener can never see a click on the page itself.
+  onWebviewFocus?: (tabId: string) => void
   // Background-tab memory management. pinned and an idleThresholdMs <= 0
   // both opt a tab out of auto-discard entirely.
   pinned?: boolean
@@ -84,7 +91,7 @@ interface BrowserTabWebviewProps {
 // loadURL() call — the previous single-shared-webview design reloaded the
 // page (and lost scroll position / in-page state) on every tab switch.
 export const BrowserTabWebview = forwardRef<BrowserTabWebviewHandle, BrowserTabWebviewProps>(
-  function BrowserTabWebview({ tabId, initialUrl, isActive, onNavigated, onWebContentsId, onStatus, pinned, idleThresholdMs, onDiscardedChange }, ref) {
+  function BrowserTabWebview({ tabId, initialUrl, isActive, onNavigated, onWebContentsId, onStatus, onWebviewFocus, pinned, idleThresholdMs, onDiscardedChange }, ref) {
     const webviewRef = useRef<WebviewElement | null>(null)
     // Snapshotted at mount so the src isn't re-set on every re-render (which
     // would cause reload loops) — navigation calls webview.loadURL() instead.
@@ -208,6 +215,11 @@ export const BrowserTabWebview = forwardRef<BrowserTabWebviewHandle, BrowserTabW
       // effect below exempts tabs actively playing audio/video.
       const onMediaPlaying: EventListener = () => setIsAudible(true)
       const onMediaPaused: EventListener = () => setIsAudible(false)
+      // Standard HTMLElement 'focus', not an Electron-specific webview event
+      // — but it's one of the only signals Electron dispatches on the host
+      // <webview> element when focus moves into the guest, since ordinary
+      // clicks on page content never bubble out of the guest process at all.
+      const onWebviewFocused: EventListener = () => onWebviewFocus?.(tabId)
 
       webview.addEventListener('did-start-loading', onStartLoading)
       webview.addEventListener('did-stop-loading', onStopLoading)
@@ -224,6 +236,7 @@ export const BrowserTabWebview = forwardRef<BrowserTabWebviewHandle, BrowserTabW
       webview.addEventListener('found-in-page', onFoundInPage)
       webview.addEventListener('media-started-playing', onMediaPlaying)
       webview.addEventListener('media-paused', onMediaPaused)
+      webview.addEventListener('focus', onWebviewFocused)
 
       return () => {
         webview.removeEventListener('did-start-loading', onStartLoading)
@@ -241,10 +254,11 @@ export const BrowserTabWebview = forwardRef<BrowserTabWebviewHandle, BrowserTabW
         webview.removeEventListener('found-in-page', onFoundInPage)
         webview.removeEventListener('media-started-playing', onMediaPlaying)
         webview.removeEventListener('media-paused', onMediaPaused)
+        webview.removeEventListener('focus', onWebviewFocused)
       }
       // webviewKey is in deps so these listeners rebind to the recreated element
       // after a recovery (recreateWebview bumps the key).
-    }, [tabId, onNavigated, onWebContentsId, webviewKey])
+    }, [tabId, onNavigated, onWebContentsId, onWebviewFocus, webviewKey])
 
     // Report/withdraw this tab's webContentsId as its guest attaches/detaches.
     useEffect(() => {
