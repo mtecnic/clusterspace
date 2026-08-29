@@ -25,6 +25,7 @@ import {
 import { capturePaneImage } from './pane-screenshot'
 import { getActionLog, subscribeActionLog } from './browser-action-log'
 import { resolveApproval } from './browser-approval'
+import { requestCredentials, resolveLoginPrompt, requestCertBypass, resolveCertWarning } from './browser-security-prompts'
 import { classifyError } from '../shared/ai-error-classifier'
 import { resolvePaneControlAck, sendPaneControl } from './pane-control-ack'
 import { detachCdpIfAttached } from './cdp-helpers'
@@ -1550,6 +1551,14 @@ function registerIpcHandlers() {
     resolveApproval(id, approved)
   })
 
+  // HTTP auth / certificate-warning prompt responses from renderer
+  ipcMain.on(IPC_CHANNELS.BROWSER_LOGIN_RESPONSE, (_e, id: string, creds: { username: string; password: string } | null) => {
+    resolveLoginPrompt(id, creds)
+  })
+  ipcMain.on(IPC_CHANNELS.BROWSER_CERT_WARNING_RESPONSE, (_e, id: string, proceed: boolean) => {
+    resolveCertWarning(id, proceed)
+  })
+
   // Pane-control ack from renderer (switch tab / reconnect / browser tab
   // action / focus / maximize actually found a registered handler or not)
   ipcMain.on(IPC_CHANNELS.PANE_CONTROL_ACK, (_e, requestId: string, ok: boolean) => {
@@ -1767,6 +1776,23 @@ app.whenReady().then(() => {
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow()
     }
+  })
+})
+
+// HTTP Basic/Digest auth (and authenticated proxies) — without this handler
+// Electron just fails the load with no prompt at all. Scoped to browser-pane
+// webviews only; anything else (e.g. this app's own dev-server connection)
+// falls through to Electron's default (deny) by never calling preventDefault.
+app.on('login', (event, webContents, _details, authInfo, callback) => {
+  if (webContents.getType() !== 'webview') return
+  event.preventDefault()
+  requestCredentials(mainWindow, {
+    url: authInfo.host ?? '',
+    realm: authInfo.realm ?? '',
+    isProxy: authInfo.isProxy
+  }).then(creds => {
+    if (creds) callback(creds.username, creds.password)
+    else callback()
   })
 })
 

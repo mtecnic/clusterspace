@@ -277,6 +277,10 @@ export interface ElectronAPI {
   onBrowserActionLog: (callback: (entry: { id: number; paneId: string; tool: string; args: Record<string, unknown>; ok: boolean; durationMs: number; error?: string; timestamp: number }) => void) => () => void
   onBrowserApprovalRequest: (callback: (req: { id: string; paneId: string; tool: string; description: string; reason: string }) => void) => () => void
   respondBrowserApproval: (id: string, approved: boolean) => void
+  onBrowserLoginRequest: (callback: (req: { id: string; url: string; realm: string; isProxy: boolean }) => void) => () => void
+  respondBrowserLogin: (id: string, creds: { username: string; password: string } | null) => void
+  onBrowserCertWarning: (callback: (req: { id: string; url: string; error: string }) => void) => () => void
+  respondBrowserCertWarning: (id: string, proceed: boolean) => void
   listBrowserRecipes: () => Promise<Array<{ id?: string; name: string; description?: string; steps: Array<{ tool: string; args: Record<string, unknown>; retry?: number; on_fail?: string }> }>>
   saveBrowserRecipe: (recipe: { name: string; description?: string; steps: Array<{ tool: string; args: Record<string, unknown>; retry?: number; on_fail?: string }> }) => Promise<unknown>
   deleteBrowserRecipe: (idOrName: string) => Promise<boolean>
@@ -878,6 +882,18 @@ const electronAPI: ElectronAPI = {
     return () => { ipcRenderer.removeListener(IPC_CHANNELS.BROWSER_APPROVAL_REQUEST, handler) }
   },
   respondBrowserApproval: (id, approved) => ipcRenderer.send(IPC_CHANNELS.BROWSER_APPROVAL_RESPONSE, id, approved),
+  onBrowserLoginRequest: (callback) => {
+    const handler = (_event: IpcRendererEvent, req: Parameters<typeof callback>[0]) => callback(req)
+    ipcRenderer.on(IPC_CHANNELS.BROWSER_LOGIN_REQUEST, handler)
+    return () => { ipcRenderer.removeListener(IPC_CHANNELS.BROWSER_LOGIN_REQUEST, handler) }
+  },
+  respondBrowserLogin: (id, creds) => ipcRenderer.send(IPC_CHANNELS.BROWSER_LOGIN_RESPONSE, id, creds),
+  onBrowserCertWarning: (callback) => {
+    const handler = (_event: IpcRendererEvent, req: Parameters<typeof callback>[0]) => callback(req)
+    ipcRenderer.on(IPC_CHANNELS.BROWSER_CERT_WARNING_REQUEST, handler)
+    return () => { ipcRenderer.removeListener(IPC_CHANNELS.BROWSER_CERT_WARNING_REQUEST, handler) }
+  },
+  respondBrowserCertWarning: (id, proceed) => ipcRenderer.send(IPC_CHANNELS.BROWSER_CERT_WARNING_RESPONSE, id, proceed),
   listBrowserRecipes: () => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_RECIPES_LIST),
   saveBrowserRecipe: (recipe) => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_RECIPES_SAVE, recipe),
   deleteBrowserRecipe: (idOrName) => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_RECIPES_DELETE, idOrName)

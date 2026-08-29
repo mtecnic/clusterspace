@@ -18,6 +18,7 @@ import { AISettingsDialog } from './components/AISettingsDialog'
 import { FleetDashboard } from './components/FleetDashboard'
 import { GoalDashboard } from './components/GoalDashboard'
 import { BrowserApprovalModal } from './components/BrowserApprovalModal'
+import { LoginPromptModal } from './components/LoginPromptModal'
 import { GridConfig, PaneConfig } from '@shared/types'
 import { dispatchBrowserTabAction } from './lib/pane-controls'
 
@@ -579,6 +580,7 @@ export function App() {
       <AgentProvider>
         <AppWithAI />
         <BrowserApprovalModal />
+        <LoginPromptModal />
       </AgentProvider>
     </WorkspaceProvider>
   )
