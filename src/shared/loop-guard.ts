@@ -56,6 +56,30 @@ const HALT_AFTER_BLOCKS = 5
 // a broken reply box ~15 times before the (much later) cutoff caught it.
 const FIXED_TARGET_TOOLS: ReadonlySet<string> = new Set(['browser_click_at', 'browser_hover', 'browser_drag'])
 
+// How many consecutive successful calls to the SAME tool, with genuinely
+// different arguments each time, can return byte-identical output before
+// it's flagged as stagnant. Deliberately separate from DUPLICATE_CALL_LIMIT
+// above, which only fires when the arguments are ALSO identical — this
+// catches the case where the model keeps varying some parameter thinking
+// that'll change the outcome, when it demonstrably isn't. Observed for
+// real: a model repeatedly widening a slice() bound in browser_execute_js
+// trying to "get past" truncation, oblivious that the underlying string had
+// already been exhausted and every call was returning "" — 47 calls before
+// the outer maxAutoTurns cap (100) finally stopped it, because every one of
+// those 47 had technically-different arguments so the exact-duplicate guard
+// never saw a repeat.
+const SAME_RESULT_STREAK_LIMIT = 4
+
+// Tools where returning the same result on every call is the NORMAL,
+// expected outcome while legitimately waiting on external state (a shell
+// command still running, a selector that hasn't appeared yet) — excluded
+// from the stagnant-result nudge above, which would otherwise misfire on
+// every polling loop.
+const POLLING_TOOLS: ReadonlySet<string> = new Set([
+  'poll_terminal_status', 'wait_for_output', 'read_terminal_output',
+  'browser_wait_for_selector', 'browser_wait_for_navigation', 'browser_wait_for_text'
+])
+
 // Bounded history of recent call signatures, used only for cycle detection
 // (the exact-repeat counter above has no size limit and never needs one).
 const RECENT_SIGNATURE_WINDOW = 8
@@ -74,6 +98,12 @@ export interface LoopGuardState {
   totalBlocks: number
   /** last RECENT_SIGNATURE_WINDOW call signatures, oldest first — see detectCycle */
   recentSignatures: string[]
+  /** tool name -> preview of the last successful result seen for it, regardless of args */
+  lastResultPreviewByTool: Record<string, string>
+  /** tool name -> how many consecutive successful calls (any args) returned that same preview */
+  sameResultStreak: Record<string, number>
+  /** tool name -> whether the current streak has already been nudged (don't repeat every call) */
+  sameResultNudged: Record<string, boolean>
 }
 
 export function createLoopGuardState(): LoopGuardState {
@@ -83,7 +113,10 @@ export function createLoopGuardState(): LoopGuardState {
     callSignatureCounts: {},
     lastOutcomeBySignature: {},
     totalBlocks: 0,
-    recentSignatures: []
+    recentSignatures: [],
+    lastResultPreviewByTool: {},
+    sameResultStreak: {},
+    sameResultNudged: {}
   }
 }
 
@@ -209,13 +242,29 @@ export function recordOutcome(
   state: LoopGuardState,
   toolName: string,
   ok: boolean,
-  context?: { args?: Record<string, unknown> }
+  context?: { args?: Record<string, unknown>; resultPreview?: string }
 ): string | null {
   if (context?.args) {
     state.lastOutcomeBySignature[signatureFor(toolName, context.args)] = ok
   }
   if (ok) {
     state.consecutiveFailures[toolName] = 0
+
+    if (context?.resultPreview !== undefined && !POLLING_TOOLS.has(toolName)) {
+      const preview = context.resultPreview
+      if (state.lastResultPreviewByTool[toolName] === preview) {
+        state.sameResultStreak[toolName] = (state.sameResultStreak[toolName] ?? 1) + 1
+      } else {
+        state.lastResultPreviewByTool[toolName] = preview
+        state.sameResultStreak[toolName] = 1
+        state.sameResultNudged[toolName] = false
+      }
+      const streak = state.sameResultStreak[toolName]
+      if (streak >= SAME_RESULT_STREAK_LIMIT && !state.sameResultNudged[toolName]) {
+        state.sameResultNudged[toolName] = true
+        return `${toolName} has returned the same result ${streak} times in a row even though its arguments were different each time — whatever you're varying isn't changing the outcome. Stop adjusting that parameter and try a genuinely different approach, or accept the result you already have.`
+      }
+    }
     return null
   }
   const next = (state.consecutiveFailures[toolName] ?? 0) + 1

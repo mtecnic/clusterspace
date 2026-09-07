@@ -33,6 +33,16 @@ function stripStaleScreenshots(msgs: AIMessage[]): AIMessage[] {
   return msgs.map((m, i) => stripSet.has(i) ? { ...m, images: undefined } : m)
 }
 
+// Truncated string form of a tool result, used only for loop-guard's
+// stagnant-result comparison (recordOutcome) — mirrors goal-runner.ts's
+// identically-named helper so both loop drivers flag the same pattern the
+// same way.
+function previewResult(result: unknown): string {
+  if (result == null) return ''
+  const s = typeof result === 'string' ? result : JSON.stringify(result)
+  return s.length > 200 ? s.slice(0, 200) + '…' : s
+}
+
 interface AIContextValue {
   // State
   settings: AISettings
@@ -367,17 +377,22 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
           if (disabledMsg) msgs.push({ id: uuidv4(), role: 'system', content: disabledMsg, timestamp: Date.now() })
           return { ok: false, messages: msgs, shotTarget: screenshotTargetFor(toolCall, true) }
         }
-        recordOutcome(guardStateRef.current, toolCall.name, true, { args: toolCall.arguments })
+        const stagnantMsg = recordOutcome(guardStateRef.current, toolCall.name, true, {
+          args: toolCall.arguments,
+          resultPreview: previewResult(result.result)
+        })
+        const successMsgs: AIMessage[] = [{
+          id: uuidv4(),
+          role: 'tool',
+          content: JSON.stringify(result.result),
+          toolCallId: toolCall.id,
+          toolName: toolCall.name,
+          timestamp: Date.now()
+        }]
+        if (stagnantMsg) successMsgs.push({ id: uuidv4(), role: 'system', content: stagnantMsg, timestamp: Date.now() })
         return {
           ok: true,
-          messages: [{
-            id: uuidv4(),
-            role: 'tool',
-            content: JSON.stringify(result.result),
-            toolCallId: toolCall.id,
-            toolName: toolCall.name,
-            timestamp: Date.now()
-          }],
+          messages: successMsgs,
           shotTarget: screenshotTargetFor(toolCall, false)
         }
       } catch (err) {
