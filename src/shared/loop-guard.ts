@@ -48,11 +48,14 @@ const HALT_AFTER_BLOCKS = 5
 // repeating the same aria_label/selector spec can for browser_smart_click.
 // Two distinct reasons land a tool here:
 //   - a fixed absolute target (a literal x/y, a specific key) — it can only
-//     ever hit the same physical point, and a click there mechanically
-//     "succeeds" (the dispatch itself always works) regardless of whether
-//     anything useful is at that point. Observed for real immediately after
-//     the elevated ceiling first shipped: clicking a stale (x, y) at a
-//     broken reply box ~15 times before the (much later) cutoff caught it.
+//     ever hit the same physical point (or send the same keystroke), and
+//     dispatching it mechanically "succeeds" regardless of whether anything
+//     useful happens as a result. Observed for real twice: clicking a stale
+//     (x, y) at a broken reply box ~15 times before the (much later) cutoff
+//     caught it; and later, browser_keypress("w", hold_ms) held against a
+//     wall in a movement game — the keypress genuinely dispatches every
+//     time, so "last call succeeded" is true on every repeat even though
+//     the player never actually moved.
 //   - arbitrary code execution (browser_execute_js) — identical code run
 //     twice does the identical thing twice; there is no "whichever thing
 //     currently matches" resolution happening at all. Observed for real:
@@ -60,7 +63,7 @@ const HALT_AFTER_BLOCKS = 5
 //     a value that had already stopped changing, because the "last call
 //     with these args succeeded" elevation doesn't know success here just
 //     meant "the JS didn't throw," not "this call made progress."
-const FIXED_TARGET_TOOLS: ReadonlySet<string> = new Set(['browser_click_at', 'browser_hover', 'browser_drag', 'browser_execute_js'])
+const FIXED_TARGET_TOOLS: ReadonlySet<string> = new Set(['browser_click_at', 'browser_hover', 'browser_drag', 'browser_execute_js', 'browser_keypress'])
 
 // How many consecutive successful calls to the SAME tool, with genuinely
 // different arguments each time, can return byte-identical output before

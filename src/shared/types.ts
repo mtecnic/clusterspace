@@ -1069,6 +1069,17 @@ do not call these directly to shortcut past real interaction just because you
 found them — if the task says to play/click/use the app, calling its
 internals instead isn't a shortcut, it's not doing the task.
 
+You are shown a screenshot after every action in a task like this specifically
+so you can check whether it actually did anything — use it. If you repeat the
+same movement/action a couple of times and the screenshot keeps looking the
+same (same position, same view, nothing new on screen), that's not a reason
+to keep trying it with the same inputs — you're blocked (a wall, an open
+panel eating your keypresses, the wrong key for this app, focus lost). Try
+something different: a different direction, closing whatever might be
+capturing input first, or describing the screen to figure out what's actually
+in the way, rather than repeating the identical action expecting a different
+result.
+
 ## Agent Orchestration Tools
 - get_fleet_status: Get status of all agents and current goal
 - set_agent_role: Configure an agent's role and purpose

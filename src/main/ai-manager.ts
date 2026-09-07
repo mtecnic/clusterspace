@@ -59,6 +59,12 @@ interface ChatCompletionChoice {
     role: string
     content: string | null
     tool_calls?: Array<{ id: string; type: string; function: { name: string; arguments: string } }>
+    // Same reasoning-channel split as StreamChunk's delta below, just for the
+    // non-streaming response shape. Field name varies by vLLM version/
+    // reasoning-parser: some emit reasoning_content, others (observed for
+    // real: vllm-0.27.1's default parser) emit reasoning instead — check both.
+    reasoning_content?: string
+    reasoning?: string
   }
   finish_reason: string
 }
@@ -83,8 +89,11 @@ interface StreamChunk {
       content?: string
       // vLLM/SGLang reasoning parsers stream a model's thinking here instead of
       // in `content`. Qwen3.5 with enable_thinking can route its ENTIRE output
-      // into this channel, leaving `content` empty (vLLM issue #38894).
+      // into this channel, leaving `content` empty (vLLM issue #38894). Field
+      // name varies by vLLM version/reasoning-parser — observed for real on
+      // vllm-0.27.1's default parser: it's `reasoning`, not `reasoning_content`.
       reasoning_content?: string
+      reasoning?: string
       tool_calls?: Array<{
         index: number
         id?: string
@@ -621,10 +630,23 @@ export class AIManager {
         }
       }
 
+      // Same reasoning-channel fallback as the streaming path (see the
+      // comment there) — a model that routes its whole answer into the
+      // reasoning channel otherwise returns silently empty content here,
+      // with no equivalent of streamMessage's stallReason to surface it.
+      // This is the path browser_verify_visual_state/browser_describe_screen
+      // go through — an empty fallback-less result here reads as "the vision
+      // judge looked and found nothing," not "the model never answered."
+      let content = this.stripThinkTags(choice.message.content || '')
+      if (!content) {
+        const reasoning = this.stripThinkTags(choice.message.reasoning_content ?? choice.message.reasoning ?? '')
+        if (reasoning) content = reasoning
+      }
+
       return {
         id: uuidv4(),
         role: 'assistant',
-        content: this.stripThinkTags(choice.message.content || ''),
+        content,
         toolCalls: parsedToolCalls.length > 0 ? parsedToolCalls : undefined,
         timestamp: Date.now()
       }
@@ -730,8 +752,10 @@ export class AIManager {
 
             // Accumulate reasoning-channel output separately so it isn't lost
             // when a model streams everything there and leaves content empty.
-            if (delta?.reasoning_content) {
-              reasoningContent += delta.reasoning_content
+            // Check both field names — see StreamChunk's doc comment.
+            const reasoningChunk = delta?.reasoning_content ?? delta?.reasoning
+            if (reasoningChunk) {
+              reasoningContent += reasoningChunk
             }
 
             // Handle tool calls in streaming
