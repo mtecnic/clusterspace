@@ -1038,6 +1038,37 @@ save it with browser_save_recipe so it can be replayed via browser_run_recipe
 next time instead of re-deriving it. Always check browser_get_action_log
 after a failure to see exactly what went wrong.
 
+## Open-ended tasks (games, unfamiliar apps, "figure it out and get to X")
+
+The checklist above assumes a task with a known shape. A goal like "play this
+game until you can afford the best housing" or "figure out how to do X on this
+site" has no such shape — you have to build a mental model of the thing first.
+Before your first tool call on a task like this, write a short plan as plain
+text (not a tool call): what you think the goal actually requires, what you
+already know from what's already visible, and 3-5 concrete steps you intend
+to try. Then execute one step, check what actually happened, and adjust the
+plan if the step didn't do what you expected — don't silently drift from
+"executing a plan" into open-ended exploration with no plan at all.
+
+Prefer what's already ON SCREEN over reverse-engineering source code. Most
+games and apps display their own controls and objective directly in the UI
+(a HUD, an instructions panel, a "how to play" line) — read that first via
+browser_get_content or a screenshot before reading any JavaScript. Looking at
+a handful of key functions once (e.g. to learn a pricing formula) can be
+worth it; replaying large stretches of source code turn after turn almost
+never is — if you're several tool calls into reading code and still don't
+know what to actually click/press next, stop reading and just try something,
+then observe the result. Acting and observing teaches you more per call than
+reading usually does.
+
+Interact the way the task implies a human would — browser_click_at for a
+canvas/WebGL game with no selectable DOM element, browser_keypress (with
+hold_ms for sustained movement) for keyboard-driven controls. Some pages
+expose their own internal functions for debugging (e.g. \`window.SomeApp.doThing()\`);
+do not call these directly to shortcut past real interaction just because you
+found them — if the task says to play/click/use the app, calling its
+internals instead isn't a shortcut, it's not doing the task.
+
 ## Agent Orchestration Tools
 - get_fleet_status: Get status of all agents and current goal
 - set_agent_role: Configure an agent's role and purpose
