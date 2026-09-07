@@ -122,6 +122,15 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
   // run is ending regardless. Cleared as soon as that stream completes.
   const finalTurnRef = useRef(false)
 
+  // Fallback text for the final turn's reply, shown verbatim if the model's
+  // last response comes back tool-calls-only with no text — which is
+  // exactly the failure mode most likely to trigger a final turn in the
+  // first place (the model doubling down on the same call instead of
+  // explaining itself). Without this, the user was left with a blank
+  // assistant bubble showing a tool call that will never run, and no
+  // explanation ever arrives.
+  const finalTurnFallbackRef = useRef('')
+
   // Track auto turns to prevent runaway loops
   const autoTurnCountRef = useRef(0)
 
@@ -168,20 +177,34 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
       setIsStreaming(false)
       streamContentRef.current = ''
 
+      // Bounded final turn after a loop-guard halt — never dispatch tool
+      // calls from this response, no matter what the model returned; the
+      // run is ending regardless. See handleToolCalls' haltRequested branch.
+      // Any tool_calls are stripped (they'll never be dispatched, so
+      // showing them would be a dangling promise) and empty content falls
+      // back to the reason the run was stopped for in the first place, so
+      // the user always sees a real explanation instead of a blank bubble.
+      if (finalTurnRef.current) {
+        finalTurnRef.current = false
+        const finalMessage: AIMessage = {
+          ...message,
+          content: message.content?.trim() ? message.content : finalTurnFallbackRef.current,
+          toolCalls: undefined
+        }
+        setMessages(prev => {
+          const newMessages = prev.slice(0, -1)
+          newMessages.push(finalMessage)
+          return newMessages
+        })
+        return
+      }
+
       // Replace placeholder with final message
       setMessages(prev => {
         const newMessages = prev.slice(0, -1)
         newMessages.push(message)
         return newMessages
       })
-
-      // Bounded final turn after a loop-guard halt — never dispatch tool
-      // calls from this response, no matter what the model returned; the
-      // run is ending regardless. See handleToolCalls' haltRequested branch.
-      if (finalTurnRef.current) {
-        finalTurnRef.current = false
-        return
-      }
 
       // Handle tool calls - pass the assistant message to include in conversation
       if (message.toolCalls && message.toolCalls.length > 0) {
@@ -295,6 +318,7 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
     const allMessages = [...stripStaleScreenshots(messagesRef.current), ...pendingMessages, nudge]
 
     finalTurnRef.current = true
+    finalTurnFallbackRef.current = reasonForBanner ?? reasonForModel
     const placeholder: AIMessage = { id: uuidv4(), role: 'assistant', content: '', timestamp: Date.now() }
     setMessages(prev => [...prev, placeholder])
     setIsStreaming(true)
