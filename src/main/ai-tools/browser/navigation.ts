@@ -23,7 +23,7 @@ const SIMULATED_INTERACTION_PATTERNS: RegExp[] = [
 function looksLikeSimulatedInteraction(code: string): string | null {
   for (const pattern of SIMULATED_INTERACTION_PATTERNS) {
     if (pattern.test(code)) {
-      return `This code looks like it's trying to simulate a click, checkbox-toggle, or typed value (matched ${pattern}) — that's exactly the pattern that silently fails on React/Vue-controlled and contenteditable elements, so this call was not executed. Use browser_click / browser_smart_click / browser_check / browser_type instead — they dispatch real trusted events. If this is a false positive (you're genuinely only reading page state), rephrase the code to avoid the flagged pattern.`
+      return `This code looks like it's trying to simulate a click, checkbox-toggle, or typed value (matched ${pattern}) — that's exactly the pattern that silently fails on React/Vue-controlled and contenteditable elements, so this call was not executed. Use browser_click / browser_smart_click / browser_check / browser_type instead — they dispatch real trusted events. If there's no selectable DOM element to target (a <canvas>/WebGL game or drawing app), use browser_click_at (real trusted click at pixel coordinates) or browser_keypress (real trusted keyboard input, with an optional hold_ms for sustained movement) instead. If this is a false positive (you're genuinely only reading page state), rephrase the code to avoid the flagged pattern.`
     }
   }
   return null

@@ -160,6 +160,7 @@ const RECOVERY_HINTS: Record<string, string> = {
   browser_click_at: 'Take a fresh screenshot to re-derive coordinates — the page may have scrolled or changed layout.',
   browser_type: 'Confirm the element is focused/visible first with browser_query, or try browser_click on it before typing.',
   browser_navigate: 'Check the URL is well-formed (needs a scheme, e.g. https://) and that pane_id is actually a browser pane (see list_panes).',
+  browser_execute_js: 'If you were trying to simulate interaction (a click, keypress, or drag) rather than just read page state, use browser_click_at (real trusted click at pixel coordinates) or browser_keypress (real trusted keyboard input, with hold_ms for sustained movement) instead — especially on canvas/WebGL content with no selectable DOM element.',
   write_to_terminal: 'Check the pane is actually connected with list_panes, or call reconnect_pane first.',
   read_terminal_output: 'Check the pane is actually connected with list_panes, or call reconnect_pane first.'
 }

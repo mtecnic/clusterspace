@@ -234,23 +234,25 @@ export function registerBrowserInteractionT1Tools(): void {
     }
   })
 
-  toolRegistry.register<{ pane_id: string; key: string; modifiers?: Array<'control' | 'shift' | 'alt' | 'meta'> }, { success: boolean; error?: string }>({
+  toolRegistry.register<{ pane_id: string; key: string; modifiers?: Array<'control' | 'shift' | 'alt' | 'meta'>; hold_ms?: number }, { success: boolean; error?: string }>({
     name: 'browser_keypress',
-    description: 'Send a keyboard event to the focused element. Use named keys (Enter, Tab, Escape, Backspace, ArrowLeft, ...) or single characters.',
+    description: 'Send a real, trusted keyboard event (via native input, not a synthetic DOM event) to the focused element or canvas. Use named keys (Enter, Tab, Escape, Backspace, ArrowLeft, w, a, s, d, ...) or single characters. For real-time-movement games/apps (WASD-style controls, canvas/WebGL content with no clickable DOM elements) pass `hold_ms` to sustain the keydown instead of an instantaneous tap — a single untimed press only advances one frame\'s worth of movement.',
     parameters: {
       type: 'object',
       properties: {
         pane_id: { type: 'string', description: 'The browser pane ID' },
         key: { type: 'string', description: 'Key name or character (e.g., "Enter", "Tab", "a")' },
-        modifiers: { type: 'array', items: { type: 'string', enum: ['control', 'shift', 'alt', 'meta'] }, description: 'Modifier keys to hold' }
+        modifiers: { type: 'array', items: { type: 'string', enum: ['control', 'shift', 'alt', 'meta'] }, description: 'Modifier keys to hold' },
+        hold_ms: { type: 'number', description: 'Hold the key down this long (ms) before releasing — for sustained movement in real-time games. Omit for an instant tap. Clamped to 5000ms.' }
       },
       required: ['pane_id', 'key']
     },
-    run: async ({ pane_id, key, modifiers }) => {
+    run: async ({ pane_id, key, modifiers, hold_ms }) => {
       const wc = getBrowserWebContents(pane_id)
       if (!wc) return { success: false, error: `No browser pane ${pane_id}` }
       try {
-        dispatchKeyEvent(wc, key, modifiers ?? [])
+        const clampedHoldMs = hold_ms != null ? Math.max(0, Math.min(5000, hold_ms)) : 0
+        await dispatchKeyEvent(wc, key, modifiers ?? [], clampedHoldMs)
         return { success: true }
       } catch (error) {
         return { success: false, error: error instanceof Error ? error.message : String(error) }

@@ -81,7 +81,7 @@ export function handleBrowserConnection(ws: WebSocket, paneId: string, deps: Bro
       await cdpClickAt(wc, msg.x, msg.y, msg.button ?? 'left')
     } else if (msg.type === 'key' && typeof msg.key === 'string') {
       const mods = (msg.modifiers ?? []).filter((m): m is Modifier => VALID_MODIFIERS.has(m))
-      dispatchKeyEvent(wc, msg.key, mods)
+      await dispatchKeyEvent(wc, msg.key, mods)
     } else if (msg.type === 'scroll' && typeof msg.x === 'number' && typeof msg.y === 'number' && typeof msg.deltaX === 'number' && typeof msg.deltaY === 'number') {
       wc.sendInputEvent({ type: 'mouseWheel', x: msg.x, y: msg.y, deltaX: -msg.deltaX, deltaY: -msg.deltaY })
     }

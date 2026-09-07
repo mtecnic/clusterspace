@@ -30,11 +30,23 @@ export async function saveScreenshotToDisk(
  * keyboard relay (src/main/remote-server/ws-browser.ts) — a real remote
  * keyboard naturally produces one key event at a time, the same shape this
  * already existed in for the AI tool.
+ *
+ * `holdMs`, when set, delays keyUp so the target sees a sustained keydown —
+ * needed for real-time-movement games (WASD/Space/Shift-style controls)
+ * where a single instantaneous tap only advances one frame's worth of
+ * movement. Defaults to 0 (instant tap, the original behavior) so the
+ * remote-keyboard relay caller — which never passes this — is unaffected.
  */
-export function dispatchKeyEvent(wc: WebContents, key: string, modifiers: Array<'control' | 'shift' | 'alt' | 'meta'> = []): void {
+export async function dispatchKeyEvent(
+  wc: WebContents,
+  key: string,
+  modifiers: Array<'control' | 'shift' | 'alt' | 'meta'> = [],
+  holdMs = 0
+): Promise<void> {
   const isPrintable = key.length === 1
   wc.sendInputEvent({ type: 'keyDown', keyCode: key, modifiers })
   if (isPrintable) wc.sendInputEvent({ type: 'char', keyCode: key, modifiers })
+  if (holdMs > 0) await new Promise(resolve => setTimeout(resolve, holdMs))
   wc.sendInputEvent({ type: 'keyUp', keyCode: key, modifiers })
 }
 
