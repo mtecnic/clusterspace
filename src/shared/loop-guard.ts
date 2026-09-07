@@ -80,6 +80,13 @@ const POLLING_TOOLS: ReadonlySet<string> = new Set([
   'browser_wait_for_selector', 'browser_wait_for_navigation', 'browser_wait_for_text'
 ])
 
+// How many consecutive tool-call batches with zero mutating actions
+// (isMutatingTool) trigger an action-starvation nudge — and the interval at
+// which it repeats if the model keeps not acting. A single one-time nudge
+// isn't enough on its own (a model ignoring instructions once will often
+// ignore them again), so this re-fires every N calls rather than once.
+const ACTION_STARVATION_INTERVAL = 8
+
 // Bounded history of recent call signatures, used only for cycle detection
 // (the exact-repeat counter above has no size limit and never needs one).
 const RECENT_SIGNATURE_WINDOW = 8
@@ -104,6 +111,8 @@ export interface LoopGuardState {
   sameResultStreak: Record<string, number>
   /** tool name -> whether the current streak has already been nudged (don't repeat every call) */
   sameResultNudged: Record<string, boolean>
+  /** consecutive tool-call batches with no mutating action — see checkActionStarvation */
+  noActionStreak: number
 }
 
 export function createLoopGuardState(): LoopGuardState {
@@ -116,7 +125,8 @@ export function createLoopGuardState(): LoopGuardState {
     recentSignatures: [],
     lastResultPreviewByTool: {},
     sameResultStreak: {},
-    sameResultNudged: {}
+    sameResultNudged: {},
+    noActionStreak: 0
   }
 }
 
@@ -310,6 +320,31 @@ export function checkNarrativeMismatch(assistantText: string, batchAllOk: boolea
   }
   if (claimsSuccess && !batchAnyOk) {
     return 'Note: every tool call in your last turn actually failed (see the results above) — re-read them before reporting success.'
+  }
+  return null
+}
+
+/**
+ * Advisory nudge for a failure mode distinct from everything else in this
+ * module: an unbroken run of observational tool calls (reads, source
+ * introspection, screenshots) with no mutating action in between. Nothing
+ * above catches this — every call can be individually well-formed, with
+ * genuinely different arguments AND a genuinely different result each
+ * time, while the run makes zero actual progress toward the task. Observed
+ * for real: a 200+ turn "play this game" conversation spent entirely on
+ * browser_execute_js introspection of the page's internals, never once
+ * clicking/buying/selling anything. Re-fires every ACTION_STARVATION_INTERVAL
+ * calls rather than once, since a model that ignores this once may well
+ * ignore it again.
+ */
+export function checkActionStarvation(state: LoopGuardState, tookAction: boolean): string | null {
+  if (tookAction) {
+    state.noActionStreak = 0
+    return null
+  }
+  state.noActionStreak++
+  if (state.noActionStreak % ACTION_STARVATION_INTERVAL === 0) {
+    return `You've made ${state.noActionStreak} tool calls in a row without taking any concrete action (click, type, navigate, keypress, write, etc.) — pure information-gathering. If you already have enough information, take a real action now instead of continuing to read/inspect.`
   }
   return null
 }

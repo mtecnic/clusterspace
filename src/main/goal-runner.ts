@@ -5,7 +5,8 @@ import type { AIMessage } from '../shared/types'
 import { screenshotTargetFor, evictPriorScreenshots } from '../shared/vision-loop'
 import {
   createLoopGuardState, checkBeforeCall, recordOutcome, checkNarrativeMismatch,
-  isMutatingTool, isVerificationTool, resultReportsFailure, type LoopGuardState
+  checkActionStarvation, isMutatingTool, isVerificationTool, resultReportsFailure,
+  type LoopGuardState
 } from '../shared/loop-guard'
 import type { AIManager } from './ai-manager'
 import type { AIMemoryStore } from './ai-memory-store'
@@ -590,6 +591,17 @@ export class GoalRunner {
           if (mismatch) {
             messages.push({ id: uuidv4(), role: 'system', content: mismatch, timestamp: Date.now() })
           }
+        }
+
+        // Action-starvation nudge: an unbroken run of observational tool
+        // calls (reads, source introspection) with no mutating action in
+        // between — every call above can pass every other check (not
+        // blocked, not a duplicate, not stagnant) while the goal makes zero
+        // actual progress.
+        const tookAction = toolCalls.some(tc => isMutatingTool(tc.name))
+        const starvationMsg = checkActionStarvation(runtime.guard, tookAction)
+        if (starvationMsg) {
+          messages.push({ id: uuidv4(), role: 'system', content: starvationMsg, timestamp: Date.now() })
         }
 
         // Attach the post-action screenshot as the agent's current state. Only

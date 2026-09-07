@@ -16,7 +16,7 @@ import {
   dispatchReconnect
 } from '../lib/pane-controls'
 import { screenshotTargetFor, MAX_CONTEXT_SCREENSHOTS } from '@shared/vision-loop'
-import { createLoopGuardState, checkBeforeCall, recordOutcome, checkNarrativeMismatch, batchIsParallelSafe, resultReportsFailure } from '@shared/loop-guard'
+import { createLoopGuardState, checkBeforeCall, recordOutcome, checkNarrativeMismatch, checkActionStarvation, isMutatingTool, batchIsParallelSafe, resultReportsFailure } from '@shared/loop-guard'
 
 // Immutable version of evictPriorScreenshots: returns a new array where all
 // but the newest (MAX_CONTEXT_SCREENSHOTS - 1) auto-screenshot messages have
@@ -490,6 +490,18 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
       if (mismatch) {
         toolResults.push({ id: uuidv4(), role: 'system', content: mismatch, timestamp: Date.now() })
       }
+    }
+
+    // Action-starvation nudge: an unbroken run of observational tool calls
+    // (reads, source introspection) with no mutating action in between —
+    // every call above can pass every other check (not blocked, not a
+    // duplicate, not stagnant) while the conversation makes zero actual
+    // progress. See loop-guard.ts's doc comment for the incident this
+    // caught: 200+ turns of browser_execute_js reads, never one click.
+    const tookAction = toolCalls.some(tc => isMutatingTool(tc.name))
+    const starvationMsg = checkActionStarvation(guardStateRef.current, tookAction)
+    if (starvationMsg) {
+      toolResults.push({ id: uuidv4(), role: 'system', content: starvationMsg, timestamp: Date.now() })
     }
 
     // Track retries if there were errors
