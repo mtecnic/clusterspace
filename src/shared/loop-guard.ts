@@ -43,18 +43,24 @@ const DUPLICATE_CALL_LIMIT = 3
 const SUCCEEDING_DUPLICATE_CALL_LIMIT = 20
 const HALT_AFTER_BLOCKS = 5
 
-// Tools the elevated ceiling above must NOT apply to: their args are a fixed
-// absolute target (a literal x/y, a specific key), not a resolver spec that
-// naturally re-targets "whichever thing currently matches." Repeating the
-// exact same (x, y) can never mean "act on the next item in a list" the way
-// repeating the same aria_label/selector spec can — it can only ever hit the
-// same physical point. A click there mechanically "succeeds" (the dispatch
-// itself always works) regardless of whether anything useful is at that
-// point, so under the elevated ceiling this became a 20-iteration stuck
-// loop instead of the 3-iteration one it was before — observed for real
-// immediately after that ceiling first shipped, clicking a stale (x, y) at
-// a broken reply box ~15 times before the (much later) cutoff caught it.
-const FIXED_TARGET_TOOLS: ReadonlySet<string> = new Set(['browser_click_at', 'browser_hover', 'browser_drag'])
+// Tools the elevated ceiling above must NOT apply to: nothing about repeating
+// the exact same call can mean "act on the next item in a list" the way
+// repeating the same aria_label/selector spec can for browser_smart_click.
+// Two distinct reasons land a tool here:
+//   - a fixed absolute target (a literal x/y, a specific key) — it can only
+//     ever hit the same physical point, and a click there mechanically
+//     "succeeds" (the dispatch itself always works) regardless of whether
+//     anything useful is at that point. Observed for real immediately after
+//     the elevated ceiling first shipped: clicking a stale (x, y) at a
+//     broken reply box ~15 times before the (much later) cutoff caught it.
+//   - arbitrary code execution (browser_execute_js) — identical code run
+//     twice does the identical thing twice; there is no "whichever thing
+//     currently matches" resolution happening at all. Observed for real:
+//     the same status-check snippet repeated byte-for-byte 23 times against
+//     a value that had already stopped changing, because the "last call
+//     with these args succeeded" elevation doesn't know success here just
+//     meant "the JS didn't throw," not "this call made progress."
+const FIXED_TARGET_TOOLS: ReadonlySet<string> = new Set(['browser_click_at', 'browser_hover', 'browser_drag', 'browser_execute_js'])
 
 // How many consecutive successful calls to the SAME tool, with genuinely
 // different arguments each time, can return byte-identical output before
@@ -109,8 +115,6 @@ export interface LoopGuardState {
   lastResultPreviewByTool: Record<string, string>
   /** tool name -> how many consecutive successful calls (any args) returned that same preview */
   sameResultStreak: Record<string, number>
-  /** tool name -> whether the current streak has already been nudged (don't repeat every call) */
-  sameResultNudged: Record<string, boolean>
   /** consecutive tool-call batches with no mutating action — see checkActionStarvation */
   noActionStreak: number
 }
@@ -125,7 +129,6 @@ export function createLoopGuardState(): LoopGuardState {
     recentSignatures: [],
     lastResultPreviewByTool: {},
     sameResultStreak: {},
-    sameResultNudged: {},
     noActionStreak: 0
   }
 }
@@ -268,11 +271,15 @@ export function recordOutcome(
       } else {
         state.lastResultPreviewByTool[toolName] = preview
         state.sameResultStreak[toolName] = 1
-        state.sameResultNudged[toolName] = false
       }
       const streak = state.sameResultStreak[toolName]
-      if (streak >= SAME_RESULT_STREAK_LIMIT && !state.sameResultNudged[toolName]) {
-        state.sameResultNudged[toolName] = true
+      // Re-fires every SAME_RESULT_STREAK_LIMIT calls rather than once — a
+      // model that keeps calling with identical (not just varying) args
+      // gets caught by the exact-duplicate-call guard separately and much
+      // sooner, but when args genuinely differ each time this is the only
+      // signal at all, and one nudge wasn't enough to stop a model that had
+      // already demonstrated it ignores this kind of instruction once.
+      if (streak >= SAME_RESULT_STREAK_LIMIT && streak % SAME_RESULT_STREAK_LIMIT === 0) {
         return `${toolName} has returned the same result ${streak} times in a row even though its arguments were different each time — whatever you're varying isn't changing the outcome. Stop adjusting that parameter and try a genuinely different approach, or accept the result you already have.`
       }
     }
