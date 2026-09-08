@@ -225,6 +225,16 @@ export function useTerminal({
       cursorStyle: 'block',
       scrollback: 5000,
       allowProposedApi: true,
+      // Classic dircolors combos (e.g. "other-writable directory" = blue
+      // text on a green background, LS_COLORS ow=34;42) are famously
+      // near-unreadable — both colors are mid-brightness with little
+      // luminance difference, independent of which specific terminal
+      // theme is in use. xterm.js can auto-correct this by nudging the
+      // foreground color at render time until it meets a minimum contrast
+      // ratio against whatever background is in effect; 4.5 is the WCAG AA
+      // threshold, a reasonable floor that only kicks in for combos that
+      // are genuinely hard to read rather than repainting every color.
+      minimumContrastRatio: 4.5,
       // Double-click word boundaries. Default is whitespace-only, which makes
       // selecting a long path / URL / identifier impossible — the whole thing
       // is "one word". Adding shell-meaningful separators lets you grab path
