@@ -49,6 +49,9 @@ const DEFAULT_MAX_STEPS = 300
 // Bounded per goal — a single "you claimed done but never checked" nudge,
 // not a repeatable stall tactic.
 const MAX_VERIFY_NUDGES = 1
+// Same bound, same reasoning, for "you claimed done but your own checklist
+// still has open items" — see the claim_complete handling below.
+const MAX_TODO_NUDGES = 1
 
 export interface StartGoalInput {
   paneId: string
@@ -96,6 +99,9 @@ interface RuntimeGoal {
    *  to actually check its work before claim_complete is trusted. */
   pendingVerifyNudge: boolean
   verifyNudgesGiven: number
+  /** Bounded "you still have open checklist items" nudge on claim_complete —
+   *  see MAX_TODO_NUDGES. */
+  todoNudgesGiven: number
 }
 
 // A goal that's been checkpointed (visible in GoalDashboard as 'pending')
@@ -282,7 +288,8 @@ export class GoalRunner {
       stepsSinceLastCritic: 0,
       guard: createLoopGuardState(),
       pendingVerifyNudge: false,
-      verifyNudgesGiven: 0
+      verifyNudgesGiven: 0,
+      todoNudgesGiven: 0
     }
     this.running.set(checkpoint.id, runtime)
     this.goalStore.update(checkpoint.id, { status: 'running' })
@@ -437,7 +444,7 @@ export class GoalRunner {
         // Wall-clock cap.
         if (Date.now() - runtime.startedAt > runtime.wallClockMs) {
           const reason = `Wall-clock cap exceeded (${runtime.wallClockMs}ms)`
-          const finalReport = await this.getFinalExplanation(provider, apiKey, messages, reason)
+          const finalReport = await this.getFinalExplanation(provider, apiKey, messages, reason, runtime.checkpoint.id)
           this.endGoal(runtime, 'failed', finalReport)
           return
         }
@@ -447,7 +454,7 @@ export class GoalRunner {
         // (possibly useless) turns that represents.
         if (runtime.stepCount >= runtime.maxSteps) {
           const reason = `Step cap exceeded (${runtime.maxSteps} tool-call steps)`
-          const finalReport = await this.getFinalExplanation(provider, apiKey, messages, reason)
+          const finalReport = await this.getFinalExplanation(provider, apiKey, messages, reason, runtime.checkpoint.id)
           this.endGoal(runtime, 'failed', finalReport)
           return
         }
@@ -478,8 +485,9 @@ export class GoalRunner {
           this.agentStore.clearContext(runtime.checkpoint.paneId)
         }
 
-        // One model turn.
-        const assistant = await this.aiManager.streamMessage(messages, provider, apiKey ?? undefined)
+        // One model turn. callerId lets streamMessage re-inject this goal's
+        // live checklist (write_todos/complete_todo) every turn.
+        const assistant = await this.aiManager.streamMessage(messages, provider, apiKey ?? undefined, runtime.checkpoint.id)
         if (!assistant) {
           this.endGoal(runtime, 'failed', 'Model call returned no message')
           return
@@ -579,7 +587,7 @@ export class GoalRunner {
 
         if (haltRequested) {
           const reason = 'Loop halted: repeated duplicate tool calls exceeded the safety limit.'
-          const finalReport = await this.getFinalExplanation(provider, apiKey, messages, reason)
+          const finalReport = await this.getFinalExplanation(provider, apiKey, messages, reason, runtime.checkpoint.id)
           this.endGoal(runtime, 'aborted', finalReport)
           return
         }
@@ -645,6 +653,24 @@ export class GoalRunner {
             })
             continue
           }
+          // Same bounded-nudge shape as verify-on-stop above, for a
+          // different signal: the model's OWN checklist (write_todos/
+          // complete_todo) still has open items. One push to finish or
+          // explicitly revise the list, not a repeatable stall tactic —
+          // after MAX_TODO_NUDGES the claim proceeds regardless.
+          const todos = this.aiManager.getTodoSnapshot(runtime.checkpoint.id)
+          const openItems = todos?.items.filter(i => !i.done) ?? []
+          if (openItems.length > 0 && runtime.todoNudgesGiven < MAX_TODO_NUDGES) {
+            runtime.todoNudgesGiven++
+            const names = openItems.slice(0, 4).map(i => `${i.index}. ${i.text}`).join('; ')
+            messages.push({
+              id: uuidv4(),
+              role: 'system',
+              content: `You claimed completion, but your own checklist still has ${openItems.length} open item(s): ${names}. Finish them and call complete_todo, or call write_todos to remove/revise anything no longer relevant, then call claim_complete again.`,
+              timestamp: Date.now()
+            })
+            continue
+          }
           const verdict = await this.verifySuccessCriterion(runtime.checkpoint.successCriterion, claim.rationale, provider, apiKey ?? undefined)
           if (verdict.verified) {
             this.endGoal(runtime, 'completed', verdict.detail ?? claim.rationale)
@@ -694,7 +720,8 @@ export class GoalRunner {
     provider: ReturnType<AIStore['getProvider']>,
     apiKey: string | null | undefined,
     messages: AIMessage[],
-    reason: string
+    reason: string,
+    callerId: string
   ): Promise<string> {
     if (!provider) return reason
     const finalMessages: AIMessage[] = [
@@ -707,7 +734,12 @@ export class GoalRunner {
       }
     ]
     try {
-      const assistant = await this.aiManager.streamMessage(finalMessages, provider, apiKey ?? undefined)
+      // callerId here is harmless and often useful — the model can
+      // reference what's still open on the checklist while explaining why
+      // the run is stopping. Any tool_calls in the reply are still ignored
+      // (see the doc comment above), so re-injecting the checklist can't
+      // cause a dispatch.
+      const assistant = await this.aiManager.streamMessage(finalMessages, provider, apiKey ?? undefined, callerId)
       const text = assistant?.content?.trim()
       return text ? `${reason}\n\n${text}` : reason
     } catch {
@@ -728,6 +760,7 @@ export class GoalRunner {
       `- You cannot stop on your own. The loop runs until you call claim_complete (which the runner verifies) or abort_with_report (graceful give-up).`,
       `- When you believe the goal is achieved, call claim_complete with a brief rationale. If verification fails, you'll be told why and the loop resumes.`,
       `- If you genuinely cannot make progress, call abort_with_report with a reason and what you learned.`,
+      `- If this goal has several distinct phases, call write_todos with 3-7 concrete steps before your first action — it's re-shown to you every turn, so it's how you keep track of where you are on a long run instead of losing the thread.`,
       `- Use the step protocol (declare_step → action → verify_step) for non-trivial actions.`,
       `- You are running under policy: risk=${c.policy.risk}${c.policy.sandboxDir ? `, sandbox=${c.policy.sandboxDir}` : ''}. Tools exceeding this scope will prompt the user.`,
       ``,

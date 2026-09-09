@@ -12,7 +12,8 @@ import {
   PaneAgentState,
   OrchestrationGoal,
   TaskStep,
-  Persona
+  Persona,
+  TodoSnapshot
 } from '../shared/types'
 import { PtyManager } from './pty-manager'
 import { WorkspaceStore } from './workspace-store'
@@ -30,6 +31,7 @@ import { requestApproval, selectorLooksLikePassword, urlIsSensitive } from './br
 import { isMutatingTool } from '../shared/loop-guard'
 import { classifyError, classifyHttpError, ClassifiedAIError } from '../shared/ai-error-classifier'
 import { registerAllTools, toolRegistry, type ToolContext, type ToolRuntimeState } from './ai-tools'
+import { formatTodoSnapshot } from './ai-tools/todo'
 
 // OpenAI-compatible request/response types
 interface ChatCompletionRequest {
@@ -158,7 +160,7 @@ export class AIManager {
   setConversationIntent(callerId: string, intent: string): void {
     let state = this.toolStateByCaller.get(callerId)
     if (!state) {
-      state = { currentStep: null, originalIntent: null }
+      state = { currentStep: null, originalIntent: null, todos: null }
       this.toolStateByCaller.set(callerId, state)
     }
     state.originalIntent = intent
@@ -167,6 +169,13 @@ export class AIManager {
   /** Interactive-chat convenience wrapper — keeps INTERACTIVE_CALLER_ID private to this file. */
   setInteractiveIntent(intent: string): void {
     this.setConversationIntent(INTERACTIVE_CALLER_ID, intent)
+  }
+
+  /** Read-only peek at a caller's live checklist (write_todos/complete_todo) —
+   *  e.g. for a bounded "you still have open items" nudge before accepting
+   *  a claim of completion. null if the model never called either tool. */
+  getTodoSnapshot(callerId: string): TodoSnapshot | null {
+    return this.toolStateByCaller.get(callerId)?.todos ?? null
   }
 
   /** Drop all per-caller state (policy + tool state) once a goal ends, so
@@ -203,7 +212,7 @@ export class AIManager {
   private buildToolContext(callerId: string): ToolContext {
     let state = this.toolStateByCaller.get(callerId)
     if (!state) {
-      state = { currentStep: null, originalIntent: null }
+      state = { currentStep: null, originalIntent: null, todos: null }
       this.toolStateByCaller.set(callerId, state)
     }
     if (!this.goalRunner) {
@@ -582,10 +591,17 @@ export class AIManager {
   }
 
   // Send a message (non-streaming)
+  // callerId is deliberately opt-in (no default): every current call site
+  // is a synthetic side-channel judge/vision call (buildVisionHelpers'
+  // verify/describe, verifySuccessCriterion's model_question judge,
+  // runCritic's judge prompt) that must NOT see the running task's
+  // checklist — a judge asked "is this done?" while looking at the same
+  // plan the worker is following is no longer an independent check.
   async sendMessage(
     messages: AIMessage[],
     config: AIProviderConfig,
-    apiKey?: string
+    apiKey?: string,
+    callerId?: string
   ): Promise<AIMessage> {
     const requestId = uuidv4()
     const controller = new AbortController()
@@ -599,7 +615,7 @@ export class AIManager {
         headers['Authorization'] = `Bearer ${apiKey}`
       }
 
-      const request = this.buildRequest(messages, config, false)
+      const request = this.buildRequest(messages, config, false, callerId)
 
       const response = await fetch(`${config.endpoint}/chat/completions`, {
         method: 'POST',
@@ -659,10 +675,17 @@ export class AIManager {
   // and now also returns the final assembled assistant message so server-
   // side loops (like the GoalRunner) can drive multi-turn tool-use without
   // relying on the renderer's auto-loop.
+  //
+  // callerId defaults to the interactive chat panel's sentinel: every
+  // real, non-judge caller of this method (the interactive loop via IPC,
+  // and GoalRunner's actual work turns) wants its checklist re-injected,
+  // so defaulting here — unlike sendMessage, see its doc comment — means
+  // the interactive panel needs no changes at all to pick this up.
   async streamMessage(
     messages: AIMessage[],
     config: AIProviderConfig,
-    apiKey?: string
+    apiKey?: string,
+    callerId: string = INTERACTIVE_CALLER_ID
   ): Promise<AIMessage | null> {
     const requestId = uuidv4()
     const controller = new AbortController()
@@ -683,7 +706,7 @@ export class AIManager {
         headers['Authorization'] = `Bearer ${apiKey}`
       }
 
-      const request = this.buildRequest(messages, config, true)
+      const request = this.buildRequest(messages, config, true, callerId)
 
       // Debug: log request structure
       console.log('[AI] Streaming request:', {
@@ -1159,7 +1182,8 @@ export class AIManager {
   private buildRequest(
     messages: AIMessage[],
     config: AIProviderConfig,
-    stream: boolean
+    stream: boolean,
+    callerId?: string
   ): ChatCompletionRequest {
     const systemPrompt = config.systemPrompt || ''
 
@@ -1228,6 +1252,26 @@ export class AIManager {
         formattedMessages.push({
           role: msg.role,
           content: msg.content
+        })
+      }
+    }
+
+    // Live checklist re-injection (write_todos/complete_todo, src/main/
+    // ai-tools/todo.ts). Appended as a trailing user-role message, computed
+    // fresh on every request from live ToolRuntimeState — never folded into
+    // the system block above (would defeat prompt-cache stability on the
+    // frozen system prompt) and never written back into `messages` (so it
+    // can't be eaten by compaction/trimming the way an ordinary tool result
+    // would be — it's simply recomputed next time regardless). Only judge/
+    // vision side-channel calls omit callerId, and correctly see nothing
+    // here as a result.
+    if (callerId) {
+      const snapshot = this.toolStateByCaller.get(callerId)?.todos ?? null
+      const rendered = formatTodoSnapshot(snapshot)
+      if (rendered) {
+        formattedMessages.push({
+          role: 'user',
+          content: `[Live checklist — recomputed fresh each turn from your last write_todos/complete_todo call; not part of the saved conversation]\n${rendered}`
         })
       }
     }

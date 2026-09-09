@@ -346,14 +346,25 @@ export interface Skill {
 // Shared between main (goal-store/goal-policy/goal-runner) and renderer
 // (GoalDashboard). Keep the main-process types in sync via re-export.
 
-export type GoalStatus = 'pending' | 'running' | 'paused' | 'completed' | 'failed' | 'aborted'
+// 'interrupted' is distinct from 'paused': it means the app process died
+// (crash/quit) while this goal was 'running', discovered and reclassified
+// at startup (see GoalStore.reconcileOrphaned) — never set directly by the
+// runner. Kept separate from 'paused' (a clean, user-requested stop) so the
+// dashboard stays honest about which actually happened.
+export type GoalStatus = 'pending' | 'running' | 'paused' | 'interrupted' | 'completed' | 'failed' | 'aborted'
 
 export type GoalRisk = 'read_only' | 'write_local' | 'network_get' | 'network_write' | 'spends_money'
 
 export type SuccessCriterion =
   | { type: 'shell'; command: string; exitCode?: number }
   | { type: 'model_question'; question: string; threshold?: 'yes' | 'high_confidence' }
-  | { type: 'json_predicate'; expr: string }
+  // filePath is read and JSON.parse'd; expr is a tiny whitelisted grammar
+  // ("dot.path.into.json op literal", op one of ==,!=,>,<,>=,<=,exists,
+  // notexists) evaluated by src/main/json-predicate.ts — no eval/Function/
+  // VM anywhere. Safe specifically because expr is human-authored at goal-
+  // creation time in GoalCreateDialog, the same trust tier as `shell`'s
+  // command (which already runs arbitrary shell), never model-supplied.
+  | { type: 'json_predicate'; expr: string; filePath: string }
   | { type: 'manual' }
 
 export interface GoalPolicy {
@@ -379,6 +390,29 @@ export interface GoalStep {
   timestamp: number
 }
 
+// A single checklist item, set via the write_todos tool and ticked off via
+// complete_todo (src/main/ai-tools/todo.ts). 1-based `index` is stable
+// across a `complete_todo` call (only `done`/`active` change), but gets
+// reassigned whenever `write_todos` replaces the whole list.
+export interface TodoItem {
+  index: number
+  text: string
+  done: boolean
+}
+
+// Live checklist state for one caller (a running goal, or the interactive
+// chat panel). Held authoritatively in ToolRuntimeState.todos
+// (src/main/ai-tools/registry.ts) and re-injected into every outgoing
+// request by AIManager.buildRequest — see that function's doc comment for
+// why it's a trailing user-role message, never stored, never system-role.
+// GoalCheckpoint.todo (below) is a passive write-through mirror for
+// observability only; it is not read back to reconstruct ToolRuntimeState.
+export interface TodoSnapshot {
+  items: TodoItem[]
+  activeIndex: number | null
+  updatedAt: number
+}
+
 export interface GoalCheckpoint {
   id: string
   paneId: string
@@ -398,6 +432,11 @@ export interface GoalCheckpoint {
   // so the dashboard can group them and bulk pause/resume/abort as one
   // unit. Absent for solo goals (GoalCreateDialog, assign_task).
   fleetId?: string
+  // Write-through mirror of ToolRuntimeState.todos, updated whenever
+  // write_todos/complete_todo runs for this goal — lets GoalDashboard show
+  // checklist progress without any new IPC channel or store. Absent until
+  // the model calls either tool for the first time.
+  todo?: TodoSnapshot
 }
 
 export type GoalRunnerEvent =
@@ -1043,12 +1082,15 @@ after a failure to see exactly what went wrong.
 The checklist above assumes a task with a known shape. A goal like "play this
 game until you can afford the best housing" or "figure out how to do X on this
 site" has no such shape — you have to build a mental model of the thing first.
-Before your first tool call on a task like this, write a short plan as plain
-text (not a tool call): what you think the goal actually requires, what you
-already know from what's already visible, and 3-5 concrete steps you intend
-to try. Then execute one step, check what actually happened, and adjust the
-plan if the step didn't do what you expected — don't silently drift from
-"executing a plan" into open-ended exploration with no plan at all.
+Before your first tool call on a task like this, call **write_todos** with
+3-7 concrete steps: what you think the goal actually requires, based on what's
+already visible. It's re-shown to you at the top of every turn, so it survives
+a long run instead of scrolling out of view — call **complete_todo** as you
+finish each step, and call write_todos again to revise the list if a step
+didn't do what you expected. Don't silently drift from "executing a plan"
+into open-ended exploration with no plan at all — and this isn't only for
+open-ended/game-like tasks: any task with several distinct phases benefits
+from the same checklist.
 
 Prefer what's already ON SCREEN over reverse-engineering source code. Most
 games and apps display their own controls and objective directly in the UI

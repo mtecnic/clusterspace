@@ -43,9 +43,24 @@ export function registerStepProtocolTools(): void {
       const intentReminder = ctx.state.originalIntent
         ? `\n\nOriginal task (verbatim — re-check this step actually satisfies it, not just what worked on a prior step): "${ctx.state.originalIntent}"`
         : ''
+      // Cross-reference with the macro checklist (write_todos/complete_todo,
+      // ai-tools/todo.ts): declare_step is per-action, the checklist is the
+      // multi-phase plan those actions belong to. When one exists, echo the
+      // active item so this step stays anchored to it. When none exists and
+      // several steps have already been declared, nudge toward starting
+      // one — a genuinely single-step task never reaches step 3, so this
+      // doesn't misfire on the common case write_todos' own description
+      // says to skip it for.
+      const todos = ctx.state.todos
+      const activeItem = todos?.items.find(i => i.index === todos.activeIndex)
+      const checklistNote = activeItem
+        ? `\n\nChecklist item in progress: ${activeItem.index}. ${activeItem.text}`
+        : step_number >= 3
+          ? `\n\nNo checklist set yet, and this is step ${step_number} — consider write_todos if this task has more distinct phases ahead.`
+          : ''
       return `✓ Step ${step_number} declared: "${title}"\n` +
              `  Action: ${action}\n` +
-             `  Success criteria: ${success_criteria}${intentReminder}\n\n` +
+             `  Success criteria: ${success_criteria}${intentReminder}${checklistNote}\n\n` +
              `You may now execute this step. After execution, call verify_step to confirm results.`
     }
   })
@@ -74,10 +89,19 @@ export function registerStepProtocolTools(): void {
         return `⚠️ Error: Step ${step_number} was not declared. Use declare_step first before executing actions.`
       }
       const result = passed ? '✓ PASSED' : '✗ FAILED'
+      // If this reads like "I'm finishing up" but the checklist disagrees,
+      // say so — the same "your own plan says otherwise" signal
+      // claim_complete's unfinished-todos nudge gives, just earlier, before
+      // the model gets as far as trying to end the whole run.
+      const openItems = ctx.state.todos?.items.filter(i => !i.done) ?? []
+      const looksDone = /\bdone\b|\bcomplete\b|\bfinished\b/i.test(next_action)
+      const checklistNote = looksDone && openItems.length > 0
+        ? `\n  Note: your checklist still has ${openItems.length} open item(s) (${openItems.slice(0, 3).map(i => i.text).join('; ')}) — call complete_todo as you finish them, or write_todos to revise the list if they're no longer needed.`
+        : ''
       const response = `Step ${step_number} verification: ${result}\n` +
                        `  Title: ${current.title}\n` +
                        `  Observation: ${observation}\n` +
-                       `  Next: ${next_action}`
+                       `  Next: ${next_action}${checklistNote}`
       ctx.state.currentStep = null
       return response
     }

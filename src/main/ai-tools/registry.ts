@@ -1,5 +1,5 @@
 import type { BrowserWindow } from 'electron'
-import type { AIToolDefinition } from '../../shared/types'
+import type { AIToolDefinition, TodoSnapshot } from '../../shared/types'
 import type { PtyManager } from '../pty-manager'
 import type { WorkspaceStore } from '../workspace-store'
 import type { AgentStore } from '../agent-store'
@@ -25,6 +25,11 @@ export interface ToolRuntimeState {
   // instruction ("no engagement at all" — zero likes AND replies AND
   // reposts) after enough repeated turns.
   originalIntent: string | null
+  // The live checklist, set/mutated by write_todos/complete_todo
+  // (src/main/ai-tools/todo.ts). null means the model hasn't opted in yet
+  // this run -- re-injection (AIManager.buildRequest) is a no-op in that
+  // case, so a conversation that never uses the checklist pays nothing.
+  todos: TodoSnapshot | null
 }
 
 /**
