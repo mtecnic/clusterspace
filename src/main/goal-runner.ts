@@ -1,6 +1,9 @@
 import { spawn } from 'child_process'
+import { readFile } from 'fs/promises'
+import { isAbsolute, join } from 'path'
 import type { BrowserWindow } from 'electron'
 import { v4 as uuidv4 } from 'uuid'
+import { evaluateJsonPredicate } from './json-predicate'
 import type { AIMessage } from '../shared/types'
 import { screenshotTargetFor, evictPriorScreenshots } from '../shared/vision-loop'
 import {
@@ -671,7 +674,7 @@ export class GoalRunner {
             })
             continue
           }
-          const verdict = await this.verifySuccessCriterion(runtime.checkpoint.successCriterion, claim.rationale, provider, apiKey ?? undefined)
+          const verdict = await this.verifySuccessCriterion(runtime.checkpoint.successCriterion, claim.rationale, provider, apiKey ?? undefined, runtime.checkpoint.policy)
           if (verdict.verified) {
             this.endGoal(runtime, 'completed', verdict.detail ?? claim.rationale)
             return
@@ -775,7 +778,7 @@ export class GoalRunner {
       case 'model_question':
         return `Model answers "yes" to: "${c.question}"`
       case 'json_predicate':
-        return `JSON predicate evaluates true: ${c.expr}`
+        return `${c.filePath}: ${c.expr}`
       case 'manual':
         return 'User manually marks complete'
     }
@@ -785,7 +788,8 @@ export class GoalRunner {
     c: SuccessCriterion,
     rationale: string,
     provider: ReturnType<AIStore['getProvider']>,
-    apiKey?: string
+    apiKey?: string,
+    policy?: GoalPolicy
   ): Promise<{ verified: boolean; detail?: string }> {
     switch (c.type) {
       case 'shell':
@@ -837,19 +841,27 @@ export class GoalRunner {
           return { verified: false, detail: `Verification call failed: ${(err as Error).message}` }
         }
       }
-      case 'json_predicate':
-        // No evaluator exists — safely sandboxing an arbitrary expression
-        // (without eval/Function, which would be a code-injection vector on
-        // model- or user-supplied text) is real scope, deferred. Silently
-        // returning verified:true here (the old behavior) was actively
-        // misleading: it looked like a real check ran and passed, when in
-        // fact NO check happened at all — worse than no criterion, since it
-        // hides that the goal can never actually fail this gate. Fail
-        // honestly instead and point at working alternatives.
-        return {
-          verified: false,
-          detail: `json_predicate verification is not implemented, so "${c.expr}" can never be checked — this goal cannot auto-complete via this criterion. Use "manual" (trust the model's claim), "model_question" (LLM judge), or "shell" (if expressible as a command) instead.`
+      case 'json_predicate': {
+        // filePath is resolved against policy.sandboxDir when set (same
+        // sandbox concept the risk-tier check already uses) — relative
+        // paths are joined onto it, absolute paths are used as-is.
+        const resolvedPath = isAbsolute(c.filePath) || !policy?.sandboxDir
+          ? c.filePath
+          : join(policy.sandboxDir, c.filePath)
+        let raw: string
+        try {
+          raw = await readFile(resolvedPath, 'utf-8')
+        } catch (err) {
+          return { verified: false, detail: `could not read "${resolvedPath}": ${(err as Error).message}` }
         }
+        let data: unknown
+        try {
+          data = JSON.parse(raw)
+        } catch (err) {
+          return { verified: false, detail: `"${resolvedPath}" is not valid JSON: ${(err as Error).message}` }
+        }
+        return evaluateJsonPredicate(data, c.expr)
+      }
     }
   }
 

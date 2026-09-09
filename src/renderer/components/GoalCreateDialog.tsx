@@ -27,6 +27,7 @@ export function GoalCreateDialog({ panes, onClose, onCreated }: GoalCreateDialog
   const [shellCommand, setShellCommand] = useState<string>('')
   const [shellExitCode, setShellExitCode] = useState<string>('0')
   const [modelQuestion, setModelQuestion] = useState<string>('')
+  const [jsonFilePath, setJsonFilePath] = useState<string>('')
   const [jsonExpr, setJsonExpr] = useState<string>('')
 
   const [risk, setRisk] = useState<GoalRisk>('write_local')
@@ -51,8 +52,9 @@ export function GoalCreateDialog({ panes, onClose, onCreated }: GoalCreateDialog
         return { type: 'model_question', question: modelQuestion.trim() }
       }
       case 'json_predicate': {
+        if (!jsonFilePath.trim()) return 'File path is required.'
         if (!jsonExpr.trim()) return 'JSON expression is required.'
-        return { type: 'json_predicate', expr: jsonExpr.trim() }
+        return { type: 'json_predicate', filePath: jsonFilePath.trim(), expr: jsonExpr.trim() }
       }
       case 'manual':
         return { type: 'manual' }
@@ -185,16 +187,26 @@ export function GoalCreateDialog({ panes, onClose, onCreated }: GoalCreateDialog
               <div className="space-y-2">
                 <input
                   type="text"
-                  value={jsonExpr}
-                  onChange={e => setJsonExpr(e.target.value)}
-                  placeholder="e.g. response.status === 200 && response.body.ok === true"
+                  value={jsonFilePath}
+                  onChange={e => setJsonFilePath(e.target.value)}
+                  placeholder="e.g. /tmp/build-result.json (relative paths resolve inside the sandbox dir below, if set)"
                   className="w-full px-3 py-2 bg-cs-surface border border-cs-border rounded text-cs-text text-sm font-mono"
                 />
-                <p className="text-[10px] text-cs-text-muted">⚠ No evaluator exists for this yet — the goal will never verify complete this way. Use shell, model_question, or manual instead.</p>
+                <input
+                  type="text"
+                  value={jsonExpr}
+                  onChange={e => setJsonExpr(e.target.value)}
+                  placeholder="e.g. status == &quot;complete&quot;  or  errorCount == 0  or  manifest.path exists"
+                  className="w-full px-3 py-2 bg-cs-surface border border-cs-border rounded text-cs-text text-sm font-mono"
+                />
+                <p className="text-[10px] text-cs-text-muted">Reads the file as JSON and checks one comparison: a dot path into the JSON, then one of == != &gt; &lt; &gt;= &lt;= exists notexists, then a literal (quote strings).</p>
               </div>
             )}
             {criterionType === 'manual' && (
-              <p className="text-xs text-cs-text-muted">You'll mark the goal complete yourself in the dashboard.</p>
+              <div className="space-y-2">
+                <p className="text-xs text-cs-text-muted">You'll mark the goal complete yourself in the dashboard.</p>
+                <p className="text-[10px] text-cs-text-muted">⚠ No independent check — the model's own claim is trusted outright. Prefer model_question if you want a second opinion before the goal is marked complete.</p>
+              </div>
             )}
           </div>
 

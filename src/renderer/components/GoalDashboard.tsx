@@ -12,18 +12,20 @@ interface GoalDashboardProps {
 }
 
 const STATUS_BADGE: Record<GoalStatus, string> = {
-  pending:   'bg-gray-600',
-  running:   'bg-blue-600 animate-pulse',
-  paused:    'bg-yellow-600',
-  completed: 'bg-green-600',
-  failed:    'bg-red-600',
-  aborted:   'bg-orange-600'
+  pending:     'bg-gray-600',
+  running:     'bg-blue-600 animate-pulse',
+  paused:      'bg-yellow-600',
+  interrupted: 'bg-amber-700',
+  completed:   'bg-green-600',
+  failed:      'bg-red-600',
+  aborted:     'bg-orange-600'
 }
 
 const STATUS_LABEL: Record<GoalStatus, string> = {
   pending: 'Pending',
   running: 'Running',
   paused: 'Paused',
+  interrupted: 'Interrupted',
   completed: 'Complete',
   failed: 'Failed',
   aborted: 'Aborted'
@@ -143,7 +145,7 @@ export function GoalDashboard({ isOpen, onClose, panes, initialSelectedGoalId }:
   )
 
   const filteredGoals = useMemo(() => {
-    if (filter === 'active') return goals.filter(g => g.status === 'running' || g.status === 'paused' || g.status === 'pending')
+    if (filter === 'active') return goals.filter(g => g.status === 'running' || g.status === 'paused' || g.status === 'pending' || g.status === 'interrupted')
     if (filter === 'finished') return goals.filter(g => g.status === 'completed' || g.status === 'failed' || g.status === 'aborted')
     return goals
   }, [goals, filter])
@@ -301,10 +303,11 @@ export function GoalDashboard({ isOpen, onClose, panes, initialSelectedGoalId }:
                           Pause
                         </button>
                       )}
-                      {selectedGoal.status === 'paused' && (
+                      {(selectedGoal.status === 'paused' || selectedGoal.status === 'interrupted') && (
                         <button
                           onClick={() => handleResume(selectedGoal.id)}
                           className="px-3 py-1 text-xs bg-blue-600 hover:bg-blue-500 text-white rounded transition-colors"
+                          title={selectedGoal.status === 'interrupted' ? 'Reload prior context and continue after the app restart' : undefined}
                         >
                           Resume
                         </button>
@@ -407,7 +410,7 @@ function humanizeCriterion(g: GoalCheckpoint): string {
   switch (c.type) {
     case 'shell':         return `shell "${c.command}" exits ${c.exitCode ?? 0}`
     case 'model_question':return `model says "yes" to: ${c.question}`
-    case 'json_predicate':return `json predicate ${c.expr}`
+    case 'json_predicate':return `${c.filePath}: ${c.expr}`
     case 'manual':        return 'manual completion'
   }
 }
