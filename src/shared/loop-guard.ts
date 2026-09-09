@@ -120,6 +120,22 @@ export interface LoopGuardState {
   sameResultStreak: Record<string, number>
   /** consecutive tool-call batches with no mutating action — see checkActionStarvation */
   noActionStreak: number
+  /** "tool:sorted-args-json" -> preview of the last successful result THIS
+   *  exact call produced — narrower than lastResultPreviewByTool (which
+   *  ignores args entirely). See signatureResultRepeated's doc comment for
+   *  why this exists as its own map. */
+  lastResultPreviewBySignature: Record<string, string>
+  /** "tool:sorted-args-json" -> whether this exact call's most recent
+   *  dispatch returned the SAME result as the dispatch before it. Absent
+   *  (undefined) until a signature has been dispatched at least twice —
+   *  deliberately not "assumed stuck" on a single occurrence. Used to gate
+   *  both the exact-duplicate guard and the alternating-cycle guard on
+   *  actual evidence of stagnation, not just repeated call shape — see
+   *  checkBeforeCall's use of this for the incident that motivated it: an
+   *  alternating A/B/A/B pattern got blocked as a "cycle" when B had only
+   *  run once and returned real (different-from-A) content — the guard had
+   *  no way to know B wasn't making progress, because it never looked. */
+  signatureResultRepeated: Record<string, boolean>
 }
 
 export function createLoopGuardState(): LoopGuardState {
@@ -132,7 +148,9 @@ export function createLoopGuardState(): LoopGuardState {
     recentSignatures: [],
     lastResultPreviewByTool: {},
     sameResultStreak: {},
-    noActionStreak: 0
+    noActionStreak: 0,
+    lastResultPreviewBySignature: {},
+    signatureResultRepeated: {}
   }
 }
 
@@ -226,7 +244,15 @@ export function checkBeforeCall(state: LoopGuardState, toolName: string, args: R
   state.callSignatureCounts[sig] = count
   const eligibleForElevation = state.lastOutcomeBySignature[sig] === true && !FIXED_TARGET_TOOLS.has(toolName)
   const limit = eligibleForElevation ? SUCCEEDING_DUPLICATE_CALL_LIMIT : DUPLICATE_CALL_LIMIT
-  if (count > limit) {
+  // Direct evidence beats the heuristic ceiling: if this exact call's last
+  // two dispatches produced DIFFERENT results, it's demonstrably still
+  // returning new information every time (e.g. a poll of live state) —
+  // don't block no matter how many times it's repeated. Only kicks in once
+  // we have two data points (signatureResultRepeated[sig] === false);
+  // undefined (never repeated, or only ever seen once) falls through to the
+  // normal count-based limit as before.
+  const provingProgress = state.signatureResultRepeated[sig] === false
+  if (count > limit && !provingProgress) {
     state.totalBlocks++
     return {
       reason: `Identical call to ${toolName} with the same arguments has now been made ${count} times. Stop repeating it — use the result you already have, or try a genuinely different approach.`,
@@ -240,10 +266,23 @@ export function checkBeforeCall(state: LoopGuardState, toolName: string, args: R
   if (state.recentSignatures.length > RECENT_SIGNATURE_WINDOW) state.recentSignatures.shift()
   const period = detectCycle(state.recentSignatures)
   if (period !== null) {
-    state.totalBlocks++
-    return {
-      reason: `You're alternating between ${period} different calls without making progress (a cycle, not genuinely different approaches). Stop and try something structurally different — a different tool, a different strategy to find the target, or ask the user for guidance.`,
-      haltLoop: state.totalBlocks >= HALT_AFTER_BLOCKS
+    // Signature shape repeating isn't enough on its own — require that
+    // EVERY distinct call in the alternation has already independently
+    // proven it returns the same result every time it's dispatched. A call
+    // that's only run once so far (or whose last repeat returned something
+    // new) has given no evidence it's contributing to a stuck loop, so
+    // don't punish the pattern yet. This is exactly what went wrong in
+    // practice: A/B/A/B got blocked on B's SECOND attempt when B had only
+    // been dispatched once and returned genuinely different content than A
+    // — the guard had no way to know that without checking, so it didn't.
+    const cycleSignatures = new Set(state.recentSignatures.slice(-period * 2, -period))
+    const allProvenStuck = [...cycleSignatures].every(s => state.signatureResultRepeated[s] === true)
+    if (allProvenStuck) {
+      state.totalBlocks++
+      return {
+        reason: `You're alternating between ${period} different calls without making progress (a cycle, not genuinely different approaches). Stop and try something structurally different — a different tool, a different strategy to find the target, or ask the user for guidance.`,
+        haltLoop: state.totalBlocks >= HALT_AFTER_BLOCKS
+      }
     }
   }
   return null
@@ -266,6 +305,22 @@ export function recordOutcome(
   }
   if (ok) {
     state.consecutiveFailures[toolName] = 0
+
+    // Per-exact-signature result tracking, independent of the per-tool
+    // sameResultStreak below — this is what checkBeforeCall's exact-
+    // duplicate and cycle guards use to tell "genuinely stuck" apart from
+    // "looks repetitive but is still returning new information." Not
+    // exempted for POLLING_TOOLS: an unchanging poll result is exactly the
+    // "no new info" case those guards should still be able to act on if a
+    // model gets stuck polling something that will never change.
+    if (context?.args && context?.resultPreview !== undefined) {
+      const sig = signatureFor(toolName, context.args)
+      const prevPreview = state.lastResultPreviewBySignature[sig]
+      if (prevPreview !== undefined) {
+        state.signatureResultRepeated[sig] = prevPreview === context.resultPreview
+      }
+      state.lastResultPreviewBySignature[sig] = context.resultPreview
+    }
 
     if (context?.resultPreview !== undefined && !POLLING_TOOLS.has(toolName)) {
       const preview = context.resultPreview
