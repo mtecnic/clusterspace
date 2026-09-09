@@ -218,12 +218,24 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
 
       // Handle tool calls - pass the assistant message to include in conversation
       if (message.toolCalls && message.toolCalls.length > 0) {
+        stallRetryCountRef.current = 0
         await handleToolCalls(message.toolCalls, message)
       } else if (message.stallReason) {
         // The turn ended with no actionable tool call for a diagnosable reason.
-        // Surface it instead of letting the auto-loop stop silently (which looks
-        // like a stall that never reaches max turns).
-        setError(`Agent stalled: ${message.stallReason}`)
+        // A handful of these are recoverable with a plain nudge (malformed
+        // tool-call JSON, a tool call written as plain text) rather than
+        // dead-stopping the auto-loop and leaving the user to notice the
+        // error banner and re-prompt by hand — see retryAfterStall's doc
+        // comment for which reasons qualify and why the others don't.
+        const recoverable = RECOVERABLE_STALL_PATTERNS.some(p => p.test(message.stallReason!))
+        if (recoverable && stallRetryCountRef.current < MAX_STALL_RETRIES) {
+          retryAfterStall(message.stallReason)
+        } else {
+          stallRetryCountRef.current = 0
+          setError(`Agent stalled: ${message.stallReason}`)
+        }
+      } else {
+        stallRetryCountRef.current = 0
       }
       // else: normal completion — the model answered with text. Nothing to do.
     })
@@ -329,6 +341,38 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
 
     finalTurnRef.current = true
     finalTurnFallbackRef.current = reasonForBanner ?? reasonForModel
+    const placeholder: AIMessage = { id: uuidv4(), role: 'assistant', content: '', timestamp: Date.now() }
+    setMessages(prev => [...prev, placeholder])
+    setIsStreaming(true)
+    streamContentRef.current = ''
+    window.electronAPI.aiStreamMessage(allMessages)
+  }, [])
+
+  // A handful of stall reasons (ai-manager.ts's stallReason branches) are
+  // recoverable with a plain nudge rather than a hard stop: "malformed tool
+  // call arguments" and "wrote a tool call as plain text" both mean the
+  // model had a real next step in mind (often visible right in its own
+  // narration, e.g. "let me compile the digest") and just fumbled the
+  // syntax getting there — asking it to try again usually just works,
+  // unlike "truncated at max_tokens" or "empty response," which are config
+  // problems a retry can't fix. Unlike requestFinalTurnAndStop, this does
+  // NOT set finalTurnRef — the retry is a normal continuation turn, so if
+  // it comes back with valid tool calls this time, they get dispatched as
+  // usual instead of being discarded.
+  const RECOVERABLE_STALL_PATTERNS = [/arguments were malformed/i, /wrote a tool call as plain text/i]
+  const MAX_STALL_RETRIES = 2
+  const stallRetryCountRef = useRef(0)
+
+  const retryAfterStall = useCallback((stallReason: string) => {
+    stallRetryCountRef.current++
+    const nudge: AIMessage = {
+      id: uuidv4(),
+      role: 'system',
+      content: `${stallReason} Try again: if you don't actually need another tool call, just answer directly in plain text; otherwise reissue the same call with valid, well-formed arguments.`,
+      timestamp: Date.now()
+    }
+    setMessages(prev => [...prev, nudge])
+    const allMessages = [...stripStaleScreenshots(messagesRef.current), nudge]
     const placeholder: AIMessage = { id: uuidv4(), role: 'assistant', content: '', timestamp: Date.now() }
     setMessages(prev => [...prev, placeholder])
     setIsStreaming(true)
@@ -630,6 +674,7 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
 
     setError(null)
     toolRetryCountRef.current = 0 // Reset retry counter on new message
+    stallRetryCountRef.current = 0
     guardStateRef.current = createLoopGuardState()
     cancelRequestedRef.current = false
     autoTurnCountRef.current = 0  // Reset auto turn counter on new message
