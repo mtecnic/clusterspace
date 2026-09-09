@@ -81,6 +81,7 @@ Most terminal apps give you tabs and split panes. ClusterSpace goes further:
 - "Disable App Mouse" toggle per pane — native drag-select works without modifiers even when tmux/vim mouse mode is on
 - Smart clipboard: `Ctrl+Shift+C` copies, `Ctrl+V` pastes with bracketed-paste, `Ctrl+C` always SIGINTs
 - Auto-detect SSH password prompt and inject stored credentials — works whether you're at the keyboard or connecting remotely (see [Remote Web Access](#-remote-web-access))
+- WCAG-AA minimum contrast enforced on rendered output — the classic unreadable `ls`/dircolors combos (blue-on-green "other-writable directory" highlighting, etc.) get auto-corrected instead of staying illegible
 
 ### 🌐 Browser Panes
 - Full Chromium webview with back/forward/reload, address bar, bookmarks, history, downloads, find-in-page
@@ -91,6 +92,12 @@ Most terminal apps give you tabs and split panes. ClusterSpace goes further:
 - Custom user-agent presented to avoid bot-detection on common services
 - Saved logins with per-origin matching (Electron `safeStorage` = OS keychain; passwords never cross the renderer boundary except for the explicit "Show password" action)
 - "Fill saved login" in the pane overflow menu — injects credentials into focused inputs without auto-submit
+- HTTP Basic/Digest auth prompt and certificate-warning interstitial (with a per-site "proceed anyway" bypass remembered for the session) — sites that used to just silently fail to load now behave like a real browser
+- Downloads: pause/resume mid-transfer, optional "ask where to save" per download (off by default)
+- Zoom (`Ctrl+`/`Ctrl-`/`Ctrl+0`), persisted per tab across restarts
+- Print (`Ctrl+P`) and inline PDF viewing — no more forced downloads for a page you just wanted to read
+- In-page video fullscreen (YouTube's fullscreen button, etc.) fills the pane and restores the grid on exit
+- Screen/window sharing for Google Meet, Zoom-web, and Discord-web calls — thumbnail picker for what to share
 
 ### 🤖 AI Co-Pilot (optional)
 - Bring-your-own provider: Claude, OpenAI, Ollama, anything OpenAI-compatible
@@ -103,13 +110,17 @@ Most terminal apps give you tabs and split panes. ClusterSpace goes further:
 
 ### 🎯 Autonomous Goals
 - Hand a pane a goal instead of a single instruction — the agent runs an unbounded read → act → verify loop (with a wall-clock safety cap) until it can prove the goal is actually done, not just until it stops talking
-- Built-in loop-guard and drift detection catch an agent repeating itself or wandering off the original ask
-- **Risk-tiered approval policy** — actions are classified `read_only` → `write_local` → `network_get` → `network_write` → `spends_money`, and anything past your comfort tier pauses for a human nod before it executes
+- **Loop-guard** catches an agent stuck in place from several distinct angles: exact duplicate calls, an alternating cycle between two approaches, a call whose output stops changing despite different arguments each time (e.g. endlessly widening a slice bound past where a string ends), and pure information-gathering with zero actual actions taken — each gets a targeted nudge before it burns the whole turn budget going nowhere
+- System-prompt guidance for open-ended/exploratory tasks (games, unfamiliar apps): plan before acting, prefer what's on screen over reverse-engineering source, don't bypass real interaction via an app's exposed debug internals
+- **Risk-tiered approval policy** — actions are classified `read_only` → `write_local` → `network_get` → `network_write` → `spends_money`, and anything past your comfort tier pauses for a human nod before it executes; concurrent approval requests queue instead of one clobbering another
 - Live **Goal Dashboard** (`Ctrl+Shift+G`) to create, monitor, and pause goals with status and elapsed time
 
 ### 🐝 Multi-Agent Orchestration
 - Assign different roles/tasks to agents running in different panes and let them coordinate — share context, wait on each other, report task completion or failure
 - Live **Fleet Dashboard** showing every active agent's status (idle/working/blocked/complete/error) as a card with progress — the screenshot at the top of this README is this feature in action, 8 agents deep
+- **Fleet Composer** launches multiple agents across panes from one form instead of configuring each pane by hand
+- Group sibling goals and bulk **Pause/Resume/Abort** them together, or one-click **Retry** a failed one
+- **Steer** a running agent with a live nudge mid-task, without aborting and restarting it
 - Built for the "one operator, many agents" workflow, not one chat window per task
 
 ### 📡 Remote Web Access
@@ -328,7 +339,9 @@ resources/remote-client/              # Static web client served by the remote-a
 Active development. Recent landed work:
 
 - ✅ Autonomous Goal Runner with risk-tiered approval policy + Goal Dashboard
-- ✅ Multi-agent orchestration + Fleet Dashboard
+- ✅ Multi-agent orchestration + Fleet Dashboard, now with grouping, bulk controls, and live steering
+- ✅ Loop-guard hardening: stagnant-result detection, action-starvation nudges, and open-ended-task planning guidance
+- ✅ Browser gap-closure: HTTP auth + cert-warning prompts, download pause/resume, zoom, print, inline PDF, in-page fullscreen, screen/window sharing
 - ✅ Remote web access (port 4444): terminal + browser pane control from any browser
 - ✅ Browser-pane hardening: real OAuth popups, real new tabs, idle-tab memory discard, full context menu
 - ✅ PTY-per-tab architecture (each terminal tab is its own SSH connection)
