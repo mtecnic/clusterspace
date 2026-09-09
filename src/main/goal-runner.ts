@@ -277,14 +277,25 @@ export class GoalRunner {
 
   /** Actually kicks off a checkpoint's loop — called either immediately
    *  from start() or later from promoteFromQueue() once a slot/dependency
-   *  frees up. Resolves apiKey fresh rather than threading it through the
-   *  queue, since it's a cheap lookup and avoids holding a secret in memory
-   *  longer than necessary for a goal that might sit queued a while. */
+   *  frees up, or from resume() rebuilding a runtime for a checkpoint whose
+   *  process died. Resolves apiKey fresh rather than threading it through
+   *  the queue, since it's a cheap lookup and avoids holding a secret in
+   *  memory longer than necessary for a goal that might sit queued a while.
+   *
+   *  `alreadySyncedMessageCount` defaults to the full `conversationMessages`
+   *  length (nothing new to write back) — start()/promoteFromQueue() both
+   *  pass messages loaded verbatim from the store, so that default is
+   *  correct for them. resume() passes a strictly lower count: it appends
+   *  one new, not-yet-persisted marker message on top of what it loaded,
+   *  and needs that one message to actually get synced back on the next
+   *  loop iteration rather than being silently treated as already saved. */
   private beginRun(
     checkpoint: GoalCheckpoint,
     input: StartGoalInput,
     provider: ReturnType<AIStore['getProvider']>,
-    conversationMessages: AIMessage[]
+    conversationMessages: AIMessage[],
+    alreadySyncedMessageCount: number = conversationMessages.length,
+    eventType: 'started' | 'resumed' = 'started'
   ): void {
     const apiKey = this.aiStore.getApiKey(checkpoint.providerId!)
     const runtime: RuntimeGoal = {
@@ -301,12 +312,12 @@ export class GoalRunner {
       pendingVerifyNudge: false,
       verifyNudgesGiven: 0,
       todoNudgesGiven: 0,
-      lastSyncedMessageIndex: conversationMessages.length
+      lastSyncedMessageIndex: alreadySyncedMessageCount
     }
     this.running.set(checkpoint.id, runtime)
     this.goalStore.update(checkpoint.id, { status: 'running' })
     this.agentStore.updateAgentStatus(input.paneId, 'working')
-    this.emitEvent({ type: 'started', goalId: checkpoint.id })
+    this.emitEvent({ type: eventType, goalId: checkpoint.id })
 
     // Kick off the loop. Don't await — caller already returned goalId so it
     // can poll status / receive events.
@@ -457,7 +468,12 @@ export class GoalRunner {
       personaId: checkpoint.personaId,
       fleetId: checkpoint.fleetId
     }
-    this.beginRun(checkpoint, input, provider, [...priorMessages, resumeMarker])
+    // priorMessages.length, not the post-append length: resumeMarker is
+    // brand new and hasn't been written to ai-memory-store yet, so the next
+    // loop iteration's sync (runLoop's lastSyncedMessageIndex check) needs
+    // to see it as unsynced and persist it — otherwise it's visible to the
+    // model this run but silently missing from the stored transcript.
+    this.beginRun(checkpoint, input, provider, [...priorMessages, resumeMarker], priorMessages.length, 'resumed')
     return true
   }
 

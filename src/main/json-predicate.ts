@@ -55,14 +55,20 @@ export function evaluateJsonPredicate(data: unknown, expr: string): JsonPredicat
     return { verified, detail: `${path} ${op}: ${found ? 'present' : 'absent'} in ${JSON.stringify(data).slice(0, 200)}` }
   }
 
-  // Comparison ops — longest-first so ">=" isn't mis-split as ">" + "=".
-  const compareOps: Operator[] = ['>=', '<=', '==', '!=', '>', '<']
-  for (const op of compareOps) {
-    const idx = trimmed.indexOf(op)
-    if (idx === -1) continue
-    const path = trimmed.slice(0, idx).trim()
-    const literalText = trimmed.slice(idx + op.length).trim()
-    if (!path || !literalText) continue
+  // Comparison ops — matched as the token immediately after <path>, not via
+  // an unanchored scan across the whole expression. An unanchored
+  // `indexOf(op)` misparses a literal that itself contains an operator-like
+  // substring — e.g. `data.op == ">="` would find the `>=` sitting inside
+  // the quoted literal before it ever finds the real `==`. Anchoring the
+  // operator to right after the first whitespace-delimited token (the path)
+  // means only a genuine operator token in that position can match; `>=`/
+  // `<=` are listed before `>`/`<` in the alternation so a real `>=` isn't
+  // truncated to `>` plus a stray `=`.
+  const compareMatch = trimmed.match(/^(\S+)\s+(>=|<=|==|!=|>|<)\s+(.+)$/)
+  if (compareMatch) {
+    const [, path, opText, rawLiteral] = compareMatch
+    const op = opText as Operator
+    const literalText = rawLiteral.trim()
 
     let literal: unknown
     try {
