@@ -30,7 +30,7 @@ import { requestScreenShareSource, resolveScreenShare } from './browser-screen-s
 import { classifyError } from '../shared/ai-error-classifier'
 import { resolvePaneControlAck, sendPaneControl } from './pane-control-ack'
 import { detachCdpIfAttached } from './cdp-helpers'
-import { setWorkspaceStoreForNotify } from './notify'
+import { setWorkspaceStoreForNotify, notify } from './notify'
 import { RecipeStore } from './browser-recipes'
 import { RemoteAccessStore } from './remote-access-store'
 import { RemoteServer } from './remote-server/server'
@@ -157,6 +157,24 @@ function createWindow() {
   agentStore = new AgentStore()
   orchestrationStore = new OrchestrationStore()
   goalStore = new GoalStore()
+
+  // Startup reconciliation: anything still 'running' means the previous
+  // process died mid-goal (crash/quit) rather than stopping cleanly — its
+  // in-memory RuntimeGoal is gone, so it's reclassified 'interrupted'
+  // (distinct from 'paused', a clean user-requested stop) rather than left
+  // stuck forever. Deliberately no auto-resume here: goals can spend money
+  // or take other consequential actions, and resuming the instant the app
+  // boots with no human look is the one place that would break this app's
+  // existing "explicit click for anything consequential" pattern. One
+  // notification, then GoalDashboard surfaces a Resume button.
+  const orphanedGoals = goalStore.reconcileOrphaned()
+  if (orphanedGoals.length > 0) {
+    for (const g of orphanedGoals) agentStore.updateAgentStatus(g.paneId, 'paused')
+    notify(
+      'Goals interrupted',
+      `${orphanedGoals.length} goal${orphanedGoals.length === 1 ? '' : 's'} interrupted by a restart — open Goal Runner to resume.`
+    )
+  }
   configLoader = new ConfigLoader()
   browserStore = new BrowserStore()
   browserCredentialsStore = new BrowserCredentialsStore()

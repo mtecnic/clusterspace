@@ -105,6 +105,14 @@ interface RuntimeGoal {
   /** Bounded "you still have open checklist items" nudge on claim_complete —
    *  see MAX_TODO_NUDGES. */
   todoNudgesGiven: number
+  /** How many of runLoop's local `messages` have already been written back
+   *  to ai-memory-store (see the sync call at the bottom of the loop body).
+   *  Without this, conversationId is nominally linked but the persisted
+   *  conversation only ever has what existed when the goal started — so a
+   *  resume after a crash had nothing real to resume from. Initialized to
+   *  the length of the messages already loaded FROM the store (so those
+   *  aren't re-written), not to 0. */
+  lastSyncedMessageIndex: number
 }
 
 // A goal that's been checkpointed (visible in GoalDashboard as 'pending')
@@ -292,7 +300,8 @@ export class GoalRunner {
       guard: createLoopGuardState(),
       pendingVerifyNudge: false,
       verifyNudgesGiven: 0,
-      todoNudgesGiven: 0
+      todoNudgesGiven: 0,
+      lastSyncedMessageIndex: conversationMessages.length
     }
     this.running.set(checkpoint.id, runtime)
     this.goalStore.update(checkpoint.id, { status: 'running' })
@@ -395,11 +404,60 @@ export class GoalRunner {
 
   resume(goalId: string): boolean {
     const r = this.running.get(goalId)
-    if (!r || r.state.kind !== 'running' || !r.state.pauseRequested) return false
-    r.state.pauseRequested = false
-    this.goalStore.update(goalId, { status: 'running' })
-    this.agentStore.updateAgentStatus(r.checkpoint.paneId, 'working')
-    this.emitEvent({ type: 'resumed', goalId })
+    if (r) {
+      if (r.state.kind !== 'running' || !r.state.pauseRequested) return false
+      r.state.pauseRequested = false
+      this.goalStore.update(goalId, { status: 'running' })
+      this.agentStore.updateAgentStatus(r.checkpoint.paneId, 'working')
+      this.emitEvent({ type: 'resumed', goalId })
+      return true
+    }
+
+    // No live runtime for this id — either the process restarted
+    // (checkpoint status 'interrupted', see reconcileOrphaned) or this
+    // goal was paused in a now-dead process. Rebuild a fresh RuntimeGoal
+    // from what's persisted, via the same beginRun() path start() uses,
+    // rather than silently no-op'ing — which is exactly what this method
+    // did before this existed, leaving GoalDashboard's Resume button a
+    // dead click for anything outliving the process that created it.
+    const checkpoint = this.goalStore.get(goalId)
+    if (!checkpoint || (checkpoint.status !== 'paused' && checkpoint.status !== 'interrupted')) return false
+    if (!checkpoint.providerId) return false
+    const provider = this.aiStore.getProvider(checkpoint.providerId)
+    if (!provider) return false
+
+    // Exact-id lookup, deliberately NOT getOrCreateConversation — that has
+    // a 24h reuse window keyed on (providerId, workspaceId, paneId) and
+    // would silently hand back a DIFFERENT (or freshly empty) conversation
+    // for anything older than a day. That's exactly the silent-wrong-
+    // context failure this resume path exists to avoid: better to resume
+    // with an empty transcript (still correct, just cold) than a
+    // plausible-looking but unrelated one.
+    const conversation = this.aiMemoryStore.getConversation(checkpoint.conversationId)
+    const priorMessages: AIMessage[] = conversation?.messages ?? []
+    const resumeMarker: AIMessage = {
+      id: uuidv4(),
+      role: 'system',
+      content: `Resumed after an app restart at step ${checkpoint.step} — prior conversation restored.`,
+      timestamp: Date.now()
+    }
+
+    // wallClockMs/maxSteps/criticIntervalSteps/criticProviderId live only
+    // on StartGoalInput/RuntimeGoal, never persisted onto GoalCheckpoint —
+    // a resumed goal gets fresh defaults for these (a full new budget from
+    // the resume moment), not a continuation of whatever was left before
+    // the interruption. Arguably the right default (interrupted through no
+    // fault of its own budget), stated here rather than silently inherited.
+    const input: StartGoalInput = {
+      paneId: checkpoint.paneId,
+      goal: checkpoint.goal,
+      successCriterion: checkpoint.successCriterion,
+      policy: checkpoint.policy,
+      providerId: checkpoint.providerId,
+      personaId: checkpoint.personaId,
+      fleetId: checkpoint.fleetId
+    }
+    this.beginRun(checkpoint, input, provider, [...priorMessages, resumeMarker])
     return true
   }
 
@@ -700,6 +758,17 @@ export class GoalRunner {
         ) {
           runtime.stepsSinceLastCritic = 0
           await this.runCritic(runtime, provider, apiKey ?? undefined, messages)
+        }
+
+        // Persist this round's new messages so conversationId actually has
+        // real content to resume from if the app dies before this goal
+        // ends cleanly — see lastSyncedMessageIndex's doc comment. Placed
+        // last in the loop body so it captures everything this round
+        // pushed (the assistant turn, tool results, any nudges, the
+        // critic's injection) in one call.
+        if (messages.length > runtime.lastSyncedMessageIndex) {
+          this.aiMemoryStore.addMessages(runtime.checkpoint.conversationId, messages.slice(runtime.lastSyncedMessageIndex))
+          runtime.lastSyncedMessageIndex = messages.length
         }
       }
     } catch (err) {
