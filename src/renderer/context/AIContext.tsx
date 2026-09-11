@@ -474,7 +474,22 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
     }
     for (const { toolCall, block } of planned) {
       if (!block) continue
-      hasErrors = true
+      // Deliberately NOT hasErrors = true here. A blocked call never
+      // dispatched — the harness refused it, not the tool. It's already
+      // governed by its own dedicated mechanism (block.haltLoop below,
+      // fed by loop-guard's own totalBlocks/HALT_AFTER_BLOCKS counter,
+      // which has a specific, useful message: "repeated duplicate tool
+      // calls exceeded the safety limit"). Counting it toward hasErrors
+      // too double-dips it into the generic MAX_TOOL_RETRIES(3) breaker
+      // below, which reaches its threshold (3 consecutive "error"
+      // batches) well before loop-guard's own HALT_AFTER_BLOCKS(5) does —
+      // so the model ends up killed by the generic, uninformative
+      // "tool failed after 3 attempts. See the explanation below" message
+      // (with nothing ever below it) instead of the specific one that
+      // actually explains what happened. Observed for real: a model stuck
+      // re-running an identical browser_execute_js call got guard-blocked
+      // 3 times in a row (attempts 4, 5, 6 of the same call — still short
+      // of HALT_AFTER_BLOCKS) and the run died on the wrong breaker.
       toolResults.push({
         id: uuidv4(),
         role: 'tool',
