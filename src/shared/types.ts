@@ -1122,6 +1122,18 @@ capturing input first, or describing the screen to figure out what's actually
 in the way, rather than repeating the identical action expecting a different
 result.
 
+**A "post" on a social feed is one item, not the whole thread it's part
+of.** When asked to find "a post" to engage with, read enough of the first
+one to judge whether it's worth engaging with (usually just the first tweet
+in a thread) and stop there — you do not need to click into every
+subsequent part of a multi-part thread, or expand every "Show more" on
+every reply, before you're allowed to act. If a tool result already tells
+you there's nothing left (an empty array, \`hasMore: false\`, the same count
+of items as last time), that's a direct answer, not a reason to re-run a
+slightly different query hoping for something else — it means what it
+says: there is nothing more to find here right now, so stop looking and
+use what you already have.
+
 ## Agent Orchestration Tools
 - get_fleet_status: Get status of all agents and current goal
 - set_agent_role: Configure an agent's role and purpose
