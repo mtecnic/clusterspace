@@ -10,6 +10,33 @@ import type { PtyManager } from '../pty-manager'
 import type { WorkspaceStore } from '../workspace-store'
 import type { PaneConfig } from '../../shared/types'
 
+// Terminal tabs default to a synthetic single 'tab-initial' entry for a pane
+// that predates the multi-tab terminal feature (no terminalTabs array yet).
+function terminalTabList(pane: PaneConfig): NonNullable<PaneConfig['terminalTabs']> {
+  return pane.terminalTabs && pane.terminalTabs.length > 0
+    ? pane.terminalTabs
+    : [{ id: 'tab-initial', sessionName: pane.tmuxSessionName ?? '' }]
+}
+
+// Single source of truth for "which tab does this terminal pane's omitted
+// tab_id actually mean" — used both by list_panes (below, so its reported
+// activeTabId/connected status is authoritative) and by the terminal tools'
+// tab_id-omitted fallback (tab-util.ts's resolveTerminalPtyId). They used to
+// disagree: the terminal tools defaulted to the bare pane id (valid only
+// for a pane whose original 'tab-initial' tab still exists), while any pane
+// whose first tab was renamed/replaced — common, and true of every pane a
+// live 200+-pane session accumulates — has ALL its tabs, including the
+// active one, registered under an explicit `${paneId}:${tabId}` key. Result:
+// list_panes correctly reported the pane as fully connected, but
+// read_terminal_output/write_to_terminal with no tab_id failed every time,
+// then reconnect_pane (the error's own suggested fix) failed too — for a
+// live, working pane the model just wasn't told the right tab id for.
+export function resolveActiveTerminalTabId(pane: PaneConfig): string {
+  const list = terminalTabList(pane)
+  const activeTabId = pane.activeTerminalTabId
+  return activeTabId && list.some(t => t.id === activeTabId) ? activeTabId : list[0].id
+}
+
 // Build the tab inventory for a pane (tmux tabs for terminals, browser tabs for
 // browser panes), including per-tab connection status so the agent knows which
 // tabs are live vs. need reconnecting.
@@ -35,11 +62,8 @@ function buildPaneTabs(pane: PaneConfig, ptyManager: PtyManager): { tabs: AIPane
     return { tabs, activeTabId: activeTabId ?? list[0].id }
   }
   // terminal
-  const activeTabId = pane.activeTerminalTabId
-  const list = pane.terminalTabs && pane.terminalTabs.length > 0
-    ? pane.terminalTabs
-    : [{ id: 'tab-initial', sessionName: pane.tmuxSessionName ?? '' }]
-  const resolvedActive = activeTabId && list.some(t => t.id === activeTabId) ? activeTabId : list[0].id
+  const list = terminalTabList(pane)
+  const resolvedActive = resolveActiveTerminalTabId(pane)
   const tabs: AIPaneTab[] = list.map(t => ({
     id: t.id,
     label: (t as { label?: string }).label || (t as { sessionName?: string }).sessionName || t.id,
@@ -83,6 +107,20 @@ export function getPaneListForActiveWorkspace(workspaceStore: WorkspaceStore, pt
       activeTabId
     }
   })
+}
+
+/** Workspace-scoped version of resolveActiveTerminalTabId for callers (the
+ *  terminal tools in terminal.ts) that only have a paneId string, not the
+ *  PaneConfig object list_panes already has in hand. Scoped to the active
+ *  workspace, matching list_panes'/every terminal tool's own scoping —
+ *  undefined if the pane doesn't exist there. */
+export function findActiveTerminalTabId(paneId: string, workspaceStore: WorkspaceStore): string | undefined {
+  const settings = workspaceStore.getSettings()
+  if (!settings.activeWorkspaceId) return undefined
+  const workspace = workspaceStore.get(settings.activeWorkspaceId)
+  const pane = workspace?.panes.find(p => p.id === paneId)
+  if (!pane) return undefined
+  return resolveActiveTerminalTabId(pane)
 }
 
 export function registerPaneTools(): void {

@@ -1,7 +1,40 @@
 import type { PtyManager } from '../pty-manager'
+import type { WorkspaceStore } from '../workspace-store'
 import type { PagedTextResult } from '../../shared/types'
 import { toolRegistry } from './registry'
 import { resolvePtyKey } from './tab-util'
+import { findActiveTerminalTabId } from './pane'
+
+/**
+ * Resolves the live PTY id for a terminal tool call. An explicit tab_id
+ * always wins. When omitted, every terminal tool's own schema says this
+ * means "the pane's active/initial tab" — but a bare-pane-id lookup only
+ * actually hits a live PTY for a pane whose original 'tab-initial' tab
+ * still exists. Any pane whose first tab was renamed or replaced (common —
+ * true of most panes in a long-lived workspace) has every tab, including
+ * the active one, registered under an explicit `${paneId}:${tabId}` key
+ * instead, so the bare-id lookup fails even though list_panes reports the
+ * pane as fully connected. Observed for real: 4 of 6 terminal panes in one
+ * session failed read_terminal_output this way, then failed reconnect_pane
+ * too (that error's own suggested fix) for the same underlying reason,
+ * burning the run's entire failure budget on panes that were never
+ * actually broken. Falling back to the pane's real activeTerminalTabId
+ * (list_panes' own source of truth — see pane.ts's
+ * resolveActiveTerminalTabId) closes the gap instead of failing a live
+ * pane just because the caller didn't know a tab_id was required.
+ */
+function resolveTerminalPtyId(
+  paneId: string,
+  tabId: string | undefined,
+  ptyManager: PtyManager,
+  workspaceStore: WorkspaceStore
+): string | undefined {
+  const direct = ptyManager.getPtyIdForPane(resolvePtyKey(paneId, tabId))
+  if (direct || tabId) return direct
+  const activeTabId = findActiveTerminalTabId(paneId, workspaceStore)
+  if (!activeTabId) return undefined
+  return ptyManager.getPtyIdForPane(resolvePtyKey(paneId, activeTabId))
+}
 
 // Shared schema fragment: every terminal tool accepts an optional tab_id so the
 // agent can address a specific tmux tab within a pane (from list_panes). Absent
@@ -162,11 +195,11 @@ export function registerTerminalTools(): void {
       },
       required: ['pane_id', 'text']
     },
-    run: async (args, { ptyManager }) => {
+    run: async (args, { ptyManager, workspaceStore }) => {
       const pressEnter = args.press_enter !== false
       const waitTimeoutMs = args.wait_timeout_ms ?? 3000
       const terminalType: TerminalType = args.terminal_type ?? 'shell'
-      const ptyId = ptyManager.getPtyIdForPane(resolvePtyKey(args.pane_id, args.tab_id))
+      const ptyId = resolveTerminalPtyId(args.pane_id, args.tab_id, ptyManager, workspaceStore)
       if (!ptyId) throw new Error(`No terminal found for pane ${args.pane_id}${args.tab_id ? ` tab ${args.tab_id}` : ''}. The session may have disconnected — call reconnect_pane to re-establish it, then retry.`)
 
       const resolvedKey = resolveKeyName(args.text)
@@ -195,9 +228,9 @@ export function registerTerminalTools(): void {
       },
       required: ['pane_id']
     },
-    run: async ({ pane_id, tab_id, lines, cursor }, { ptyManager }) => {
+    run: async ({ pane_id, tab_id, lines, cursor }, { ptyManager, workspaceStore }) => {
       const cappedLines = Math.min(lines ?? 50, 500)
-      const ptyId = ptyManager.getPtyIdForPane(resolvePtyKey(pane_id, tab_id))
+      const ptyId = resolveTerminalPtyId(pane_id, tab_id, ptyManager, workspaceStore)
       if (!ptyId) throw new Error(`No terminal found for pane ${pane_id}${tab_id ? ` tab ${tab_id}` : ''}. The session may have disconnected — call reconnect_pane to re-establish it, then retry.`)
       const scrollback = ptyManager.getScrollbackBuffer(ptyId)
       const totalBytes = scrollback.length
@@ -245,8 +278,8 @@ export function registerTerminalTools(): void {
       },
       required: ['pane_id']
     },
-    run: async ({ pane_id, tab_id }, { ptyManager }) => {
-      const ptyId = ptyManager.getPtyIdForPane(resolvePtyKey(pane_id, tab_id))
+    run: async ({ pane_id, tab_id }, { ptyManager, workspaceStore }) => {
+      const ptyId = resolveTerminalPtyId(pane_id, tab_id, ptyManager, workspaceStore)
       if (!ptyId) throw new Error(`No terminal found for pane ${pane_id}${tab_id ? ` tab ${tab_id}` : ''}. The session may have disconnected — call reconnect_pane to re-establish it, then retry.`)
       const status = ptyManager.getActivityStatus(ptyId)
       if (!status) throw new Error(`Could not get status for pane ${pane_id}`)
@@ -287,8 +320,8 @@ export function registerTerminalTools(): void {
       },
       required: ['pane_id']
     },
-    run: async ({ pane_id, tab_id, timeout_ms, until_pattern, terminal_type }, { ptyManager }) => {
-      const ptyId = ptyManager.getPtyIdForPane(resolvePtyKey(pane_id, tab_id))
+    run: async ({ pane_id, tab_id, timeout_ms, until_pattern, terminal_type }, { ptyManager, workspaceStore }) => {
+      const ptyId = resolveTerminalPtyId(pane_id, tab_id, ptyManager, workspaceStore)
       if (!ptyId) throw new Error(`No terminal found for pane ${pane_id}${tab_id ? ` tab ${tab_id}` : ''}. The session may have disconnected — call reconnect_pane to re-establish it, then retry.`)
 
       const terminalType: TerminalType = terminal_type ?? 'shell'
