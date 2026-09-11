@@ -340,7 +340,25 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
     const allMessages = [...stripStaleScreenshots(messagesRef.current), ...pendingMessages, nudge]
 
     finalTurnRef.current = true
-    finalTurnFallbackRef.current = reasonForBanner ?? reasonForModel
+    // Deliberately reasonForModel, not reasonForBanner, even though the
+    // latter is available and would seem like the "nicer" fallback. This is
+    // the FALLBACK CHAT MESSAGE CONTENT — shown only when the model's own
+    // final-turn reply comes back blank, i.e. exactly the case where there
+    // is no explanation to point at. reasonForBanner's text ends "See the
+    // explanation below," written assuming the model's own prose follows
+    // it — when it doesn't (the whole reason this fallback exists),
+    // showing that exact sentence as the message becomes a self-reference
+    // to nothing: "see the explanation below" *is* the explanation, and
+    // there's nothing below it. reasonForModel has no such forward
+    // reference — it's a complete, standalone sentence on its own
+    // ("Stopping now: repeated duplicate tool calls exceeded the safety
+    // limit.") — so it reads correctly whether or not real model text
+    // follows. Observed for real, repeatedly, across three separate
+    // incidents in one session: this model's final-turn reply is
+    // consistently blank (it keeps trying to call a tool anyway, which
+    // onAIStreamEnd already correctly strips), so this fallback is the
+    // common case here, not the rare one.
+    finalTurnFallbackRef.current = reasonForModel
     const placeholder: AIMessage = { id: uuidv4(), role: 'assistant', content: '', timestamp: Date.now() }
     setMessages(prev => [...prev, placeholder])
     setIsStreaming(true)
