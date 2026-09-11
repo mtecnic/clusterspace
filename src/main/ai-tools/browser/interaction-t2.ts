@@ -140,13 +140,38 @@ export function registerBrowserInteractionT2Tools(): void {
           })
         if (max_depth && max_depth > 0) {
           const byId = new Map(compact.map(n => [n.id as string, n]))
+          // Unfiltered lookup, keyed the same as byId but including the
+          // `ignored` nodes compact/byId dropped — needed so the walk below
+          // can see PAST an ignored node's children instead of treating it
+          // as a dead end. CDP marks plenty of purely-structural wrapper
+          // nodes `ignored` (near-universal on deeply nested React/generic-
+          // div apps like X.com), and they still show up as `children`
+          // entries on their non-ignored ancestor — walking only `compact`
+          // dies the instant it hits one (byId.get returns undefined),
+          // however high max_depth is set, and real content further down
+          // that branch is never reached. Observed for real: max_depth: 4
+          // from the root on x.com/home returned exactly one node — the
+          // root itself — because its very first child was an ignored
+          // wrapper.
+          const rawById = new Map(nodes.map(n => [n.nodeId, n]))
           const root = compact[0]
           const trimmed: typeof compact = []
+          const seen = new Set<string>()
           const walk = (id: string, depth: number) => {
-            const n = byId.get(id); if (!n) return
-            trimmed.push(n)
-            if (depth < max_depth) {
-              for (const c of (n.children as string[] | undefined) ?? []) walk(c, depth + 1)
+            if (seen.has(id)) return
+            seen.add(id)
+            const rawNode = rawById.get(id)
+            if (!rawNode) return
+            const compactNode = byId.get(id)
+            if (compactNode) {
+              trimmed.push(compactNode)
+              if (depth >= max_depth) return
+              for (const c of rawNode.childIds ?? []) walk(c, depth + 1)
+            } else {
+              // Ignored/structural — invisible pass-through: don't count it
+              // against the depth budget, just continue into its children
+              // at the same depth so real content past it stays reachable.
+              for (const c of rawNode.childIds ?? []) walk(c, depth)
             }
           }
           if (root) walk(root.id as string, 0)
