@@ -79,6 +79,20 @@ const FIXED_TARGET_TOOLS: ReadonlySet<string> = new Set(['browser_click_at', 'br
 // never saw a repeat.
 const SAME_RESULT_STREAK_LIMIT = 4
 
+// How many times the stagnant-result nudge above can re-fire (advisory
+// only — never blocks) before escalating to an actual circuit-break via
+// disabledTools, the same mechanism the consecutive-failure breaker below
+// already uses. An advisory nudge alone isn't enough for a model that's
+// already demonstrated, in the same run, that it doesn't act on it — and
+// unlike the exact-duplicate guard, this pattern (genuinely different
+// arguments each time, same underlying result) never trips that guard at
+// all, so nothing else would ever stop it. Observed for real: 32
+// browser_execute_js calls re-scraping the same feed with cosmetically
+// tweaked selectors (adding an image extractor, then refining it, etc.),
+// ignoring four separate nudges (at streak 4, 8, 12, 16) across one run,
+// never once proceeding to the actual task.
+const SAME_RESULT_NUDGES_BEFORE_DISABLE = 3
+
 // Tools where returning the same result on every call is the NORMAL,
 // expected outcome while legitimately waiting on external state (a shell
 // command still running, a selector that hasn't appeared yet) — excluded
@@ -338,6 +352,12 @@ export function recordOutcome(
       // signal at all, and one nudge wasn't enough to stop a model that had
       // already demonstrated it ignores this kind of instruction once.
       if (streak >= SAME_RESULT_STREAK_LIMIT && streak % SAME_RESULT_STREAK_LIMIT === 0) {
+        const nudgeNumber = streak / SAME_RESULT_STREAK_LIMIT
+        if (nudgeNumber > SAME_RESULT_NUDGES_BEFORE_DISABLE && !state.disabledTools[toolName]) {
+          const reason = `${toolName} has returned the same result ${streak} times in a row despite different arguments each time, and is now disabled for the rest of this run — you already have everything this call is going to give you. Use the result you already have and move on to the actual task, or ask the user for guidance.`
+          state.disabledTools[toolName] = reason
+          return reason
+        }
         return `${toolName} has returned the same result ${streak} times in a row even though its arguments were different each time — whatever you're varying isn't changing the outcome. Stop adjusting that parameter and try a genuinely different approach, or accept the result you already have.`
       }
     }
