@@ -293,13 +293,10 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
       ack(requestId, dispatchSwitchTerminalTab(paneId, tabId))
     })
     const unsubBrowserTab = window.electronAPI.onAIBrowserTabAction(({ paneId, action, url, tabId, requestId }) => {
-      // TEMP DIAGNOSTIC — see matching [popup-diag] logs in src/main/index.ts.
-      console.log('[popup-diag] renderer received AI_BROWSER_TAB_ACTION', { paneId, action, url, tabId })
       let ok = false
       if (action === 'open') ok = dispatchBrowserTabAction(paneId, { action: 'open', url })
       else if (action === 'switch' && tabId) ok = dispatchBrowserTabAction(paneId, { action: 'switch', tabId })
       else if (action === 'close' && tabId) ok = dispatchBrowserTabAction(paneId, { action: 'close', tabId })
-      console.log('[popup-diag] dispatchBrowserTabAction result', { ok })
       ack(requestId, ok)
     })
     const unsubReconnect = window.electronAPI.onAIReconnectPane(({ paneId, tabId, requestId }) => {

@@ -146,8 +146,6 @@ export const BrowserTabWebview = forwardRef<BrowserTabWebviewHandle, BrowserTabW
       if (!webview) return
 
       const onStartLoading: EventListener = () => {
-        // TEMP DIAGNOSTIC — see matching [popup-diag] logs in src/main/index.ts.
-        console.log('[popup-diag] did-start-loading', { tabId })
         setIsLoading(true)
         // A new load starting means the guest is alive again — dismiss any
         // crash/fail overlay so a successful recovery hides it.
@@ -423,7 +421,26 @@ export const BrowserTabWebview = forwardRef<BrowserTabWebviewHandle, BrowserTabW
           ref={webviewRef as React.RefObject<HTMLElement>}
           src={mountUrl}
           partition="persist:browser-pane"
-          allowpopups={true}
+          // `<webview>` is a non-standard element with no dash in its tag
+          // name, so React doesn't treat allowpopups as a recognized
+          // boolean attribute — allowpopups={true} silently never reaches
+          // the DOM at all (React just warns and drops it, confirmed via
+          // the exact "Received `true` for a non-boolean attribute
+          // `allowpopups`" console warning). A real string is what
+          // Electron's webview actually checks for via hasAttribute().
+          // Without it, the guest can't open ANY new window — window.open()
+          // calls AND target="_blank" anchor clicks are both silently
+          // no-ops, with no event ever reaching the host
+          // (setWindowOpenHandler never even fires). That's the actual
+          // cause of "links don't navigate" / "popup button does nothing".
+          //
+          // @types/react's ambient `WebViewHTMLAttributes.allowpopups` is
+          // typed `boolean | undefined` (it doesn't reflect Electron's
+          // actual DOM-level string check), and it wins over this project's
+          // own broader `vite-env.d.ts` override in JSX resolution — so the
+          // double cast below is a deliberate, narrow lie to the type
+          // checker to get the real string value written to the DOM.
+          allowpopups={'true' as unknown as boolean}
           webpreferences="contextIsolation=yes,nodeIntegration=no,sandbox=yes,plugins=yes"
           style={{ flex: '1 1 auto', width: '100%', height: '100%' }}
         />

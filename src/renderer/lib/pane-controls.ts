@@ -72,13 +72,7 @@ export function dispatchReconnect(paneId: string, tabId?: string): boolean {
 
 export function dispatchBrowserTabAction(paneId: string, action: BrowserTabAction): boolean {
   const fn = registry.get(browserTabKey(paneId)) as ((a: BrowserTabAction) => void) | undefined
-  if (!fn) {
-    // TEMP DIAGNOSTIC — see matching [popup-diag] logs elsewhere.
-    console.log('[popup-diag] dispatchBrowserTabAction: no handler registered', {
-      key: browserTabKey(paneId), knownKeys: [...registry.keys()]
-    })
-    return false
-  }
+  if (!fn) return false
   fn(action)
   return true
 }
