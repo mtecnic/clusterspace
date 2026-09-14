@@ -1,7 +1,40 @@
 import type { PtyManager } from '../pty-manager'
+import type { WorkspaceStore } from '../workspace-store'
 import type { PagedTextResult } from '../../shared/types'
 import { toolRegistry } from './registry'
 import { resolvePtyKey } from './tab-util'
+import { findActiveTerminalTabId } from './pane'
+
+/**
+ * Resolves the live PTY id for a terminal tool call. An explicit tab_id
+ * always wins. When omitted, every terminal tool's own schema says this
+ * means "the pane's active/initial tab" — but a bare-pane-id lookup only
+ * actually hits a live PTY for a pane whose original 'tab-initial' tab
+ * still exists. Any pane whose first tab was renamed or replaced (common —
+ * true of most panes in a long-lived workspace) has every tab, including
+ * the active one, registered under an explicit `${paneId}:${tabId}` key
+ * instead, so the bare-id lookup fails even though list_panes reports the
+ * pane as fully connected. Observed for real: 4 of 6 terminal panes in one
+ * session failed read_terminal_output this way, then failed reconnect_pane
+ * too (that error's own suggested fix) for the same underlying reason,
+ * burning the run's entire failure budget on panes that were never
+ * actually broken. Falling back to the pane's real activeTerminalTabId
+ * (list_panes' own source of truth — see pane.ts's
+ * resolveActiveTerminalTabId) closes the gap instead of failing a live
+ * pane just because the caller didn't know a tab_id was required.
+ */
+function resolveTerminalPtyId(
+  paneId: string,
+  tabId: string | undefined,
+  ptyManager: PtyManager,
+  workspaceStore: WorkspaceStore
+): string | undefined {
+  const direct = ptyManager.getPtyIdForPane(resolvePtyKey(paneId, tabId))
+  if (direct || tabId) return direct
+  const activeTabId = findActiveTerminalTabId(paneId, workspaceStore)
+  if (!activeTabId) return undefined
+  return ptyManager.getPtyIdForPane(resolvePtyKey(paneId, activeTabId))
+}
 
 // Shared schema fragment: every terminal tool accepts an optional tab_id so the
 // agent can address a specific tmux tab within a pane (from list_panes). Absent
@@ -30,6 +63,60 @@ const COMPLETION_PATTERNS: Record<string, RegExp[]> = {
 }
 
 type TerminalType = 'shell' | 'claude_code' | 'interactive'
+
+// Named keys write_to_terminal recognizes as an exact (trimmed, case-
+// insensitive) match on `text` — anything else is sent as literal
+// text/command bytes. Needed because the PTY write path is a pure
+// byte pass-through (pty-manager.ts's write()); without this, a call like
+// text: "esc" types the three literal characters e/s/c instead of sending
+// the actual Escape byte, which silently breaks TUI navigation (arrow keys,
+// Ctrl+C, Esc, etc. all no-op as literal text into whatever's focused).
+const KEY_MAP: Record<string, string> = {
+  enter: '\r', return: '\r',
+  esc: '\x1b', escape: '\x1b',
+  tab: '\t',
+  backspace: '\x7f',
+  space: ' ',
+  up: '\x1b[A', down: '\x1b[B', right: '\x1b[C', left: '\x1b[D',
+  home: '\x1b[H', end: '\x1b[F',
+  pageup: '\x1b[5~', pgup: '\x1b[5~',
+  pagedown: '\x1b[6~', pgdn: '\x1b[6~',
+  delete: '\x1b[3~', del: '\x1b[3~',
+  insert: '\x1b[2~',
+  f1: '\x1bOP', f2: '\x1bOQ', f3: '\x1bOR', f4: '\x1bOS',
+  f5: '\x1b[15~', f6: '\x1b[17~', f7: '\x1b[18~', f8: '\x1b[19~',
+  f9: '\x1b[20~', f10: '\x1b[21~', f11: '\x1b[23~', f12: '\x1b[24~'
+}
+
+/**
+ * Resolves an exact key-name token ("esc", "ctrl+c", "alt+enter", ...) to
+ * its real terminal byte sequence. Returns null when `text` isn't a
+ * recognized key name — the caller should then treat it as literal text.
+ */
+function resolveKeyName(text: string): string | null {
+  const trimmed = text.trim().toLowerCase()
+  if (trimmed in KEY_MAP) return KEY_MAP[trimmed]
+  if (trimmed === 'shift+tab') return '\x1b[Z'
+
+  const parts = trimmed.split('+').map(p => p.trim()).filter(Boolean)
+  if (parts.length < 2) return null
+  const modifiers = parts.slice(0, -1)
+  const base = parts[parts.length - 1]
+  if (!modifiers.every(m => m === 'ctrl' || m === 'alt' || m === 'shift')) return null
+
+  if (modifiers.includes('ctrl')) {
+    if (base.length !== 1) return null
+    const code = base.toUpperCase().charCodeAt(0)
+    if (code < 64 || code > 95) return null
+    let bytes = String.fromCharCode(code - 64)
+    if (modifiers.includes('alt')) bytes = '\x1b' + bytes
+    return bytes
+  }
+
+  const baseBytes = base.length === 1 ? base : KEY_MAP[base]
+  if (!baseBytes) return null
+  return modifiers.includes('alt') ? '\x1b' + baseBytes : baseBytes
+}
 
 /**
  * Poll the PTY's scrollback until it looks "done" — either a known prompt
@@ -91,27 +178,32 @@ export function registerTerminalTools(): void {
     terminal_type?: TerminalType
   }, string>({
     name: 'write_to_terminal',
-    description: 'Write text or commands to a terminal pane. When press_enter=true, waits for command completion and returns the output. Use terminal_type="claude_code" with higher timeout for Claude Code instances.',
+    description: 'Write text or commands to a terminal pane. When press_enter=true, waits for command completion and returns the output. Use terminal_type="claude_code" with higher timeout for Claude Code instances. `text` also recognizes named keys for TUI navigation — see the `text` param.',
     parameters: {
       type: 'object',
       properties: {
         pane_id: { type: 'string', description: 'The ID of the pane to write to' },
         ...TAB_ID_PARAM,
-        text: { type: 'string', description: 'The text or command to write' },
+        text: {
+          type: 'string',
+          description:
+            'The text/command to type, OR an exact key name to press instead: esc, tab, enter, backspace, space, up/down/left/right, home, end, pageup/pagedown, delete, insert, f1-f12, or a modifier combo like ctrl+c, alt+enter, shift+tab. Key names are matched exactly (whole field, case-insensitive) and sent as the real key — e.g. text="esc" presses Escape, it does NOT type the letters e/s/c. To type the literal word "esc" as text, that ambiguity can\'t be expressed here; rephrase the input.'
+        },
         press_enter: { type: 'boolean', description: 'Whether to press Enter after writing (default: true)' },
         wait_timeout_ms: { type: 'number', description: 'Max time to wait for completion in ms (default: 3000, max: 120000). Use 60000+ for Claude Code.' },
         terminal_type: { type: 'string', enum: ['shell', 'claude_code', 'interactive'], description: 'Type of terminal for smart completion detection. Use "claude_code" for Claude Code instances.' }
       },
       required: ['pane_id', 'text']
     },
-    run: async (args, { ptyManager }) => {
+    run: async (args, { ptyManager, workspaceStore }) => {
       const pressEnter = args.press_enter !== false
       const waitTimeoutMs = args.wait_timeout_ms ?? 3000
       const terminalType: TerminalType = args.terminal_type ?? 'shell'
-      const ptyId = ptyManager.getPtyIdForPane(resolvePtyKey(args.pane_id, args.tab_id))
-      if (!ptyId) throw new Error(`No terminal found for pane ${args.pane_id}${args.tab_id ? ` tab ${args.tab_id}` : ''}. The session may have disconnected — call reconnect_pane (or restart_terminal) to re-establish it, then retry.`)
+      const ptyId = resolveTerminalPtyId(args.pane_id, args.tab_id, ptyManager, workspaceStore)
+      if (!ptyId) throw new Error(`No terminal found for pane ${args.pane_id}${args.tab_id ? ` tab ${args.tab_id}` : ''}. The session may have disconnected — call reconnect_pane to re-establish it, then retry.`)
 
-      const data = pressEnter ? args.text + '\r' : args.text
+      const resolvedKey = resolveKeyName(args.text)
+      const data = resolvedKey ?? (pressEnter ? args.text + '\r' : args.text)
       ptyManager.write(ptyId, data)
 
       if (pressEnter) {
@@ -136,10 +228,10 @@ export function registerTerminalTools(): void {
       },
       required: ['pane_id']
     },
-    run: async ({ pane_id, tab_id, lines, cursor }, { ptyManager }) => {
+    run: async ({ pane_id, tab_id, lines, cursor }, { ptyManager, workspaceStore }) => {
       const cappedLines = Math.min(lines ?? 50, 500)
-      const ptyId = ptyManager.getPtyIdForPane(resolvePtyKey(pane_id, tab_id))
-      if (!ptyId) throw new Error(`No terminal found for pane ${pane_id}${tab_id ? ` tab ${tab_id}` : ''}. The session may have disconnected — call reconnect_pane (or restart_terminal) to re-establish it, then retry.`)
+      const ptyId = resolveTerminalPtyId(pane_id, tab_id, ptyManager, workspaceStore)
+      if (!ptyId) throw new Error(`No terminal found for pane ${pane_id}${tab_id ? ` tab ${tab_id}` : ''}. The session may have disconnected — call reconnect_pane to re-establish it, then retry.`)
       const scrollback = ptyManager.getScrollbackBuffer(ptyId)
       const totalBytes = scrollback.length
 
@@ -186,9 +278,9 @@ export function registerTerminalTools(): void {
       },
       required: ['pane_id']
     },
-    run: async ({ pane_id, tab_id }, { ptyManager }) => {
-      const ptyId = ptyManager.getPtyIdForPane(resolvePtyKey(pane_id, tab_id))
-      if (!ptyId) throw new Error(`No terminal found for pane ${pane_id}${tab_id ? ` tab ${tab_id}` : ''}. The session may have disconnected — call reconnect_pane (or restart_terminal) to re-establish it, then retry.`)
+    run: async ({ pane_id, tab_id }, { ptyManager, workspaceStore }) => {
+      const ptyId = resolveTerminalPtyId(pane_id, tab_id, ptyManager, workspaceStore)
+      if (!ptyId) throw new Error(`No terminal found for pane ${pane_id}${tab_id ? ` tab ${tab_id}` : ''}. The session may have disconnected — call reconnect_pane to re-establish it, then retry.`)
       const status = ptyManager.getActivityStatus(ptyId)
       if (!status) throw new Error(`Could not get status for pane ${pane_id}`)
       const scrollback = ptyManager.getScrollbackBuffer(ptyId)
@@ -228,9 +320,9 @@ export function registerTerminalTools(): void {
       },
       required: ['pane_id']
     },
-    run: async ({ pane_id, tab_id, timeout_ms, until_pattern, terminal_type }, { ptyManager }) => {
-      const ptyId = ptyManager.getPtyIdForPane(resolvePtyKey(pane_id, tab_id))
-      if (!ptyId) throw new Error(`No terminal found for pane ${pane_id}${tab_id ? ` tab ${tab_id}` : ''}. The session may have disconnected — call reconnect_pane (or restart_terminal) to re-establish it, then retry.`)
+    run: async ({ pane_id, tab_id, timeout_ms, until_pattern, terminal_type }, { ptyManager, workspaceStore }) => {
+      const ptyId = resolveTerminalPtyId(pane_id, tab_id, ptyManager, workspaceStore)
+      if (!ptyId) throw new Error(`No terminal found for pane ${pane_id}${tab_id ? ` tab ${tab_id}` : ''}. The session may have disconnected — call reconnect_pane to re-establish it, then retry.`)
 
       const terminalType: TerminalType = terminal_type ?? 'shell'
       const startTime = Date.now()

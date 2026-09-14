@@ -49,6 +49,12 @@ export interface BrowserTab {
   url: string
   title?: string
   favicon?: string
+  // User-set escape hatch from idle background-tab discarding (Chrome
+  // pin-tab equivalent) — a deliberate preference worth surviving restarts.
+  pinned?: boolean
+  // Per-tab page zoom factor (1 = 100%), set via Ctrl+/Ctrl-/Ctrl+0.
+  // Absent/undefined means default (1).
+  zoomLevel?: number
 }
 
 // Pane configuration
@@ -112,6 +118,9 @@ export interface AIProviderConfig {
   // true/false = send chat_template_kwargs.enable_thinking. No-op on models
   // that don't read it (e.g. non-Qwen), so it's safe to leave unset.
   enableThinking?: boolean
+  // OpenAI-compatible tool_choice. undefined/'auto' = model decides whether
+  // to call a tool or just answer; 'required' forces a tool call every turn.
+  toolChoice?: 'auto' | 'required'
   createdAt: number
   updatedAt: number
 }
@@ -135,6 +144,9 @@ export interface AIMessage {
   content: string
   toolCalls?: AIToolCall[]
   toolCallId?: string        // For tool results
+  toolName?: string          // For tool results — the name of the tool that produced this
+                             // result, so the UI can categorize/color it (resolved from the
+                             // original AIToolCall.name, not sent by the model)
   images?: string[]          // Base64 for vision
   autoScreenshot?: boolean   // Auto-captured perceive/verify screenshot; its image is
                              // evicted from context once a newer one arrives (only the
@@ -248,7 +260,7 @@ export interface AIConversation {
 // ============= AGENT ORCHESTRATION TYPES =============
 
 // Agent status
-export type AgentStatus = 'idle' | 'working' | 'blocked' | 'complete' | 'error'
+export type AgentStatus = 'idle' | 'working' | 'blocked' | 'paused' | 'complete' | 'error'
 
 // Task status
 export type TaskStatus = 'pending' | 'in_progress' | 'complete' | 'failed' | 'blocked'
@@ -334,14 +346,25 @@ export interface Skill {
 // Shared between main (goal-store/goal-policy/goal-runner) and renderer
 // (GoalDashboard). Keep the main-process types in sync via re-export.
 
-export type GoalStatus = 'pending' | 'running' | 'paused' | 'completed' | 'failed' | 'aborted'
+// 'interrupted' is distinct from 'paused': it means the app process died
+// (crash/quit) while this goal was 'running', discovered and reclassified
+// at startup (see GoalStore.reconcileOrphaned) — never set directly by the
+// runner. Kept separate from 'paused' (a clean, user-requested stop) so the
+// dashboard stays honest about which actually happened.
+export type GoalStatus = 'pending' | 'running' | 'paused' | 'interrupted' | 'completed' | 'failed' | 'aborted'
 
 export type GoalRisk = 'read_only' | 'write_local' | 'network_get' | 'network_write' | 'spends_money'
 
 export type SuccessCriterion =
   | { type: 'shell'; command: string; exitCode?: number }
   | { type: 'model_question'; question: string; threshold?: 'yes' | 'high_confidence' }
-  | { type: 'json_predicate'; expr: string }
+  // filePath is read and JSON.parse'd; expr is a tiny whitelisted grammar
+  // ("dot.path.into.json op literal", op one of ==,!=,>,<,>=,<=,exists,
+  // notexists) evaluated by src/main/json-predicate.ts — no eval/Function/
+  // VM anywhere. Safe specifically because expr is human-authored at goal-
+  // creation time in GoalCreateDialog, the same trust tier as `shell`'s
+  // command (which already runs arbitrary shell), never model-supplied.
+  | { type: 'json_predicate'; expr: string; filePath: string }
   | { type: 'manual' }
 
 export interface GoalPolicy {
@@ -349,6 +372,12 @@ export interface GoalPolicy {
   allowedTools?: string[]
   deniedTools?: string[]
   sandboxDir?: string
+  // When true, mutating tool calls (terminal writes, browser click/type/
+  // navigate/etc.) are rejected unless declare_step was called first for
+  // this run — the step protocol's tool descriptions already say "REQUIRED"
+  // but nothing enforced that; this makes it a real, opt-in gate instead of
+  // a convention the model can silently skip.
+  requireStepProtocol?: boolean
 }
 
 export interface GoalStep {
@@ -359,6 +388,29 @@ export interface GoalStep {
   ok: boolean
   elapsedMs: number
   timestamp: number
+}
+
+// A single checklist item, set via the write_todos tool and ticked off via
+// complete_todo (src/main/ai-tools/todo.ts). 1-based `index` is stable
+// across a `complete_todo` call (only `done`/`active` change), but gets
+// reassigned whenever `write_todos` replaces the whole list.
+export interface TodoItem {
+  index: number
+  text: string
+  done: boolean
+}
+
+// Live checklist state for one caller (a running goal, or the interactive
+// chat panel). Held authoritatively in ToolRuntimeState.todos
+// (src/main/ai-tools/registry.ts) and re-injected into every outgoing
+// request by AIManager.buildRequest — see that function's doc comment for
+// why it's a trailing user-role message, never stored, never system-role.
+// GoalCheckpoint.todo (below) is a passive write-through mirror for
+// observability only; it is not read back to reconstruct ToolRuntimeState.
+export interface TodoSnapshot {
+  items: TodoItem[]
+  activeIndex: number | null
+  updatedAt: number
 }
 
 export interface GoalCheckpoint {
@@ -376,6 +428,15 @@ export interface GoalCheckpoint {
   finalReport?: string
   createdAt: number
   updatedAt: number
+  // Links sibling goals launched together (Fleet Composer / create_goal)
+  // so the dashboard can group them and bulk pause/resume/abort as one
+  // unit. Absent for solo goals (GoalCreateDialog, assign_task).
+  fleetId?: string
+  // Write-through mirror of ToolRuntimeState.todos, updated whenever
+  // write_todos/complete_todo runs for this goal — lets GoalDashboard show
+  // checklist progress without any new IPC channel or store. Absent until
+  // the model calls either tool for the first time.
+  todo?: TodoSnapshot
 }
 
 export type GoalRunnerEvent =
@@ -383,6 +444,8 @@ export type GoalRunnerEvent =
   | { type: 'step'; goalId: string; tool: string; ok: boolean; preview: string }
   | { type: 'verification_failed'; goalId: string; detail: string }
   | { type: 'critic'; goalId: string; verdict: string; reason: string }
+  | { type: 'paused'; goalId: string }
+  | { type: 'resumed'; goalId: string }
   | { type: 'ended'; goalId: string; status: GoalStatus; finalReport: string }
 
 // ============= End GoalRunner Types =============
@@ -434,6 +497,20 @@ export interface AIPaneInfo {
   activeTabId?: string   // Which tab is currently active/visible
 }
 
+// list_panes' own item-count-based pagination (mirrors PagedTextResult's
+// cursor/hasMore shape, but by pane index rather than byte offset). Exists
+// so a workspace with many panes never has its inventory silently
+// truncated by AIManager's blanket char-budget truncation with no way to
+// see the rest — list_panes takes no filter params, so "narrow your query"
+// (the generic truncation fallback's advice) is never actually possible
+// for it.
+export interface AIPaneListResult {
+  items: AIPaneInfo[]
+  hasMore: boolean
+  nextCursor?: number
+  totalCount: number
+}
+
 // A tab inside a pane, as exposed to the AI agent. `connected` reflects whether
 // that specific tab has a live backend (PTY for terminals; the active browser
 // webview for browser panes).
@@ -466,6 +543,50 @@ export interface AppSettings {
   ai: AISettings
   defaultBrowserUrl: string
   windowState?: WindowState
+  remoteAccess: RemoteAccessSettings
+  // Minutes a background browser tab may sit inactive before its guest is
+  // discarded (navigated to about:blank) to free memory/CPU. <=0 disables
+  // the feature entirely. Default 15 matches Chrome Memory Saver's range.
+  browserTabIdleDiscardMinutes: number
+  fleet: FleetSettings
+  // When true, every browser-pane download prompts for a save location via
+  // the native OS dialog. Off by default — matches the existing behavior
+  // (auto-save to Electron's default downloads folder).
+  browserDownloadsAskLocation: boolean
+}
+
+// Soft guardrail on how many GoalRunner loops may run concurrently — no AI
+// provider is rate-limited/queued by this app otherwise, so without a cap a
+// large fleet launch would fire every goal's model calls simultaneously.
+export interface FleetSettings {
+  maxConcurrentGoals: number
+  // Native OS notification when a goal finishes/fails/aborts or needs
+  // approval — lets the dashboard stay closed while a fleet runs.
+  desktopNotifications: boolean
+}
+
+// Remote web access (port 4444 by default) — lets a browser view/control
+// panes in the active workspace. Off by default since enabling it opens a
+// network port; credentials live in remote-access-store.ts (hashed), not
+// here. bindAddress defaults to all-interfaces since the intended use is a
+// router port-forward — the app itself doesn't attempt any WAN detection or
+// safety gating beyond the Settings UI's explicit confirmation checkbox.
+export interface RemoteAccessSettings {
+  enabled: boolean
+  port: number
+  bindAddress: string
+  tls: {
+    enabled: boolean
+    certPath?: string
+    keyPath?: string
+  }
+}
+
+export const DEFAULT_REMOTE_ACCESS_SETTINGS: RemoteAccessSettings = {
+  enabled: false,
+  port: 4444,
+  bindAddress: '0.0.0.0',
+  tls: { enabled: false }
 }
 
 // Persisted main-window geometry so launches restore the user's last size/position.
@@ -495,6 +616,12 @@ export interface PtySpawnConfig {
   cols: number
   rows: number
   workspaceId?: string
+  // When set, the main process watches this pty's own output for an SSH
+  // password prompt and auto-fills the saved credential (main/index.ts's
+  // PTY_SPAWN handler) -- centralized there (not in the renderer) so it
+  // fires regardless of whether a local pane, a remote-access web client,
+  // both, or neither is currently watching this pty.
+  sshServerId?: string
 }
 
 // IPC Channel names
@@ -520,6 +647,11 @@ export const IPC_CHANNELS = {
   WORKSPACE_CREATE: 'workspace:create',
   WORKSPACE_UPDATE: 'workspace:update',
   WORKSPACE_DELETE: 'workspace:delete',
+  // Pushed main -> renderer when a workspace/pane mutates via a path that
+  // doesn't round-trip through the renderer's own WorkspaceContext actions
+  // (e.g. an AI tool calling workspaceStore.updatePane/create directly) —
+  // WorkspaceContext has no other way to learn about those changes.
+  WORKSPACE_EXTERNAL_UPDATE: 'workspace:external-update',
 
   // Settings channels
   SETTINGS_GET: 'settings:get',
@@ -527,6 +659,13 @@ export const IPC_CHANNELS = {
 
   // Dialog channels
   DIALOG_OPEN_DIRECTORY: 'dialog:open-directory',
+  DIALOG_OPEN_FILE: 'dialog:open-file',
+
+  // Remote access channels
+  REMOTE_ACCESS_GET_STATUS: 'remote-access:get-status',
+  REMOTE_ACCESS_HAS_CREDENTIALS: 'remote-access:has-credentials',
+  REMOTE_ACCESS_SET_CREDENTIALS: 'remote-access:set-credentials',
+  REMOTE_ACCESS_REGENERATE_SECRET: 'remote-access:regenerate-secret',
 
   // App channels
   APP_GET_PATH: 'app:get-path',
@@ -543,7 +682,6 @@ export const IPC_CHANNELS = {
   SSH_SERVERS_UPDATE: 'ssh:servers:update',
   SSH_SERVERS_DELETE: 'ssh:servers:delete',
   SSH_SERVERS_TEST: 'ssh:servers:test',
-  SSH_GET_PASSWORD: 'ssh:get-password',
   SSH_GET_COMMAND: 'ssh:get-command',
 
   // AI channels
@@ -560,6 +698,7 @@ export const IPC_CHANNELS = {
   AI_STREAM_CHUNK: 'ai:stream:chunk',
   AI_STREAM_END: 'ai:stream:end',
   AI_STREAM_ERROR: 'ai:stream:error',
+  AI_SET_INTENT: 'ai:set-intent',
   AI_CANCEL: 'ai:cancel',
   AI_SCREENSHOT_PANE: 'ai:screenshot:pane',
   AI_SCREENSHOT_WORKSPACE: 'ai:screenshot:workspace',
@@ -571,6 +710,12 @@ export const IPC_CHANNELS = {
   AI_SWITCH_TERMINAL_TAB: 'ai:switch:terminal-tab',
   AI_BROWSER_TAB_ACTION: 'ai:browser:tab-action',
   AI_RECONNECT_PANE: 'ai:reconnect:pane',
+  // Renderer -> main ack for the five pane-control channels above. Each of
+  // those payloads carries an optional requestId; the renderer replies with
+  // {requestId, ok} once it's actually tried to apply the command, so the
+  // main-process tool can report a real result instead of a canned "success"
+  // regardless of whether a stale/hallucinated pane_id silently no-opped.
+  PANE_CONTROL_ACK: 'ai:pane-control:ack',
 
   // AI Memory channels
   AI_MEMORY_GET_CONVERSATIONS: 'ai:memory:get-conversations',
@@ -623,16 +768,28 @@ export const IPC_CHANNELS = {
   BROWSER_DOWNLOAD_OPEN: 'browser:download:open',
   BROWSER_DOWNLOAD_REVEAL: 'browser:download:reveal',
   BROWSER_DOWNLOAD_CANCEL: 'browser:download:cancel',
+  BROWSER_DOWNLOAD_PAUSE: 'browser:download:pause',
+  BROWSER_DOWNLOAD_RESUME: 'browser:download:resume',
   BROWSER_DOWNLOAD_UPDATE: 'browser:download:update',
   BROWSER_SHORTCUT: 'browser:shortcut',
+  BROWSER_HTML_FULLSCREEN: 'browser:html-fullscreen',
   BROWSER_CONTEXT_MENU: 'browser:context-menu',
   BROWSER_OPEN_EXTERNAL: 'browser:open-external',
+  BROWSER_ADD_DICTIONARY_WORD: 'browser:add-dictionary-word',
+  BROWSER_COPY_IMAGE_AT: 'browser:copy-image-at',
+  BROWSER_TAB_CDP_DETACH: 'browser:tab:cdp-detach',
 
   // Browser automation observability + safety
   BROWSER_ACTION_LOG_GET: 'browser:action-log:get',
   BROWSER_ACTION_LOG_APPEND: 'browser:action-log:append',
   BROWSER_APPROVAL_REQUEST: 'browser:approval:request',
   BROWSER_APPROVAL_RESPONSE: 'browser:approval:response',
+  BROWSER_LOGIN_REQUEST: 'browser:login:request',
+  BROWSER_LOGIN_RESPONSE: 'browser:login:response',
+  BROWSER_CERT_WARNING_REQUEST: 'browser:cert-warning:request',
+  BROWSER_CERT_WARNING_RESPONSE: 'browser:cert-warning:response',
+  BROWSER_SCREEN_SHARE_REQUEST: 'browser:screen-share:request',
+  BROWSER_SCREEN_SHARE_RESPONSE: 'browser:screen-share:response',
   BROWSER_RECIPES_LIST: 'browser:recipes:list',
   BROWSER_RECIPES_SAVE: 'browser:recipes:save',
   BROWSER_RECIPES_DELETE: 'browser:recipes:delete',
@@ -641,17 +798,9 @@ export const IPC_CHANNELS = {
   // (and the AI tool dispatcher) can drive the webview directly.
   BROWSER_PANE_REGISTER: 'browser:pane:register',
   BROWSER_PANE_UNREGISTER: 'browser:pane:unregister',
+  BROWSER_PANE_TAB_REGISTER: 'browser:pane:tab-register',
+  BROWSER_PANE_TAB_UNREGISTER: 'browser:pane:tab-unregister',
 
-  // AI-callable browser-control verbs
-  AI_BROWSER_NAVIGATE: 'ai:browser:navigate',
-  AI_BROWSER_GET_CONTENT: 'ai:browser:get-content',
-  AI_BROWSER_SCREENSHOT: 'ai:browser:screenshot',
-  AI_BROWSER_EXECUTE_JS: 'ai:browser:execute-js',
-  AI_BROWSER_CLICK: 'ai:browser:click',
-  AI_BROWSER_TYPE: 'ai:browser:type',
-  AI_BROWSER_BACK: 'ai:browser:back',
-  AI_BROWSER_FORWARD: 'ai:browser:forward',
-  AI_BROWSER_RELOAD: 'ai:browser:reload',
 } as const
 
 // AI tool result shapes for browser control
@@ -680,6 +829,10 @@ export type BrowserShortcut =
   | 'forward'
   | 'escape'
   | 'closePane'
+  | 'zoomIn'
+  | 'zoomOut'
+  | 'zoomReset'
+  | 'print'
 
 export interface BrowserShortcutMessage {
   webContentsId: number
@@ -703,6 +856,8 @@ export interface BrowserContextMenuParams {
     canPaste?: boolean
     canSelectAll?: boolean
   }
+  misspelledWord?: string
+  dictionarySuggestions?: string[]
 }
 
 // Browser pane bookmark
@@ -728,11 +883,12 @@ export interface DownloadInfo {
   url: string
   filename: string
   savePath: string
-  state: 'progressing' | 'completed' | 'cancelled' | 'interrupted'
+  state: 'progressing' | 'paused' | 'completed' | 'cancelled' | 'interrupted'
   receivedBytes: number
   totalBytes: number
   startedAt: number
   paneId?: string
+  canResume: boolean
 }
 
 // SSH Server configuration
@@ -833,10 +989,16 @@ export const DEFAULT_AI_SETTINGS: AISettings = {
 export const DEFAULT_AI_SYSTEM_PROMPT = `You are an AI orchestrator managing a fleet of terminal agents in ClusterSpace.
 
 ## Paginated Tool Results
-Some tools return a paged envelope: \`{success, content, hasMore, nextCursor, totalBytes}\`. When \`hasMore\` is true, call the same tool again with \`cursor: <nextCursor>\` to get the next chunk. Use \`totalBytes\` to decide whether to keep paging (don't dump megabytes of output just because you can). Tools currently paged: \`read_terminal_output\` (line offset), \`browser_get_content\` (char offset).
+Some tools return a paged envelope: \`{success, content, hasMore, nextCursor, totalBytes}\`. When \`hasMore\` is true, call the same tool again with \`cursor: <nextCursor>\` to get the next chunk. Use \`totalBytes\` to decide whether to keep paging (don't dump megabytes of output just because you can). Tools currently paged: \`read_terminal_output\` (line offset), \`browser_get_content\` (char offset), \`list_panes\` (pane index).
+
+## Never invent an id
+Every \`pane_id\`, \`tab_id\`, or similar identifier you use MUST come verbatim from an actual tool result (list_panes, get_fleet_status, a screenshot's returned metadata, etc.) — never a value you composed, guessed, or "recall" from a screenshot's visual layout. IDs are never rendered as visible text in a UI, so there is no legitimate way to read one off an image. If you can't find the id you need (e.g. list_panes says \`hasMore\`), page for it or tell the user it isn't visible to you — do not fabricate a plausible-looking one and call a tool with it.
+
+## Repeat-call safety guard
+If a tool result comes back as \`{success:false, blocked:true, error: "Identical call to ... has now been made N times..."}\`, that's a harness-level guard catching you repeating the exact same call, not the tool itself rejecting your arguments. Don't respond by tweaking the arguments slightly to route around it — that just wastes another attempt. Stop, use the result you already have, or take a genuinely different approach (different tool, different selector/strategy). If you keep hitting this, say so to the user instead of continuing to retry.
 
 ## Terminal Control Tools
-- write_to_terminal: Send commands (supports wait_timeout_ms and terminal_type params)
+- write_to_terminal: Send commands (supports wait_timeout_ms and terminal_type params). For TUI/full-screen apps (vim, opencode, htop, etc.), \`text\` also accepts an exact key name instead of literal text — esc, tab, enter, up/down/left/right, ctrl+c, ctrl+d, alt+enter, shift+tab, f1-f12, etc. — sent as the real key press, not typed characters. Use these, not a literal word, when you mean "press Escape"/"press Ctrl+C".
 - read_terminal_output: Read recent output from a terminal
 - poll_terminal_status: Check if a terminal is busy or idle (lightweight, no writing)
 - wait_for_output: Wait for output with long timeout and pattern matching
@@ -844,31 +1006,37 @@ Some tools return a paged envelope: \`{success, content, hasMore, nextCursor, to
 - capture_screenshot: Take a screenshot for visual analysis
 - focus_pane, maximize_pane: Control window layout
 - create_workspace: Create new workspace layouts
-- restart_terminal: Restart a terminal pane
+- reconnect_pane: Reconnect a disconnected/crashed pane or tab (terminal: kill+respawn reattaching to tmux; browser: recreate the crashed webview)
+- switch_terminal_tab, switch_browser_tab: Switch a pane's active tab
+- open_browser_tab, close_browser_tab: Open/close a tab in a browser pane
 
 ## Browser Control Tools (for panes where type === "browser")
 
 Core (Tier 1-2):
 - browser_navigate: Load a URL
 - browser_get_content: Get visible text + url + title
-- browser_screenshot / browser_screenshot_full_page / browser_screenshot_annotated: Visual capture (annotated overlays numbered red boxes on selectors for "click box N" decisions)
-- browser_get_axtree: Page accessibility tree — PREFER THIS over HTML for understanding structure. Compact, semantic, stable across redesigns.
-- browser_click / browser_smart_click: Click an element. smart_click tries selector → aria-label → role+text → visible text fallbacks.
-- browser_click_at(x,y): Coordinate click for canvas / shadow DOM / vision-driven flows.
+- browser_screenshot / browser_screenshot_full_page: Visual capture (metadata only — you cannot see these)
+- browser_screenshot_annotated: Visual capture with numbered red boxes overlaid. Pass \`selectors\` to label specific elements you already found, or omit \`selectors\` entirely to auto-detect interactive elements on the page (links, buttons, inputs, etc.) — this is the Set-of-Mark mode for when you don't have selectors yet, e.g. a purely visual/unfamiliar page. Follow up with **browser_click_by_index(pane_id, index)** to click by the number you see in the image instead of guessing coordinates or transcribing a selector. Prefer this index-based flow over browser_click_at when you're grounding purely from a screenshot.
+- browser_get_axtree: Page accessibility tree — PREFER THIS over a screenshot for understanding structure when selectors matter. Compact, semantic, stable across redesigns.
+- browser_click / browser_smart_click / browser_click_by_index: Click an element via a **trusted, CDP-dispatched click event** (same mechanism Puppeteer/Playwright use). smart_click tries selector → aria-label → role+text → visible text fallbacks. **Prefer these for every click** — see the warning below.
+- browser_click_at(x,y): Trusted coordinate click for canvas / shadow DOM when you already know exact pixel coordinates.
 - browser_type: Fill input/textarea (optionally submits form)
 - browser_keypress: Send Enter/Tab/Escape/Backspace/ArrowKeys with optional modifiers
-- browser_select_option, browser_check: <select> and checkbox/radio
+- browser_select_option, browser_check: <select> and checkbox/radio — **use browser_check for checkboxes, not execute_js**, see warning below
 - browser_set_files: <input type=file> uploads (gated — user is prompted)
 - browser_query, browser_query_all: Read element properties without screenshotting
 - browser_scroll: by pixels, to top/bottom, or scroll element into view
 - browser_hover, browser_drag: Mouse interactions
 - browser_wait_for_selector, browser_wait_for_navigation, browser_wait_for_text: Sync barriers — USE THESE before clicking elements that may not have rendered yet
 - browser_back, browser_forward, browser_reload: History
-- browser_execute_js: Arbitrary JS escape hatch
+- browser_execute_js: Arbitrary JS escape hatch for **reading/computing page state** (e.g. inspecting custom data attributes, running a calculation over query results). **Do not use it to simulate interaction** — see warning below.
 
 Automation (Tier 3):
 - browser_run_recipe: Execute a saved or inline recipe (sequence of tool calls with retries)
+- browser_list_recipes: List saved recipes by name — check this before assuming one doesn't exist
+- browser_save_recipe: Save a working multi-step flow as a named recipe for later reuse
 - browser_get_action_log: Read recent browser tool-call log for self-debugging
+- browser_pane_doctor: Preflight health check on a pane's automation driver (registry, JS exec, CDP, page state). Use when browser_* tools on a pane keep failing and you're not sure if the pane itself is broken vs. the page/selector being wrong.
 
 Power (Tier 4):
 - browser_get_cookies, browser_set_cookie: Cookie management
@@ -879,6 +1047,15 @@ Power (Tier 4):
 - convert_pane_to_terminal(pane_id): Inverse, for cleanup.
 
 ## Web automation loop pattern (the "automate_web_task" flow)
+
+**NEVER use browser_execute_js to click, check a box, toggle, type/fill text, or otherwise simulate interaction** (e.g. \`el.click()\`, dispatching a synthetic MouseEvent, flipping \`el.checked\`, using the native-setter-then-\`dispatchEvent(new Event('input'))\` trick to set \`el.value\`). Modern JS-framework UIs (React/Vue/Angular — Gmail, X/Twitter, most SaaS dashboards) attach listeners that only fire on **trusted** input events; a script-dispatched click, checkbox-toggle, or typed value is frequently silently ignored — the DOM may even look "checked" or "filled" for a moment (reading \`el.value\` back can even show your text!) while the framework's own internal state never updates, so the submit/post/save button stays disabled and nothing you do to it works. This applies just as much to typing as clicking — don't assume text entry is safe just because it's not a click. This is a common failure mode: repeatedly re-querying element state after an execute_js "click" or "type" that never actually took effect, then re-trying the same broken approach in a loop, sometimes across several separate turns because the state that would normally catch this (recent identical calls) doesn't carry across an unrelated tool call in between. Always use the dedicated interaction tools instead — they dispatch real trusted events via CDP (the same mechanism Puppeteer/Playwright use):
+- Clicking anything → browser_click / browser_smart_click / browser_click_by_index / browser_click_at
+- Checkboxes/radios → browser_check
+- Dropdowns → browser_select_option
+- **Typing/filling any input, textarea, or rich-text/contenteditable box → browser_type.** If browser_type fails or the target isn't a plain input/textarea, that's a signal to re-examine the element (browser_get_axtree) or ask for guidance — it's not a cue to fall back to execute_js.
+If a click/check/type "succeeds" (tool returns success) but the page state doesn't actually change on your next read, don't retry the identical call — switch strategy (try browser_smart_click's fallback matching, or browser_screenshot_annotated + browser_click_by_index to click exactly what you see) rather than looping on the same approach.
+
+**Toolbar/icon buttons with no known CSS selector** (e.g. a Delete/Archive/Reply icon button) are the case most likely to tempt browser_execute_js — resist it. Go straight to **browser_smart_click(text: "<visible label>")** or **browser_smart_click(aria_label: "<label>")** first; its fallback chain (selector → aria-label → role+text → visible text) is built exactly for "I know what it's called, not its selector." Only fall back to browser_screenshot_annotated + browser_click_by_index (or execute_js to compute coordinates, then browser_click_at) if smart_click's match genuinely fails.
 
 **IMPORTANT:** browser_screenshot returns ONLY metadata (path, width, height, bytes). You CANNOT see the image. To know what changed on a page, use **browser_get_axtree** or **browser_get_content** — these return actual page state. Don't claim a click "worked" or that "the sign-in page loaded" without reading the page after the action. browser_click / browser_smart_click return urlBefore/urlAfter/navigated — check those for navigation. For SPA changes, follow up with browser_get_axtree to see the new structure.
 
@@ -894,9 +1071,68 @@ When given a multi-step web task (login, search, fill form, scrape):
 7. Verify with another wait + read; on failure, screenshot and either retry or report
 8. Repeat until done; when typing into password fields or uploading files, expect the user to be prompted for approval — handle the deny case gracefully
 
-For repeated flows, build a recipe (browser_run_recipe with steps_json) so the
-same sequence can be replayed reliably. Always check browser_get_action_log
+For repeated flows, check browser_list_recipes first — a saved recipe may
+already exist. If not, and you work out a reliable multi-step sequence,
+save it with browser_save_recipe so it can be replayed via browser_run_recipe
+next time instead of re-deriving it. Always check browser_get_action_log
 after a failure to see exactly what went wrong.
+
+## Open-ended tasks (games, unfamiliar apps, "figure it out and get to X")
+
+The checklist above assumes a task with a known shape. A goal like "play this
+game until you can afford the best housing" or "figure out how to do X on this
+site" has no such shape — you have to build a mental model of the thing first.
+Before your first tool call on a task like this, call **write_todos** with
+3-7 concrete steps: what you think the goal actually requires, based on what's
+already visible. It's re-shown to you at the top of every turn, so it survives
+a long run instead of scrolling out of view — call **complete_todo** as you
+finish each step, and call write_todos again to revise the list if a step
+didn't do what you expected. Don't silently drift from "executing a plan"
+into open-ended exploration with no plan at all — and this isn't only for
+open-ended/game-like tasks: any task with several distinct phases benefits
+from the same checklist.
+
+Prefer what's already ON SCREEN over reverse-engineering source code. Most
+games and apps display their own controls and objective directly in the UI
+(a HUD, an instructions panel, a "how to play" line) — read that first via
+browser_get_content or a screenshot before reading any JavaScript. Looking at
+a handful of key functions once (e.g. to learn a pricing formula) can be
+worth it; replaying large stretches of source code turn after turn almost
+never is — if you're several tool calls into reading code and still don't
+know what to actually click/press next, stop reading and just try something,
+then observe the result. Acting and observing teaches you more per call than
+reading usually does.
+
+Interact the way the task implies a human would — browser_click_at for a
+canvas/WebGL game with no selectable DOM element, browser_keypress (with
+hold_ms for sustained movement) for keyboard-driven controls. Some pages
+expose their own internal functions for debugging (e.g. \`window.SomeApp.doThing()\`);
+do not call these directly to shortcut past real interaction just because you
+found them — if the task says to play/click/use the app, calling its
+internals instead isn't a shortcut, it's not doing the task.
+
+You are shown a screenshot after every action in a task like this specifically
+so you can check whether it actually did anything — use it. If you repeat the
+same movement/action a couple of times and the screenshot keeps looking the
+same (same position, same view, nothing new on screen), that's not a reason
+to keep trying it with the same inputs — you're blocked (a wall, an open
+panel eating your keypresses, the wrong key for this app, focus lost). Try
+something different: a different direction, closing whatever might be
+capturing input first, or describing the screen to figure out what's actually
+in the way, rather than repeating the identical action expecting a different
+result.
+
+**A "post" on a social feed is one item, not the whole thread it's part
+of.** When asked to find "a post" to engage with, read enough of the first
+one to judge whether it's worth engaging with (usually just the first tweet
+in a thread) and stop there — you do not need to click into every
+subsequent part of a multi-part thread, or expand every "Show more" on
+every reply, before you're allowed to act. If a tool result already tells
+you there's nothing left (an empty array, \`hasMore: false\`, the same count
+of items as last time), that's a direct answer, not a reason to re-run a
+slightly different query hoping for something else — it means what it
+says: there is nothing more to find here right now, so stop looking and
+use what you already have.
 
 ## Agent Orchestration Tools
 - get_fleet_status: Get status of all agents and current goal
@@ -907,6 +1143,7 @@ after a failure to see exactly what went wrong.
 - wait_for_agent: Block until another agent completes
 - share_context: Share information between agents
 - create_goal: Create a new orchestration goal
+- wait: Pause for a fixed duration (max 2 min per call) — use this to pace repeated actions (e.g. "no more than one per 30 seconds"). Not write_to_terminal's "sleep" (the pane may not be a real shell), not wait_for_output (terminal-only), and not a navigate-away-and-back trick.
 
 ## Autonomous Task Completion
 

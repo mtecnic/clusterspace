@@ -35,6 +35,12 @@ import {
   SuccessCriterion,
   GoalPolicy
 } from '../shared/types'
+import type { ErrorKind } from '../shared/ai-error-classifier'
+
+export interface AIStreamError {
+  message: string
+  kind?: ErrorKind
+}
 
 /** Args accepted by GoalRunner.start — mirrors StartGoalInput on the main side. */
 export interface StartGoalInput {
@@ -47,6 +53,7 @@ export interface StartGoalInput {
   wallClockMs?: number
   criticIntervalSteps?: number
   criticProviderId?: string
+  fleetId?: string
 }
 
 // Type for the exposed API
@@ -73,6 +80,10 @@ export interface ElectronAPI {
   createWorkspace: (name: string, grid: GridConfig) => Promise<WorkspaceConfig>
   updateWorkspace: (id: string, updates: Partial<WorkspaceConfig>) => Promise<WorkspaceConfig | null>
   deleteWorkspace: (id: string) => Promise<boolean>
+  // Fired when a workspace/pane changed via a path that didn't go through
+  // this renderer's own action (e.g. an AI tool converting a pane's type
+  // directly in main). Payload is the affected workspace id.
+  onWorkspaceExternalUpdate: (callback: (workspaceId: string) => void) => () => void
 
   // Settings operations
   getSettings: () => Promise<AppSettings>
@@ -80,6 +91,15 @@ export interface ElectronAPI {
 
   // Dialog operations
   openDirectoryDialog: () => Promise<string | null>
+  openFileDialog: (filters?: { name: string; extensions: string[] }[]) => Promise<string | null>
+
+  // Remote access
+  remoteAccess: {
+    getStatus: () => Promise<{ running: boolean; port?: number; bindAddress?: string; connectedClients: number }>
+    hasCredentials: () => Promise<boolean>
+    setCredentials: (username: string, password: string) => Promise<void>
+    regenerateSecret: () => Promise<void>
+  }
 
   // App info
   getAppPath: (name: string) => Promise<string>
@@ -108,7 +128,6 @@ export interface ElectronAPI {
   ) => Promise<SSHServer | null>
   deleteSSHServer: (id: string) => Promise<boolean>
   testSSHServer: (id: string) => Promise<{ success: boolean; command?: string; args?: string[]; password?: string; error?: string }>
-  getSSHPassword: (serverId: string) => Promise<string | null>
   getSSHCommand: (serverId: string, paneId?: string, sessionOverride?: string) => Promise<{ command: string; args: string[]; sessionName: string } | null>
   destroyRemoteTmuxSession: (serverId: string, sessionName: string) => Promise<{ success: boolean; error?: string }>
   listRemoteTmuxSessions: (serverId: string) => Promise<{ success: boolean; error?: string; sessions: Array<{ name: string; attached: boolean; created: number }>; authHint?: string }>
@@ -128,7 +147,8 @@ export interface ElectronAPI {
     systemPrompt?: string,
     temperature?: number,
     maxTokens?: number,
-    enableThinking?: boolean
+    enableThinking?: boolean,
+    toolChoice?: 'auto' | 'required'
   ) => Promise<AIProviderConfig>
   updateAIProvider: (
     id: string,
@@ -144,7 +164,7 @@ export interface ElectronAPI {
   aiStreamMessage: (messages: AIMessage[]) => void
   onAIStreamChunk: (callback: (chunk: string) => void) => () => void
   onAIStreamEnd: (callback: (message: AIMessage) => void) => () => void
-  onAIStreamError: (callback: (error: string) => void) => () => void
+  onAIStreamError: (callback: (error: AIStreamError) => void) => () => void
   aiCancel: () => void
 
   // AI Tool operations
@@ -153,13 +173,16 @@ export interface ElectronAPI {
   aiScreenshot: (paneId?: string) => Promise<string | null>
   aiWriteTerminal: (paneId: string, text: string) => Promise<{ success: boolean; error?: string }>
   aiExecuteTool: (toolCall: AIToolCall) => Promise<AIToolResult>
+  aiSetIntent: (intent: string) => Promise<void>
 
   // AI pane control (triggered by AI tools)
-  onAIFocusPane: (callback: (paneId: string) => void) => () => void
-  onAIMaximizePane: (callback: (paneId: string) => void) => () => void
-  onAISwitchTerminalTab: (callback: (payload: { paneId: string; tabId: string }) => void) => () => void
-  onAIBrowserTabAction: (callback: (payload: { paneId: string; action: 'open' | 'switch' | 'close'; url?: string; tabId?: string }) => void) => () => void
-  onAIReconnectPane: (callback: (payload: { paneId: string; tabId?: string }) => void) => () => void
+  onAIFocusPane: (callback: (payload: { paneId: string; requestId?: string }) => void) => () => void
+  onAIMaximizePane: (callback: (payload: { paneId: string; requestId?: string }) => void) => () => void
+  onAISwitchTerminalTab: (callback: (payload: { paneId: string; tabId: string; requestId?: string }) => void) => () => void
+  onAIBrowserTabAction: (callback: (payload: { paneId: string; action: 'open' | 'switch' | 'close'; url?: string; tabId?: string; requestId?: string }) => void) => () => void
+  onAIReconnectPane: (callback: (payload: { paneId: string; tabId?: string; requestId?: string }) => void) => () => void
+  // Reply to a pane-control command's requestId — see pane-control-ack.ts.
+  ackPaneControl: (requestId: string, ok: boolean) => void
 
   // AI Memory operations
   getAIConversations: (limit?: number) => Promise<AIConversation[]>
@@ -176,6 +199,9 @@ export interface ElectronAPI {
   pruneGoals: () => Promise<number>
   startGoal: (input: StartGoalInput) => Promise<{ goalId: string; error?: string }>
   abortGoal: (id: string) => Promise<boolean>
+  pauseGoalRun: (id: string) => Promise<boolean>
+  resumeGoalRun: (id: string) => Promise<boolean>
+  steerGoal: (id: string, message: string) => Promise<boolean>
   goalStatus: (id: string) => Promise<{ status: GoalStatus; step: number; lastStep?: GoalCheckpoint['steps'][number] } | null>
   onGoalEvent: (cb: (event: GoalRunnerEvent) => void) => () => void
 
@@ -224,10 +250,16 @@ export interface ElectronAPI {
   openDownload: (id: string) => Promise<boolean>
   revealDownload: (id: string) => Promise<boolean>
   cancelDownload: (id: string) => Promise<boolean>
+  pauseDownload: (id: string) => Promise<boolean>
+  resumeDownload: (id: string) => Promise<boolean>
   onDownloadUpdate: (callback: (info: DownloadInfo) => void) => () => void
   onBrowserShortcut: (callback: (msg: BrowserShortcutMessage) => void) => () => void
+  onBrowserHtmlFullscreen: (callback: (msg: { paneId: string; entering: boolean }) => void) => () => void
   onBrowserContextMenu: (callback: (params: BrowserContextMenuParams) => void) => () => void
   openExternal: (url: string) => Promise<boolean>
+  addWordToDictionary: (word: string) => Promise<boolean>
+  copyImageAt: (paneId: string, x: number, y: number) => Promise<boolean>
+  detachBrowserTabDebugger: (webContentsId: number) => void
 
   // Browser pane: saved logins (encrypted via OS keychain)
   listBrowserCredentials: () => Promise<BrowserCredentialMeta[]>
@@ -240,24 +272,20 @@ export interface ElectronAPI {
   // BrowserPane registration (so main/AI can address the webview by paneId)
   registerBrowserPane: (paneId: string, webContentsId: number) => void
   unregisterBrowserPane: (paneId: string) => void
-
-  // AI-driven browser control (called by AIManager from main, but also exposed
-  // here so renderer-side code can introspect / debug if needed)
-  aiBrowserNavigate: (paneId: string, url: string) => Promise<{ success: boolean; error?: string }>
-  aiBrowserGetContent: (paneId: string) => Promise<{ success: boolean; url?: string; title?: string; text?: string; error?: string }>
-  aiBrowserScreenshot: (paneId: string) => Promise<string | null>
-  aiBrowserExecuteJs: (paneId: string, code: string) => Promise<{ success: boolean; result?: unknown; error?: string }>
-  aiBrowserClick: (paneId: string, selector: string) => Promise<{ success: boolean; found?: boolean; error?: string }>
-  aiBrowserType: (paneId: string, selector: string, text: string, submit?: boolean) => Promise<{ success: boolean; found?: boolean; error?: string }>
-  aiBrowserBack: (paneId: string) => Promise<boolean>
-  aiBrowserForward: (paneId: string) => Promise<boolean>
-  aiBrowserReload: (paneId: string) => Promise<boolean>
+  registerBrowserPaneTab: (paneId: string, tabId: string, webContentsId: number) => void
+  unregisterBrowserPaneTab: (paneId: string, tabId: string) => void
 
   // Tier 3: action log + approval gates + recipes
   getBrowserActionLog: (paneId?: string, limit?: number) => Promise<Array<{ id: number; paneId: string; tool: string; args: Record<string, unknown>; ok: boolean; durationMs: number; error?: string; timestamp: number }>>
   onBrowserActionLog: (callback: (entry: { id: number; paneId: string; tool: string; args: Record<string, unknown>; ok: boolean; durationMs: number; error?: string; timestamp: number }) => void) => () => void
   onBrowserApprovalRequest: (callback: (req: { id: string; paneId: string; tool: string; description: string; reason: string }) => void) => () => void
   respondBrowserApproval: (id: string, approved: boolean) => void
+  onBrowserLoginRequest: (callback: (req: { id: string; url: string; realm: string; isProxy: boolean }) => void) => () => void
+  respondBrowserLogin: (id: string, creds: { username: string; password: string } | null) => void
+  onBrowserCertWarning: (callback: (req: { id: string; url: string; error: string }) => void) => () => void
+  respondBrowserCertWarning: (id: string, proceed: boolean) => void
+  onBrowserScreenShareRequest: (callback: (req: { id: string; sources: Array<{ id: string; name: string; thumbnail: string }> }) => void) => () => void
+  respondBrowserScreenShare: (id: string, sourceId: string | null) => void
   listBrowserRecipes: () => Promise<Array<{ id?: string; name: string; description?: string; steps: Array<{ tool: string; args: Record<string, unknown>; retry?: number; on_fail?: string }> }>>
   saveBrowserRecipe: (recipe: { name: string; description?: string; steps: Array<{ tool: string; args: Record<string, unknown>; retry?: number; on_fail?: string }> }) => Promise<unknown>
   deleteBrowserRecipe: (idOrName: string) => Promise<boolean>
@@ -351,6 +379,12 @@ const electronAPI: ElectronAPI = {
     return ipcRenderer.invoke(IPC_CHANNELS.WORKSPACE_DELETE, id)
   },
 
+  onWorkspaceExternalUpdate: (callback: (workspaceId: string) => void) => {
+    const handler = (_event: IpcRendererEvent, workspaceId: string) => callback(workspaceId)
+    ipcRenderer.on(IPC_CHANNELS.WORKSPACE_EXTERNAL_UPDATE, handler)
+    return () => { ipcRenderer.removeListener(IPC_CHANNELS.WORKSPACE_EXTERNAL_UPDATE, handler) }
+  },
+
   // Settings operations
   getSettings: () => {
     return ipcRenderer.invoke(IPC_CHANNELS.SETTINGS_GET)
@@ -363,6 +397,19 @@ const electronAPI: ElectronAPI = {
   // Dialog operations
   openDirectoryDialog: () => {
     return ipcRenderer.invoke(IPC_CHANNELS.DIALOG_OPEN_DIRECTORY)
+  },
+
+  openFileDialog: (filters?: { name: string; extensions: string[] }[]) => {
+    return ipcRenderer.invoke(IPC_CHANNELS.DIALOG_OPEN_FILE, filters)
+  },
+
+  // Remote access
+  remoteAccess: {
+    getStatus: () => ipcRenderer.invoke(IPC_CHANNELS.REMOTE_ACCESS_GET_STATUS),
+    hasCredentials: () => ipcRenderer.invoke(IPC_CHANNELS.REMOTE_ACCESS_HAS_CREDENTIALS),
+    setCredentials: (username: string, password: string) =>
+      ipcRenderer.invoke(IPC_CHANNELS.REMOTE_ACCESS_SET_CREDENTIALS, username, password),
+    regenerateSecret: () => ipcRenderer.invoke(IPC_CHANNELS.REMOTE_ACCESS_REGENERATE_SECRET)
   },
 
   // App info
@@ -429,10 +476,6 @@ const electronAPI: ElectronAPI = {
     return ipcRenderer.invoke(IPC_CHANNELS.SSH_SERVERS_TEST, id)
   },
 
-  getSSHPassword: (serverId: string) => {
-    return ipcRenderer.invoke(IPC_CHANNELS.SSH_GET_PASSWORD, serverId)
-  },
-
   getSSHCommand: (serverId: string, paneId?: string, sessionOverride?: string) => {
     return ipcRenderer.invoke(IPC_CHANNELS.SSH_GET_COMMAND, serverId, paneId, sessionOverride)
   },
@@ -468,7 +511,8 @@ const electronAPI: ElectronAPI = {
     systemPrompt?: string,
     temperature?: number,
     maxTokens?: number,
-    enableThinking?: boolean
+    enableThinking?: boolean,
+    toolChoice?: 'auto' | 'required'
   ) => {
     return ipcRenderer.invoke(
       IPC_CHANNELS.AI_PROVIDERS_CREATE,
@@ -480,7 +524,8 @@ const electronAPI: ElectronAPI = {
       systemPrompt,
       temperature,
       maxTokens,
-      enableThinking
+      enableThinking,
+      toolChoice
     )
   },
 
@@ -533,8 +578,8 @@ const electronAPI: ElectronAPI = {
     }
   },
 
-  onAIStreamError: (callback: (error: string) => void) => {
-    const handler = (_event: IpcRendererEvent, error: string) => {
+  onAIStreamError: (callback: (error: AIStreamError) => void) => {
+    const handler = (_event: IpcRendererEvent, error: AIStreamError) => {
       callback(error)
     }
     ipcRenderer.on(IPC_CHANNELS.AI_STREAM_ERROR, handler)
@@ -568,10 +613,14 @@ const electronAPI: ElectronAPI = {
     return ipcRenderer.invoke('ai:execute:tool', toolCall)
   },
 
+  aiSetIntent: (intent: string) => {
+    return ipcRenderer.invoke(IPC_CHANNELS.AI_SET_INTENT, intent)
+  },
+
   // AI pane control (triggered by AI tools)
-  onAIFocusPane: (callback: (paneId: string) => void) => {
-    const handler = (_event: IpcRendererEvent, paneId: string) => {
-      callback(paneId)
+  onAIFocusPane: (callback: (payload: { paneId: string; requestId?: string }) => void) => {
+    const handler = (_event: IpcRendererEvent, payload: { paneId: string; requestId?: string }) => {
+      callback(payload)
     }
     ipcRenderer.on(IPC_CHANNELS.AI_FOCUS_PANE, handler)
     return () => {
@@ -579,9 +628,9 @@ const electronAPI: ElectronAPI = {
     }
   },
 
-  onAIMaximizePane: (callback: (paneId: string) => void) => {
-    const handler = (_event: IpcRendererEvent, paneId: string) => {
-      callback(paneId)
+  onAIMaximizePane: (callback: (payload: { paneId: string; requestId?: string }) => void) => {
+    const handler = (_event: IpcRendererEvent, payload: { paneId: string; requestId?: string }) => {
+      callback(payload)
     }
     ipcRenderer.on(IPC_CHANNELS.AI_MAXIMIZE_PANE, handler)
     return () => {
@@ -589,22 +638,26 @@ const electronAPI: ElectronAPI = {
     }
   },
 
-  onAISwitchTerminalTab: (callback: (payload: { paneId: string; tabId: string }) => void) => {
-    const handler = (_event: IpcRendererEvent, payload: { paneId: string; tabId: string }) => callback(payload)
+  onAISwitchTerminalTab: (callback: (payload: { paneId: string; tabId: string; requestId?: string }) => void) => {
+    const handler = (_event: IpcRendererEvent, payload: { paneId: string; tabId: string; requestId?: string }) => callback(payload)
     ipcRenderer.on(IPC_CHANNELS.AI_SWITCH_TERMINAL_TAB, handler)
     return () => ipcRenderer.removeListener(IPC_CHANNELS.AI_SWITCH_TERMINAL_TAB, handler)
   },
 
-  onAIBrowserTabAction: (callback: (payload: { paneId: string; action: 'open' | 'switch' | 'close'; url?: string; tabId?: string }) => void) => {
-    const handler = (_event: IpcRendererEvent, payload: { paneId: string; action: 'open' | 'switch' | 'close'; url?: string; tabId?: string }) => callback(payload)
+  onAIBrowserTabAction: (callback: (payload: { paneId: string; action: 'open' | 'switch' | 'close'; url?: string; tabId?: string; requestId?: string }) => void) => {
+    const handler = (_event: IpcRendererEvent, payload: { paneId: string; action: 'open' | 'switch' | 'close'; url?: string; tabId?: string; requestId?: string }) => callback(payload)
     ipcRenderer.on(IPC_CHANNELS.AI_BROWSER_TAB_ACTION, handler)
     return () => ipcRenderer.removeListener(IPC_CHANNELS.AI_BROWSER_TAB_ACTION, handler)
   },
 
-  onAIReconnectPane: (callback: (payload: { paneId: string; tabId?: string }) => void) => {
-    const handler = (_event: IpcRendererEvent, payload: { paneId: string; tabId?: string }) => callback(payload)
+  onAIReconnectPane: (callback: (payload: { paneId: string; tabId?: string; requestId?: string }) => void) => {
+    const handler = (_event: IpcRendererEvent, payload: { paneId: string; tabId?: string; requestId?: string }) => callback(payload)
     ipcRenderer.on(IPC_CHANNELS.AI_RECONNECT_PANE, handler)
     return () => ipcRenderer.removeListener(IPC_CHANNELS.AI_RECONNECT_PANE, handler)
+  },
+
+  ackPaneControl: (requestId: string, ok: boolean) => {
+    ipcRenderer.send(IPC_CHANNELS.PANE_CONTROL_ACK, requestId, ok)
   },
 
   // AI Memory operations
@@ -645,6 +698,15 @@ const electronAPI: ElectronAPI = {
   },
   abortGoal: (id: string) => {
     return ipcRenderer.invoke('goal:abort', id)
+  },
+  pauseGoalRun: (id: string) => {
+    return ipcRenderer.invoke('goal:pause', id)
+  },
+  resumeGoalRun: (id: string) => {
+    return ipcRenderer.invoke('goal:resume', id)
+  },
+  steerGoal: (id: string, message: string) => {
+    return ipcRenderer.invoke('goal:steer', id, message)
   },
   goalStatus: (id: string) => {
     return ipcRenderer.invoke('goal:status', id)
@@ -781,6 +843,8 @@ const electronAPI: ElectronAPI = {
   openDownload: (id) => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_DOWNLOAD_OPEN, id),
   revealDownload: (id) => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_DOWNLOAD_REVEAL, id),
   cancelDownload: (id) => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_DOWNLOAD_CANCEL, id),
+  pauseDownload: (id) => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_DOWNLOAD_PAUSE, id),
+  resumeDownload: (id) => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_DOWNLOAD_RESUME, id),
   onDownloadUpdate: (callback) => {
     const handler = (_event: IpcRendererEvent, info: DownloadInfo) => callback(info)
     ipcRenderer.on(IPC_CHANNELS.BROWSER_DOWNLOAD_UPDATE, handler)
@@ -791,12 +855,20 @@ const electronAPI: ElectronAPI = {
     ipcRenderer.on(IPC_CHANNELS.BROWSER_SHORTCUT, handler)
     return () => { ipcRenderer.removeListener(IPC_CHANNELS.BROWSER_SHORTCUT, handler) }
   },
+  onBrowserHtmlFullscreen: (callback) => {
+    const handler = (_event: IpcRendererEvent, msg: Parameters<typeof callback>[0]) => callback(msg)
+    ipcRenderer.on(IPC_CHANNELS.BROWSER_HTML_FULLSCREEN, handler)
+    return () => { ipcRenderer.removeListener(IPC_CHANNELS.BROWSER_HTML_FULLSCREEN, handler) }
+  },
   onBrowserContextMenu: (callback) => {
     const handler = (_event: IpcRendererEvent, params: BrowserContextMenuParams) => callback(params)
     ipcRenderer.on(IPC_CHANNELS.BROWSER_CONTEXT_MENU, handler)
     return () => { ipcRenderer.removeListener(IPC_CHANNELS.BROWSER_CONTEXT_MENU, handler) }
   },
   openExternal: (url: string) => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_OPEN_EXTERNAL, url),
+  addWordToDictionary: (word: string) => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_ADD_DICTIONARY_WORD, word),
+  copyImageAt: (paneId: string, x: number, y: number) => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_COPY_IMAGE_AT, paneId, x, y),
+  detachBrowserTabDebugger: (webContentsId: number) => ipcRenderer.send(IPC_CHANNELS.BROWSER_TAB_CDP_DETACH, webContentsId),
 
   listBrowserCredentials: () => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_CREDENTIALS_LIST),
   saveBrowserCredential: (input) => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_CREDENTIALS_SAVE, input),
@@ -807,16 +879,8 @@ const electronAPI: ElectronAPI = {
 
   registerBrowserPane: (paneId, webContentsId) => ipcRenderer.send(IPC_CHANNELS.BROWSER_PANE_REGISTER, paneId, webContentsId),
   unregisterBrowserPane: (paneId) => ipcRenderer.send(IPC_CHANNELS.BROWSER_PANE_UNREGISTER, paneId),
-
-  aiBrowserNavigate: (paneId, url) => ipcRenderer.invoke(IPC_CHANNELS.AI_BROWSER_NAVIGATE, paneId, url),
-  aiBrowserGetContent: (paneId) => ipcRenderer.invoke(IPC_CHANNELS.AI_BROWSER_GET_CONTENT, paneId),
-  aiBrowserScreenshot: (paneId) => ipcRenderer.invoke(IPC_CHANNELS.AI_BROWSER_SCREENSHOT, paneId),
-  aiBrowserExecuteJs: (paneId, code) => ipcRenderer.invoke(IPC_CHANNELS.AI_BROWSER_EXECUTE_JS, paneId, code),
-  aiBrowserClick: (paneId, selector) => ipcRenderer.invoke(IPC_CHANNELS.AI_BROWSER_CLICK, paneId, selector),
-  aiBrowserType: (paneId, selector, text, submit) => ipcRenderer.invoke(IPC_CHANNELS.AI_BROWSER_TYPE, paneId, selector, text, submit),
-  aiBrowserBack: (paneId) => ipcRenderer.invoke(IPC_CHANNELS.AI_BROWSER_BACK, paneId),
-  aiBrowserForward: (paneId) => ipcRenderer.invoke(IPC_CHANNELS.AI_BROWSER_FORWARD, paneId),
-  aiBrowserReload: (paneId) => ipcRenderer.invoke(IPC_CHANNELS.AI_BROWSER_RELOAD, paneId),
+  registerBrowserPaneTab: (paneId, tabId, webContentsId) => ipcRenderer.send(IPC_CHANNELS.BROWSER_PANE_TAB_REGISTER, paneId, tabId, webContentsId),
+  unregisterBrowserPaneTab: (paneId, tabId) => ipcRenderer.send(IPC_CHANNELS.BROWSER_PANE_TAB_UNREGISTER, paneId, tabId),
 
   getBrowserActionLog: (paneId, limit) => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_ACTION_LOG_GET, paneId, limit),
   onBrowserActionLog: (callback) => {
@@ -830,6 +894,24 @@ const electronAPI: ElectronAPI = {
     return () => { ipcRenderer.removeListener(IPC_CHANNELS.BROWSER_APPROVAL_REQUEST, handler) }
   },
   respondBrowserApproval: (id, approved) => ipcRenderer.send(IPC_CHANNELS.BROWSER_APPROVAL_RESPONSE, id, approved),
+  onBrowserLoginRequest: (callback) => {
+    const handler = (_event: IpcRendererEvent, req: Parameters<typeof callback>[0]) => callback(req)
+    ipcRenderer.on(IPC_CHANNELS.BROWSER_LOGIN_REQUEST, handler)
+    return () => { ipcRenderer.removeListener(IPC_CHANNELS.BROWSER_LOGIN_REQUEST, handler) }
+  },
+  respondBrowserLogin: (id, creds) => ipcRenderer.send(IPC_CHANNELS.BROWSER_LOGIN_RESPONSE, id, creds),
+  onBrowserCertWarning: (callback) => {
+    const handler = (_event: IpcRendererEvent, req: Parameters<typeof callback>[0]) => callback(req)
+    ipcRenderer.on(IPC_CHANNELS.BROWSER_CERT_WARNING_REQUEST, handler)
+    return () => { ipcRenderer.removeListener(IPC_CHANNELS.BROWSER_CERT_WARNING_REQUEST, handler) }
+  },
+  respondBrowserCertWarning: (id, proceed) => ipcRenderer.send(IPC_CHANNELS.BROWSER_CERT_WARNING_RESPONSE, id, proceed),
+  onBrowserScreenShareRequest: (callback) => {
+    const handler = (_event: IpcRendererEvent, req: Parameters<typeof callback>[0]) => callback(req)
+    ipcRenderer.on(IPC_CHANNELS.BROWSER_SCREEN_SHARE_REQUEST, handler)
+    return () => { ipcRenderer.removeListener(IPC_CHANNELS.BROWSER_SCREEN_SHARE_REQUEST, handler) }
+  },
+  respondBrowserScreenShare: (id, sourceId) => ipcRenderer.send(IPC_CHANNELS.BROWSER_SCREEN_SHARE_RESPONSE, id, sourceId),
   listBrowserRecipes: () => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_RECIPES_LIST),
   saveBrowserRecipe: (recipe) => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_RECIPES_SAVE, recipe),
   deleteBrowserRecipe: (idOrName) => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_RECIPES_DELETE, idOrName)

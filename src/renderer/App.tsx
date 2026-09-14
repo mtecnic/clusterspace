@@ -9,6 +9,7 @@ import { StatusBar } from './components/StatusBar'
 import { NewWorkspaceDialog } from './components/NewWorkspaceDialog'
 import { CommandPalette } from './components/CommandPalette'
 import { SettingsDialog } from './components/SettingsDialog'
+import { RemoteAccessSettingsDialog } from './components/RemoteAccessSettingsDialog'
 import { GridResizeDialog } from './components/GridResizeDialog'
 import { SSHServersDialog } from './components/SSHServersDialog'
 import { BrowserCredentialsDialog } from './components/BrowserCredentialsDialog'
@@ -17,12 +18,15 @@ import { AISettingsDialog } from './components/AISettingsDialog'
 import { FleetDashboard } from './components/FleetDashboard'
 import { GoalDashboard } from './components/GoalDashboard'
 import { BrowserApprovalModal } from './components/BrowserApprovalModal'
+import { LoginPromptModal } from './components/LoginPromptModal'
+import { CertWarningModal } from './components/CertWarningModal'
+import { ScreenSharePickerModal } from './components/ScreenSharePickerModal'
 import { GridConfig, PaneConfig } from '@shared/types'
 import { dispatchBrowserTabAction } from './lib/pane-controls'
 
 interface AppContentProps {
-  onRegisterFocusPane?: (cb: (id: string) => void) => void
-  onRegisterMaximizePane?: (cb: (id: string) => void) => void
+  onRegisterFocusPane?: (cb: (id: string) => boolean) => void
+  onRegisterMaximizePane?: (cb: (id: string) => boolean) => void
 }
 
 function AppContent({ onRegisterFocusPane, onRegisterMaximizePane }: AppContentProps) {
@@ -43,12 +47,17 @@ function AppContent({ onRegisterFocusPane, onRegisterMaximizePane }: AppContentP
   const [showNewWorkspaceDialog, setShowNewWorkspaceDialog] = useState(false)
   const [showCommandPalette, setShowCommandPalette] = useState(false)
   const [showSettingsDialog, setShowSettingsDialog] = useState(false)
+  const [showRemoteAccessDialog, setShowRemoteAccessDialog] = useState(false)
   const [showGridResizeDialog, setShowGridResizeDialog] = useState(false)
   const [showSSHServersDialog, setShowSSHServersDialog] = useState(false)
   const [showBrowserCredentialsDialog, setShowBrowserCredentialsDialog] = useState(false)
   const [showAISettingsDialog, setShowAISettingsDialog] = useState(false)
   const [showFleetDashboard, setShowFleetDashboard] = useState(false)
   const [showGoalDashboard, setShowGoalDashboard] = useState(false)
+  // Set when a Fleet Dashboard card is clicked to drill into that pane's
+  // goal — swaps which dashboard is open and tells GoalDashboard which
+  // goal to pre-select, instead of duplicating its detail view.
+  const [drillGoalId, setDrillGoalId] = useState<string | null>(null)
   const [runningGoalCount, setRunningGoalCount] = useState(0)
   const [focusedPaneId, setFocusedPaneId] = useState<string | null>(null)
   const [broadcastEnabled, setBroadcastEnabled] = useState(false)
@@ -255,13 +264,22 @@ function AppContent({ onRegisterFocusPane, onRegisterMaximizePane }: AppContentP
     onToggleGoals: () => setShowGoalDashboard(prev => !prev)
   })
 
-  // Register AI pane control callbacks
+  // Register AI pane control callbacks. Each validates the paneId actually
+  // exists in the active workspace before acting, and returns whether it
+  // did — the AI tool's ack path (see pane-control-ack.ts) surfaces this as
+  // a real result instead of unconditional "success".
   React.useEffect(() => {
-    onRegisterFocusPane?.(setFocusedPaneId)
-    onRegisterMaximizePane?.((id) => {
-      setMaximizedPaneId(prev => prev === id ? null : id)
+    onRegisterFocusPane?.((id) => {
+      const exists = !!activeWorkspace?.panes.some(p => p.id === id)
+      if (exists) setFocusedPaneId(id)
+      return exists
     })
-  }, [onRegisterFocusPane, onRegisterMaximizePane])
+    onRegisterMaximizePane?.((id) => {
+      const exists = !!activeWorkspace?.panes.some(p => p.id === id)
+      if (exists) setMaximizedPaneId(prev => prev === id ? null : id)
+      return exists
+    })
+  }, [onRegisterFocusPane, onRegisterMaximizePane, activeWorkspace])
 
   // Set initial focused pane
   React.useEffect(() => {
@@ -403,6 +421,15 @@ function AppContent({ onRegisterFocusPane, onRegisterMaximizePane }: AppContentP
         onUpdateSettings={updateSettings}
         onExportWorkspace={handleExportWorkspace}
         onImportWorkspace={handleImportWorkspace}
+        onOpenRemoteAccess={() => setShowRemoteAccessDialog(true)}
+      />
+
+      {/* Remote Access Settings Dialog */}
+      <RemoteAccessSettingsDialog
+        isOpen={showRemoteAccessDialog}
+        onClose={() => setShowRemoteAccessDialog(false)}
+        settings={settings}
+        onUpdateSettings={updateSettings}
       />
 
       {/* Grid Resize Dialog */}
@@ -504,35 +531,42 @@ function AppContent({ onRegisterFocusPane, onRegisterMaximizePane }: AppContentP
       {/* Fleet Dashboard */}
       <GoalDashboard
         isOpen={showGoalDashboard}
-        onClose={() => setShowGoalDashboard(false)}
+        onClose={() => { setShowGoalDashboard(false); setDrillGoalId(null) }}
         panes={activeWorkspace?.panes ?? []}
+        initialSelectedGoalId={drillGoalId ?? undefined}
       />
 
       <FleetDashboard
         isOpen={showFleetDashboard}
         onClose={() => setShowFleetDashboard(false)}
+        panes={activeWorkspace?.panes ?? []}
+        onDrillIntoGoal={(goalId) => {
+          setShowFleetDashboard(false)
+          setDrillGoalId(goalId)
+          setShowGoalDashboard(true)
+        }}
       />
     </div>
   )
 }
 
 function AppWithAI() {
-  const [focusPaneCallback, setFocusPaneCallback] = useState<((id: string) => void) | null>(null)
-  const [maximizePaneCallback, setMaximizePaneCallback] = useState<((id: string) => void) | null>(null)
+  const [focusPaneCallback, setFocusPaneCallback] = useState<((id: string) => boolean) | null>(null)
+  const [maximizePaneCallback, setMaximizePaneCallback] = useState<((id: string) => boolean) | null>(null)
 
   // Stabilize callbacks to prevent infinite re-render loops
-  const handleRegisterFocusPane = useCallback((cb: (id: string) => void) => {
+  const handleRegisterFocusPane = useCallback((cb: (id: string) => boolean) => {
     setFocusPaneCallback(() => cb)
   }, [])
 
-  const handleRegisterMaximizePane = useCallback((cb: (id: string) => void) => {
+  const handleRegisterMaximizePane = useCallback((cb: (id: string) => boolean) => {
     setMaximizePaneCallback(() => cb)
   }, [])
 
   return (
     <AIProvider
-      onFocusPane={(id) => focusPaneCallback?.(id)}
-      onMaximizePane={(id) => maximizePaneCallback?.(id)}
+      onFocusPane={(id) => focusPaneCallback?.(id) ?? false}
+      onMaximizePane={(id) => maximizePaneCallback?.(id) ?? false}
     >
       <AppContent
         onRegisterFocusPane={handleRegisterFocusPane}
@@ -548,6 +582,9 @@ export function App() {
       <AgentProvider>
         <AppWithAI />
         <BrowserApprovalModal />
+        <LoginPromptModal />
+        <CertWarningModal />
+        <ScreenSharePickerModal />
       </AgentProvider>
     </WorkspaceProvider>
   )

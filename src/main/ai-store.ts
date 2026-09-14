@@ -56,7 +56,8 @@ export class AIStore {
     systemPrompt?: string,
     temperature?: number,
     maxTokens?: number,
-    enableThinking?: boolean
+    enableThinking?: boolean,
+    toolChoice?: 'auto' | 'required'
   ): AIProviderConfig {
     const provider: AIProviderConfig = {
       id: uuidv4(),
@@ -68,6 +69,7 @@ export class AIStore {
       temperature: temperature ?? 0.7,
       maxTokens: maxTokens ?? 4096,
       enableThinking,
+      toolChoice,
       createdAt: Date.now(),
       updatedAt: Date.now()
     }

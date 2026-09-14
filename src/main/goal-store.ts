@@ -57,9 +57,11 @@ export class GoalStore {
       const trimmed = goals
         .sort((a, b) => {
           // Finished goals are sortable by updatedAt (older = drop first).
-          // In-flight (pending/running/paused) goals are always retained.
-          const aActive = a.status === 'pending' || a.status === 'running' || a.status === 'paused'
-          const bActive = b.status === 'pending' || b.status === 'running' || b.status === 'paused'
+          // In-flight (pending/running/paused/interrupted) goals are always
+          // retained — an interrupted goal is exactly as "not done" as a
+          // paused one, just not by the user's own choice.
+          const aActive = a.status === 'pending' || a.status === 'running' || a.status === 'paused' || a.status === 'interrupted'
+          const bActive = b.status === 'pending' || b.status === 'running' || b.status === 'paused' || b.status === 'interrupted'
           if (aActive !== bActive) return aActive ? -1 : 1
           return b.updatedAt - a.updatedAt
         })
@@ -84,9 +86,33 @@ export class GoalStore {
     })
   }
 
-  /** Goals that were in-flight when the app last shut down — eligible for resume. */
+  /** Goals eligible for GoalRunner.resume() — explicitly paused by the user,
+   *  or interrupted by a crash/restart (see reconcileOrphaned). */
   listResumable(): GoalCheckpoint[] {
-    return this.list().filter(g => g.status === 'running' || g.status === 'paused')
+    return this.list().filter(g => g.status === 'running' || g.status === 'paused' || g.status === 'interrupted')
+  }
+
+  /** Call once at startup, before any goal can resume. Anything still marked
+   *  'running' was never cleanly stopped — the process that owned it is
+   *  gone, so its in-memory RuntimeGoal (guard state, live message array)
+   *  is gone with it. Reclassifies as 'interrupted' (distinct from
+   *  'paused' — that's a clean, user-requested stop) and returns what was
+   *  found, so the caller can notify and reset any pane status left
+   *  stuck on 'working'. Deliberately does not touch 'paused' goals —
+   *  those already correctly represent "resumable, by the user's choice."
+   */
+  reconcileOrphaned(): GoalCheckpoint[] {
+    const goals = this.store.get('goals', [])
+    const orphaned = goals.filter(g => g.status === 'running')
+    if (orphaned.length === 0) return []
+    for (const g of goals) {
+      if (g.status === 'running') {
+        g.status = 'interrupted'
+        g.updatedAt = Date.now()
+      }
+    }
+    this.store.set('goals', goals)
+    return orphaned.map(g => ({ ...g, status: 'interrupted' as const }))
   }
 
   update(id: string, patch: Partial<Omit<GoalCheckpoint, 'id' | 'createdAt'>>): GoalCheckpoint | null {
@@ -135,7 +161,7 @@ export class GoalStore {
   /** Wipe goals matching the predicate. Defaults to "all finished goals." */
   prune(predicate?: (g: GoalCheckpoint) => boolean): number {
     const goals = this.store.get('goals', [])
-    const pred = predicate ?? ((g: GoalCheckpoint) => g.status !== 'running' && g.status !== 'paused' && g.status !== 'pending')
+    const pred = predicate ?? ((g: GoalCheckpoint) => g.status !== 'running' && g.status !== 'paused' && g.status !== 'pending' && g.status !== 'interrupted')
     const kept = goals.filter(g => !pred(g))
     this.store.set('goals', kept)
     return goals.length - kept.length

@@ -25,6 +25,11 @@ interface WebviewElement extends HTMLElement {
   paste: () => void
   selectAll: () => void
   inspectElement: (x: number, y: number) => void
+  replaceMisspelling: (text: string) => void
+  downloadURL: (url: string) => void
+  setZoomFactor: (factor: number) => void
+  getZoomFactor: () => number
+  print: () => void
 }
 
 export interface BrowserTabCrashState {
@@ -56,6 +61,11 @@ export interface BrowserTabWebviewHandle {
   cut: () => void
   paste: () => void
   selectAll: () => void
+  replaceMisspelling: (text: string) => void
+  downloadURL: (url: string) => void
+  setZoomFactor: (factor: number) => void
+  getZoomFactor: () => number
+  print: () => void
   getBoundingClientRect: () => DOMRect | null
   recreate: () => void
 }
@@ -67,6 +77,21 @@ interface BrowserTabWebviewProps {
   onNavigated: (tabId: string, patch: Partial<Pick<BrowserTab, 'url' | 'title' | 'favicon'>>) => void
   onWebContentsId: (tabId: string, id: number | null) => void
   onStatus: (tabId: string, status: BrowserTabStatus) => void
+  // Fired when the guest's content gains focus (e.g. the user clicked into
+  // the page). Unlike a plain DOM click, `focus` is one of the few events
+  // Electron actually dispatches on the host <webview> element when focus
+  // moves into the guest process — ordinary mousedown/click never bubble
+  // out of a webview's guest content, so a host-side "click outside to
+  // close this popover" listener can never see a click on the page itself.
+  onWebviewFocus?: (tabId: string) => void
+  // Background-tab memory management. pinned and an idleThresholdMs <= 0
+  // both opt a tab out of auto-discard entirely.
+  pinned?: boolean
+  idleThresholdMs: number
+  onDiscardedChange?: (tabId: string, discarded: boolean) => void
+  // Persisted per-tab page zoom (1 = 100%), restored once the guest attaches.
+  initialZoom?: number
+  onZoomChanged?: (tabId: string, zoomLevel: number) => void
 }
 
 // Owns one tab's live <webview> guest — its navigation state, lifecycle
@@ -75,7 +100,7 @@ interface BrowserTabWebviewProps {
 // loadURL() call — the previous single-shared-webview design reloaded the
 // page (and lost scroll position / in-page state) on every tab switch.
 export const BrowserTabWebview = forwardRef<BrowserTabWebviewHandle, BrowserTabWebviewProps>(
-  function BrowserTabWebview({ tabId, initialUrl, isActive, onNavigated, onWebContentsId, onStatus }, ref) {
+  function BrowserTabWebview({ tabId, initialUrl, isActive, onNavigated, onWebContentsId, onStatus, onWebviewFocus, pinned, idleThresholdMs, onDiscardedChange, initialZoom, onZoomChanged }, ref) {
     const webviewRef = useRef<WebviewElement | null>(null)
     // Snapshotted at mount so the src isn't re-set on every re-render (which
     // would cause reload loops) — navigation calls webview.loadURL() instead.
@@ -93,8 +118,23 @@ export const BrowserTabWebview = forwardRef<BrowserTabWebviewHandle, BrowserTabW
     // Tracks the latest favicon so onStopLoading's history entry can include
     // it without needing to re-subscribe listeners on every favicon change.
     const faviconRef = useRef<string | undefined>(undefined)
-    // Tracks the latest known URL for the crash overlay's fallback detail line.
+    // Tracks the latest known URL for the crash overlay's fallback detail line
+    // and as the URL a discarded tab restores to.
     const lastUrlRef = useRef<string>(initialUrl)
+    // Background-tab memory management (idle discard).
+    const [discarded, setDiscarded] = useState(false)
+    const [isAudible, setIsAudible] = useState(false)
+    // One-shot guard around discard()'s about:blank load so its navigation
+    // events don't get tracked as if the user actually navigated there —
+    // cleared when that load's terminal did-stop-loading fires.
+    const suppressTrackingRef = useRef(false)
+    const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+    // Guards the persisted-zoom restore in onDomReady to once per guest
+    // (dom-ready fires on every navigation, not just the first) — reset
+    // only when the guest is actually recreated, not on every re-render of
+    // the surrounding navigation-events effect.
+    const zoomAppliedRef = useRef(false)
+    useEffect(() => { zoomAppliedRef.current = false }, [webviewKey])
 
     useEffect(() => {
       onStatus(tabId, { isLoading, canGoBack, canGoForward, crashState, findMatches })
@@ -113,6 +153,13 @@ export const BrowserTabWebview = forwardRef<BrowserTabWebviewHandle, BrowserTabW
       }
       const onStopLoading: EventListener = () => {
         setIsLoading(false)
+        if (suppressTrackingRef.current) {
+          // Terminal event for discard()'s about:blank load — stop suppressing
+          // and skip tracking this one navigation, but don't touch lastUrlRef
+          // (it still holds the real page discard is standing in for).
+          suppressTrackingRef.current = false
+          return
+        }
         try {
           setCanGoBack(webview.canGoBack())
           setCanGoForward(webview.canGoForward())
@@ -126,6 +173,7 @@ export const BrowserTabWebview = forwardRef<BrowserTabWebviewHandle, BrowserTabW
         } catch { /* webview may have detached */ }
       }
       const onNavigate: EventListener = (evt) => {
+        if (suppressTrackingRef.current) return
         const url = (evt as Event & { url?: string }).url
         if (url) {
           lastUrlRef.current = url
@@ -173,11 +221,30 @@ export const BrowserTabWebview = forwardRef<BrowserTabWebviewHandle, BrowserTabW
         try {
           onWebContentsId(tabId, webview.getWebContentsId())
         } catch { /* ignore */ }
+        // Apply the persisted zoom once per mount, not on every navigation
+        // within the tab (dom-ready fires for each one) — otherwise a live
+        // Ctrl+/Ctrl- change would get reset back to the saved value the
+        // next time the page navigates.
+        if (!zoomAppliedRef.current) {
+          zoomAppliedRef.current = true
+          if (initialZoom && initialZoom !== 1) {
+            try { webview.setZoomFactor(initialZoom) } catch { /* ignore */ }
+          }
+        }
       }
       const onFoundInPage: EventListener = (evt) => {
         const r = (evt as Event & { result?: { activeMatchOrdinal: number; matches: number; finalUpdate: boolean } }).result
         if (r) setFindMatches({ active: r.activeMatchOrdinal, total: r.matches })
       }
+      // Documented <webview> DOM events — drive isAudible so the idle-discard
+      // effect below exempts tabs actively playing audio/video.
+      const onMediaPlaying: EventListener = () => setIsAudible(true)
+      const onMediaPaused: EventListener = () => setIsAudible(false)
+      // Standard HTMLElement 'focus', not an Electron-specific webview event
+      // — but it's one of the only signals Electron dispatches on the host
+      // <webview> element when focus moves into the guest, since ordinary
+      // clicks on page content never bubble out of the guest process at all.
+      const onWebviewFocused: EventListener = () => onWebviewFocus?.(tabId)
 
       webview.addEventListener('did-start-loading', onStartLoading)
       webview.addEventListener('did-stop-loading', onStopLoading)
@@ -192,6 +259,9 @@ export const BrowserTabWebview = forwardRef<BrowserTabWebviewHandle, BrowserTabW
       webview.addEventListener('responsive', onResponsive)
       webview.addEventListener('dom-ready', onDomReady)
       webview.addEventListener('found-in-page', onFoundInPage)
+      webview.addEventListener('media-started-playing', onMediaPlaying)
+      webview.addEventListener('media-paused', onMediaPaused)
+      webview.addEventListener('focus', onWebviewFocused)
 
       return () => {
         webview.removeEventListener('did-start-loading', onStartLoading)
@@ -207,10 +277,13 @@ export const BrowserTabWebview = forwardRef<BrowserTabWebviewHandle, BrowserTabW
         webview.removeEventListener('responsive', onResponsive)
         webview.removeEventListener('dom-ready', onDomReady)
         webview.removeEventListener('found-in-page', onFoundInPage)
+        webview.removeEventListener('media-started-playing', onMediaPlaying)
+        webview.removeEventListener('media-paused', onMediaPaused)
+        webview.removeEventListener('focus', onWebviewFocused)
       }
       // webviewKey is in deps so these listeners rebind to the recreated element
       // after a recovery (recreateWebview bumps the key).
-    }, [tabId, onNavigated, onWebContentsId, webviewKey])
+    }, [tabId, onNavigated, onWebContentsId, onWebviewFocus, webviewKey])
 
     // Report/withdraw this tab's webContentsId as its guest attaches/detaches.
     useEffect(() => {
@@ -250,6 +323,51 @@ export const BrowserTabWebview = forwardRef<BrowserTabWebviewHandle, BrowserTabW
       setWebviewKey(k => k + 1)
     }, [mountUrl])
 
+    // Background-tab memory management: navigate a hidden tab's guest to
+    // about:blank to free its DOM/JS heap, without touching lastUrlRef (the
+    // real page to restore to) or persisted tab state (suppressTrackingRef).
+    const discard = useCallback(() => {
+      const webview = webviewRef.current
+      if (!webview || discarded) return
+      suppressTrackingRef.current = true
+      try { webview.loadURL('about:blank').catch(() => {}) } catch { /* ignore */ }
+      setDiscarded(true)
+      onDiscardedChange?.(tabId, true)
+    }, [tabId, discarded, onDiscardedChange])
+
+    const restore = useCallback(() => {
+      const webview = webviewRef.current
+      if (!webview || !discarded) return
+      try { webview.loadURL(lastUrlRef.current).catch(() => {}) } catch { /* ignore */ }
+      setDiscarded(false)
+      onDiscardedChange?.(tabId, false)
+    }, [tabId, discarded, onDiscardedChange])
+
+    // Idle timer: starts counting down when this tab goes inactive, discards
+    // on expiry unless pinned or already exempt (audio playing). Restores
+    // immediately on reactivation — by construction a discarded tab is never
+    // AI-addressable, since switch_browser_tab (the only way an AI tool
+    // reaches a non-active tab) flips isActive true first.
+    useEffect(() => {
+      if (idleTimerRef.current) {
+        clearTimeout(idleTimerRef.current)
+        idleTimerRef.current = null
+      }
+      if (idleThresholdMs <= 0 || pinned) return
+      if (isActive) {
+        if (discarded) restore()
+        return
+      }
+      if (discarded || isAudible) return
+      idleTimerRef.current = setTimeout(discard, idleThresholdMs)
+      return () => {
+        if (idleTimerRef.current) {
+          clearTimeout(idleTimerRef.current)
+          idleTimerRef.current = null
+        }
+      }
+    }, [isActive, pinned, idleThresholdMs, discarded, isAudible, discard, restore])
+
     useImperativeHandle(ref, () => ({
       navigate: (url: string) => { webviewRef.current?.loadURL(url).catch(() => {}) },
       reload: () => {
@@ -278,9 +396,17 @@ export const BrowserTabWebview = forwardRef<BrowserTabWebviewHandle, BrowserTabW
       cut: () => webviewRef.current?.cut(),
       paste: () => webviewRef.current?.paste(),
       selectAll: () => webviewRef.current?.selectAll(),
+      replaceMisspelling: (text) => webviewRef.current?.replaceMisspelling(text),
+      downloadURL: (url) => webviewRef.current?.downloadURL(url),
+      setZoomFactor: (factor) => {
+        webviewRef.current?.setZoomFactor(factor)
+        onZoomChanged?.(tabId, factor)
+      },
+      getZoomFactor: () => webviewRef.current?.getZoomFactor() ?? 1,
+      print: () => webviewRef.current?.print(),
       getBoundingClientRect: () => webviewRef.current?.getBoundingClientRect() ?? null,
       recreate
-    }), [crashState, recreate])
+    }), [crashState, recreate, tabId, onZoomChanged])
 
     return (
       <div
@@ -295,8 +421,27 @@ export const BrowserTabWebview = forwardRef<BrowserTabWebviewHandle, BrowserTabW
           ref={webviewRef as React.RefObject<HTMLElement>}
           src={mountUrl}
           partition="persist:browser-pane"
-          allowpopups={true}
-          webpreferences="contextIsolation=yes,nodeIntegration=no,sandbox=yes"
+          // `<webview>` is a non-standard element with no dash in its tag
+          // name, so React doesn't treat allowpopups as a recognized
+          // boolean attribute — allowpopups={true} silently never reaches
+          // the DOM at all (React just warns and drops it, confirmed via
+          // the exact "Received `true` for a non-boolean attribute
+          // `allowpopups`" console warning). A real string is what
+          // Electron's webview actually checks for via hasAttribute().
+          // Without it, the guest can't open ANY new window — window.open()
+          // calls AND target="_blank" anchor clicks are both silently
+          // no-ops, with no event ever reaching the host
+          // (setWindowOpenHandler never even fires). That's the actual
+          // cause of "links don't navigate" / "popup button does nothing".
+          //
+          // @types/react's ambient `WebViewHTMLAttributes.allowpopups` is
+          // typed `boolean | undefined` (it doesn't reflect Electron's
+          // actual DOM-level string check), and it wins over this project's
+          // own broader `vite-env.d.ts` override in JSX resolution — so the
+          // double cast below is a deliberate, narrow lie to the type
+          // checker to get the real string value written to the DOM.
+          allowpopups={'true' as unknown as boolean}
+          webpreferences="contextIsolation=yes,nodeIntegration=no,sandbox=yes,plugins=yes"
           style={{ flex: '1 1 auto', width: '100%', height: '100%' }}
         />
 

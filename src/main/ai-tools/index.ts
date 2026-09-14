@@ -7,6 +7,7 @@
  * `register<Whatever>Tools()` function, and call it from registerAllTools().
  */
 import { registerStepProtocolTools } from './step-protocol'
+import { registerTodoTools } from './todo'
 import { registerPaneTools } from './pane'
 import { registerControlTools } from './controls'
 import { registerOrchestrationTools } from './orchestration'
@@ -27,6 +28,7 @@ export function registerAllTools(): void {
   if (registered) return
   registered = true
   registerStepProtocolTools()
+  registerTodoTools()
   registerPaneTools()
   registerControlTools()
   registerOrchestrationTools()

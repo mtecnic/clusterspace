@@ -1,6 +1,6 @@
 import Store from 'electron-store'
 import { v4 as uuidv4 } from 'uuid'
-import { WorkspaceConfig, PaneConfig, GridConfig, AppSettings, DEFAULT_AI_SETTINGS } from '../shared/types'
+import { WorkspaceConfig, PaneConfig, GridConfig, AppSettings, DEFAULT_AI_SETTINGS, DEFAULT_REMOTE_ACCESS_SETTINGS } from '../shared/types'
 
 interface StoreSchema {
   workspaces: WorkspaceConfig[]
@@ -15,7 +15,11 @@ const defaultSettings: AppSettings = {
   fontSize: 14,
   fontFamily: 'Cascadia Code, Consolas, monospace',
   ai: DEFAULT_AI_SETTINGS,
-  defaultBrowserUrl: 'https://www.google.com'
+  defaultBrowserUrl: 'https://www.google.com',
+  remoteAccess: DEFAULT_REMOTE_ACCESS_SETTINGS,
+  browserTabIdleDiscardMinutes: 15,
+  fleet: { maxConcurrentGoals: 3, desktopNotifications: true },
+  browserDownloadsAskLocation: false
 }
 
 export class WorkspaceStore {
@@ -209,7 +213,16 @@ export class WorkspaceStore {
   }
 
   getSettings(): AppSettings {
-    return this.store.get('settings', defaultSettings)
+    const settings = this.store.get('settings', defaultSettings)
+    // electron-store's default only applies when the key is entirely
+    // absent, not per-field — an existing user's persisted settings object
+    // (saved before remoteAccess existed) won't have it at all.
+    if (!settings.remoteAccess) settings.remoteAccess = DEFAULT_REMOTE_ACCESS_SETTINGS
+    if (settings.browserTabIdleDiscardMinutes == null) settings.browserTabIdleDiscardMinutes = defaultSettings.browserTabIdleDiscardMinutes
+    if (!settings.fleet) settings.fleet = defaultSettings.fleet
+    else if (settings.fleet.desktopNotifications == null) settings.fleet.desktopNotifications = defaultSettings.fleet.desktopNotifications
+    if (settings.browserDownloadsAskLocation == null) settings.browserDownloadsAskLocation = defaultSettings.browserDownloadsAskLocation
+    return settings
   }
 
   updateSettings(updates: Partial<AppSettings>): AppSettings {

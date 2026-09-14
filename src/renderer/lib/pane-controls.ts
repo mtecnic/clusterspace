@@ -52,15 +52,27 @@ export function registerBrowserTabAction(paneId: string, fn: (a: BrowserTabActio
 }
 
 // --- dispatch (called by AIContext IPC listeners) ---
+// Each returns whether a handler was actually registered for the target
+// pane/tab, so the caller can report a real result back to the AI tool that
+// triggered it instead of a blind "success" — see pane-control-ack.ts.
 
-export function dispatchSwitchTerminalTab(paneId: string, tabId: string): void {
-  ;(registry.get(switchTerminalTabKey(paneId)) as ((tabId: string) => void) | undefined)?.(tabId)
+export function dispatchSwitchTerminalTab(paneId: string, tabId: string): boolean {
+  const fn = registry.get(switchTerminalTabKey(paneId)) as ((tabId: string) => void) | undefined
+  if (!fn) return false
+  fn(tabId)
+  return true
 }
 
-export function dispatchReconnect(paneId: string, tabId?: string): void {
-  ;(registry.get(reconnectKey(tabKeyFor(paneId, tabId))) as (() => void) | undefined)?.()
+export function dispatchReconnect(paneId: string, tabId?: string): boolean {
+  const fn = registry.get(reconnectKey(tabKeyFor(paneId, tabId))) as (() => void) | undefined
+  if (!fn) return false
+  fn()
+  return true
 }
 
-export function dispatchBrowserTabAction(paneId: string, action: BrowserTabAction): void {
-  ;(registry.get(browserTabKey(paneId)) as ((a: BrowserTabAction) => void) | undefined)?.(action)
+export function dispatchBrowserTabAction(paneId: string, action: BrowserTabAction): boolean {
+  const fn = registry.get(browserTabKey(paneId)) as ((a: BrowserTabAction) => void) | undefined
+  if (!fn) return false
+  fn(action)
+  return true
 }

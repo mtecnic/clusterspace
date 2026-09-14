@@ -8,6 +8,7 @@ interface SettingsDialogProps {
   onUpdateSettings: (updates: Partial<AppSettings>) => void
   onExportWorkspace: () => void
   onImportWorkspace: () => void
+  onOpenRemoteAccess: () => void
 }
 
 const THEMES = [
@@ -23,17 +24,22 @@ export function SettingsDialog({
   settings,
   onUpdateSettings,
   onExportWorkspace,
-  onImportWorkspace
+  onImportWorkspace,
+  onOpenRemoteAccess
 }: SettingsDialogProps) {
   const [scrollbackLines, setScrollbackLines] = useState(settings?.scrollbackLines || 5000)
   const [fontSize, setFontSize] = useState(settings?.fontSize || 14)
   const [theme, setTheme] = useState(settings?.theme || 'dark')
+  const [browserTabIdleDiscardMinutes, setBrowserTabIdleDiscardMinutes] = useState(settings?.browserTabIdleDiscardMinutes ?? 15)
+  const [browserDownloadsAskLocation, setBrowserDownloadsAskLocation] = useState(settings?.browserDownloadsAskLocation ?? false)
 
   useEffect(() => {
     if (settings) {
       setScrollbackLines(settings.scrollbackLines)
       setFontSize(settings.fontSize)
       setTheme(settings.theme)
+      setBrowserTabIdleDiscardMinutes(settings.browserTabIdleDiscardMinutes)
+      setBrowserDownloadsAskLocation(settings.browserDownloadsAskLocation)
     }
   }, [settings])
 
@@ -54,7 +60,9 @@ export function SettingsDialog({
     onUpdateSettings({
       scrollbackLines,
       fontSize,
-      theme: theme as 'dark' | 'light'
+      theme: theme as 'dark' | 'light',
+      browserTabIdleDiscardMinutes,
+      browserDownloadsAskLocation
     })
     onClose()
   }
@@ -117,6 +125,50 @@ export function SettingsDialog({
                 ))}
               </div>
             </div>
+          </div>
+
+          <div className="mb-6">
+            <h3 className="text-sm font-semibold text-cs-text mb-3">Browser</h3>
+
+            <div className="form-group">
+              <label className="form-label">Background tab idle discard (minutes)</label>
+              <input
+                type="number"
+                min="0"
+                max="180"
+                value={browserTabIdleDiscardMinutes}
+                onChange={(e) => setBrowserTabIdleDiscardMinutes(parseInt(e.target.value) || 0)}
+                className="form-input w-24"
+              />
+              <p className="text-sm text-cs-text-muted mt-1">
+                Background browser tabs unload after this long inactive, to save memory. Pinned
+                tabs and tabs playing audio/video are never discarded. Set to 0 to disable.
+              </p>
+            </div>
+
+            <div className="form-group">
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={browserDownloadsAskLocation}
+                  onChange={(e) => setBrowserDownloadsAskLocation(e.target.checked)}
+                />
+                <span className="form-label mb-0">Ask where to save each browser download</span>
+              </label>
+              <p className="text-sm text-cs-text-muted mt-1">
+                Off by default — downloads save straight to your default downloads folder.
+              </p>
+            </div>
+          </div>
+
+          <div className="mb-6">
+            <h3 className="text-sm font-semibold text-cs-text mb-3">Remote Access</h3>
+            <p className="text-sm text-cs-text-muted mb-2">
+              View and control panes from a web browser when you're away from this machine.
+            </p>
+            <button className="btn btn-secondary" onClick={onOpenRemoteAccess}>
+              Configure Remote Access…
+            </button>
           </div>
 
           <div className="mb-6">

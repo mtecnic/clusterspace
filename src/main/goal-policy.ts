@@ -23,7 +23,17 @@ import type { GoalRisk, GoalPolicy } from '../shared/types'
  *                     (write_to_terminal, browser_type, set_files, ...)
  *   network_get    → browser_navigate to non-localhost
  *   network_write  → tools that submit forms, POST, write cookies, etc.
- *   spends_money   → tools that interact with payment / checkout pages
+ *   spends_money   → the top tier; NOT assigned to any tool in
+ *                    BUILTIN_PERMISSIONS below (whether an action "spends
+ *                    money" depends on the target URL/page, not the tool
+ *                    name — no static tag can capture that). It's enforced
+ *                    dynamically instead: AIManager.executeTool gates any
+ *                    browser_* action against a payment/checkout/banking-
+ *                    looking URL (urlIsSensitive in browser-approval.ts)
+ *                    regardless of a goal's declared risk ceiling, UNLESS
+ *                    that ceiling is exactly 'spends_money' — that's the
+ *                    tier's only real effect: opting a goal out of that
+ *                    per-action prompt.
  */
 export type { GoalRisk, GoalPolicy }
 
@@ -100,13 +110,15 @@ const BUILTIN_PERMISSIONS: Record<string, ToolPermissions> = {
   declare_step: { risk: 'read_only' },
   verify_step: { risk: 'read_only' },
 
+  // Pauses only — no effect on any pane/system state.
+  wait: { risk: 'read_only' },
+
   // Pane / workspace — local UI mutations.
   list_panes: { risk: 'read_only' },
   capture_screenshot: { risk: 'read_only' },
   focus_pane: { risk: 'write_local' },
   maximize_pane: { risk: 'write_local' },
   create_workspace: { risk: 'write_local' },
-  restart_terminal: { risk: 'write_local' },
 
   // Pane/tab control — switch tabs, open/close browser tabs, reconnect panes.
   // Local UI/session mutations; safe to run without approval.
@@ -141,6 +153,7 @@ const BUILTIN_PERMISSIONS: Record<string, ToolPermissions> = {
   browser_screenshot_full_page: { risk: 'read_only' },
   browser_screenshot_annotated: { risk: 'read_only' },
   browser_get_action_log: { risk: 'read_only' },
+  browser_pane_doctor: { risk: 'read_only' },
   browser_get_cookies: { risk: 'read_only' },
   browser_verify_visual_state: { risk: 'read_only' },
   browser_describe_screen: { risk: 'read_only' },
@@ -155,6 +168,7 @@ const BUILTIN_PERMISSIONS: Record<string, ToolPermissions> = {
   browser_click: { risk: 'network_write' },
   browser_smart_click: { risk: 'network_write' },
   browser_click_at: { risk: 'network_write' },
+  browser_click_by_index: { risk: 'network_write' },
   browser_type: { risk: 'network_write' },
   browser_keypress: { risk: 'network_write' },
   browser_select_option: { risk: 'network_write' },
@@ -169,6 +183,8 @@ const BUILTIN_PERMISSIONS: Record<string, ToolPermissions> = {
   browser_wait_for_navigation: { risk: 'read_only' },
   browser_wait_for_text: { risk: 'read_only' },
   browser_run_recipe: { risk: 'network_write' },
+  browser_list_recipes: { risk: 'read_only' },
+  browser_save_recipe: { risk: 'write_local' },
 
   // Save tools touch the filesystem; declare as write_local + the path arg.
   // (caller fills in `paths` when constructing the ToolPermissions instance.)

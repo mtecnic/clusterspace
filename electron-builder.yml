@@ -20,10 +20,15 @@ files:
   - node_modules/ajv/**/*
   - node_modules/ajv-formats/**/*
   - node_modules/uuid/**/*
+  - node_modules/ws/**/*
 
 extraResources:
   - from: node_modules/node-pty/build
     to: node_modules/node-pty/build
+    filter:
+      - "**/*"
+  - from: resources/remote-client
+    to: remote-client
     filter:
       - "**/*"
 

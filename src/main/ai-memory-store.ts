@@ -15,6 +15,10 @@ export interface AIConversation {
   summary?: string
   createdAt: number
   updatedAt: number
+  /** Cumulative count of messages ever evicted by trimMessages' cap. See
+   *  its doc comment — the raw count keeps growing across repeated trims
+   *  even though only the latest marker message is visible. */
+  droppedMessageCount?: number
 }
 
 interface AIMemorySchema {
@@ -101,9 +105,8 @@ export class AIMemoryStore {
     const conversations = this.store.get('conversations', [])
     const maxMessages = this.store.get('maxMessagesPerConversation', DEFAULT_MAX_MESSAGES)
 
-    // Truncate messages if too many
     if (conversation.messages.length > maxMessages) {
-      conversation.messages = conversation.messages.slice(-maxMessages)
+      this.trimMessages(conversation, maxMessages)
     }
 
     conversation.updatedAt = Date.now()
@@ -119,6 +122,32 @@ export class AIMemoryStore {
 
     // Prune old conversations if needed
     this.pruneConversations()
+  }
+
+  // Cap a conversation's stored messages while preserving continuity: the
+  // very first message (almost always the user's original task-defining
+  // prompt — the system prompt itself is injected separately at request-
+  // build time, never stored here) is pinned rather than evicted, and a
+  // marker message replaces whatever got dropped so neither the model (on
+  // conversation resume) nor a human reading this transcript later mistakes
+  // a gap for full context. The old behavior (`messages.slice(-maxMessages)`)
+  // could — and did, in practice — silently drop the message that defined
+  // what the whole conversation was even for, on a conversation long enough
+  // to hit the cap.
+  private trimMessages(conversation: AIConversation, maxMessages: number): void {
+    const messages = conversation.messages
+    const pinned = messages[0]
+    const newlyDropped = messages.length - maxMessages
+    conversation.droppedMessageCount = (conversation.droppedMessageCount ?? 0) + newlyDropped
+    const marker: AIMessage = {
+      id: uuidv4(),
+      role: 'system',
+      content: `[${conversation.droppedMessageCount} earlier message(s) omitted to stay under the ${maxMessages}-message cap. The original request (first message above) is preserved; everything between it and here is gone — don't assume continuity across this gap.]`,
+      timestamp: pinned.timestamp
+    }
+    const tailCount = Math.max(0, maxMessages - 2)
+    const tail = messages.slice(messages.length - tailCount)
+    conversation.messages = [pinned, marker, ...tail]
   }
 
   // Add messages to a conversation

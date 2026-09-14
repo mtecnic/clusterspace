@@ -17,7 +17,13 @@ export default defineConfig({
           build: {
             outDir: 'dist-electron/main',
             rollupOptions: {
-              external: ['electron', 'node-pty', 'electron-store']
+              // ws's buffer-util.js does a try/catch require('bufferutil')
+              // (an optional native perf addon we don't install) -- Vite's
+              // bundler resolves that eagerly and fails since it's not
+              // present, even though ws handles its absence fine at
+              // runtime. Same treatment as node-pty/electron-store: load
+              // the real module from node_modules instead of bundling it.
+              external: ['electron', 'node-pty', 'electron-store', 'ws']
             }
           }
         }

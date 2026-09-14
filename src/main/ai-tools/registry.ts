@@ -1,5 +1,5 @@
 import type { BrowserWindow } from 'electron'
-import type { AIToolDefinition } from '../../shared/types'
+import type { AIToolDefinition, TodoSnapshot } from '../../shared/types'
 import type { PtyManager } from '../pty-manager'
 import type { WorkspaceStore } from '../workspace-store'
 import type { AgentStore } from '../agent-store'
@@ -14,6 +14,22 @@ import type { ConfigLoader } from '../config-loader'
 export interface ToolRuntimeState {
   // Step protocol — set by declare_step, cleared by verify_step.
   currentStep: { number: number; title: string; action: string; successCriteria: string } | null
+  // The original user request/goal this caller is pursuing, set once at the
+  // start of a conversation/goal (AIManager.setConversationIntent). Echoed
+  // back by declare_step so it stays freshly visible on every step of a
+  // long tool loop instead of relying on the model's attention reaching
+  // back to a message that may be many turns (or, after a message-cap
+  // trim, an eviction gap) behind it — observed in practice on a 20-minute
+  // browse-and-like task where the model's own operational shorthand
+  // ("check for a '0 Likes' aria-label") quietly diverged from the actual
+  // instruction ("no engagement at all" — zero likes AND replies AND
+  // reposts) after enough repeated turns.
+  originalIntent: string | null
+  // The live checklist, set/mutated by write_todos/complete_todo
+  // (src/main/ai-tools/todo.ts). null means the model hasn't opted in yet
+  // this run -- re-injection (AIManager.buildRequest) is a no-op in that
+  // case, so a conversation that never uses the checklist pays nothing.
+  todos: TodoSnapshot | null
 }
 
 /**
@@ -43,6 +59,20 @@ export interface ToolContext {
   state: ToolRuntimeState
   /** Optional — present when an AI provider with a vision model is active. */
   vision?: VisionHelpers
+  /** Scopes per-run tool state (step-protocol, policy, goal identity). The
+   *  single interactive chat panel uses a fixed sentinel; each running goal
+   *  uses its own checkpoint id — see AIManager's toolStateByCaller/
+   *  policiesByCaller and GoalRunner's `running` map, both keyed by this. */
+  callerId: string
+  /** Lets tools (assign_task/create_goal) start real autonomous goal runs
+   *  instead of only writing bookkeeping records. */
+  goalRunner: import('../goal-runner').GoalRunner
+  goalStore: import('../goal-store').GoalStore
+  /** Non-null exactly when callerId is itself a running goal — i.e. this
+   *  tool call came from inside another goal's loop (a lead agent spawning
+   *  sub-agents), so a new goal it starts can inherit this one's risk tier
+   *  instead of silently escalating. Null for interactive-chat calls. */
+  activePolicy: import('../goal-policy').GoalPolicy | null
 }
 
 /**

@@ -6,21 +6,26 @@ interface GoalDashboardProps {
   isOpen: boolean
   onClose: () => void
   panes: PaneConfig[]
+  /** Set by Fleet Dashboard's card-click drill-in — pre-selects this goal
+   *  instead of the default "most recently active" pick below. */
+  initialSelectedGoalId?: string
 }
 
 const STATUS_BADGE: Record<GoalStatus, string> = {
-  pending:   'bg-gray-600',
-  running:   'bg-blue-600 animate-pulse',
-  paused:    'bg-yellow-600',
-  completed: 'bg-green-600',
-  failed:    'bg-red-600',
-  aborted:   'bg-orange-600'
+  pending:     'bg-gray-600',
+  running:     'bg-blue-600 animate-pulse',
+  paused:      'bg-yellow-600',
+  interrupted: 'bg-amber-700',
+  completed:   'bg-green-600',
+  failed:      'bg-red-600',
+  aborted:     'bg-orange-600'
 }
 
 const STATUS_LABEL: Record<GoalStatus, string> = {
   pending: 'Pending',
   running: 'Running',
   paused: 'Paused',
+  interrupted: 'Interrupted',
   completed: 'Complete',
   failed: 'Failed',
   aborted: 'Aborted'
@@ -51,7 +56,7 @@ function toolColor(tool: string): string {
   return 'text-cs-text'
 }
 
-export function GoalDashboard({ isOpen, onClose, panes }: GoalDashboardProps) {
+export function GoalDashboard({ isOpen, onClose, panes, initialSelectedGoalId }: GoalDashboardProps) {
   const [goals, setGoals] = useState<GoalCheckpoint[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [criticEvents, setCriticEvents] = useState<Record<string, Array<{ verdict: string; reason: string; at: number }>>>({})
@@ -79,6 +84,8 @@ export function GoalDashboard({ isOpen, onClose, panes }: GoalDashboardProps) {
       switch (event.type) {
         case 'started':
         case 'ended':
+        case 'paused':
+        case 'resumed':
           refresh()
           break
         case 'step':
@@ -110,13 +117,20 @@ export function GoalDashboard({ isOpen, onClose, panes }: GoalDashboardProps) {
     return unsubscribe
   }, [isOpen])
 
-  // Auto-select the most recently active goal when nothing is selected.
+  // Drill-in from Fleet Dashboard wins over the default pick below.
   useEffect(() => {
+    if (initialSelectedGoalId) setSelectedId(initialSelectedGoalId)
+  }, [initialSelectedGoalId])
+
+  // Auto-select the most recently active goal when nothing is selected —
+  // skipped when a drill-in target was requested.
+  useEffect(() => {
+    if (initialSelectedGoalId) return
     if (!selectedId && goals.length > 0) {
       const running = goals.find(g => g.status === 'running')
       setSelectedId(running?.id ?? goals[0].id)
     }
-  }, [goals, selectedId])
+  }, [goals, selectedId, initialSelectedGoalId])
 
   // Keep step log scrolled to bottom when selected goal updates.
   useEffect(() => {
@@ -131,7 +145,7 @@ export function GoalDashboard({ isOpen, onClose, panes }: GoalDashboardProps) {
   )
 
   const filteredGoals = useMemo(() => {
-    if (filter === 'active') return goals.filter(g => g.status === 'running' || g.status === 'paused' || g.status === 'pending')
+    if (filter === 'active') return goals.filter(g => g.status === 'running' || g.status === 'paused' || g.status === 'pending' || g.status === 'interrupted')
     if (filter === 'finished') return goals.filter(g => g.status === 'completed' || g.status === 'failed' || g.status === 'aborted')
     return goals
   }, [goals, filter])
@@ -142,6 +156,16 @@ export function GoalDashboard({ isOpen, onClose, panes }: GoalDashboardProps) {
     if (!window.confirm('Abort this goal? The runner will exit at the next checkpoint.')) return
     await window.electronAPI.abortGoal(id)
     setTimeout(refresh, 500)
+  }
+
+  const handlePause = async (id: string) => {
+    await window.electronAPI.pauseGoalRun(id)
+    refresh()
+  }
+
+  const handleResume = async (id: string) => {
+    await window.electronAPI.resumeGoalRun(id)
+    refresh()
   }
 
   const handleDelete = async (id: string) => {
@@ -272,6 +296,24 @@ export function GoalDashboard({ isOpen, onClose, panes }: GoalDashboardProps) {
                     <div className="flex flex-col gap-2 shrink-0">
                       {selectedGoal.status === 'running' && (
                         <button
+                          onClick={() => handlePause(selectedGoal.id)}
+                          className="px-3 py-1 text-xs bg-yellow-600 hover:bg-yellow-500 text-white rounded transition-colors"
+                          title="Pause after the current step — the loop stops making tool calls until resumed"
+                        >
+                          Pause
+                        </button>
+                      )}
+                      {(selectedGoal.status === 'paused' || selectedGoal.status === 'interrupted') && (
+                        <button
+                          onClick={() => handleResume(selectedGoal.id)}
+                          className="px-3 py-1 text-xs bg-blue-600 hover:bg-blue-500 text-white rounded transition-colors"
+                          title={selectedGoal.status === 'interrupted' ? 'Reload prior context and continue after the app restart' : undefined}
+                        >
+                          Resume
+                        </button>
+                      )}
+                      {(selectedGoal.status === 'running' || selectedGoal.status === 'paused') && (
+                        <button
                           onClick={() => handleAbort(selectedGoal.id)}
                           className="px-3 py-1 text-xs bg-red-600 hover:bg-red-500 text-white rounded transition-colors"
                         >
@@ -368,7 +410,7 @@ function humanizeCriterion(g: GoalCheckpoint): string {
   switch (c.type) {
     case 'shell':         return `shell "${c.command}" exits ${c.exitCode ?? 0}`
     case 'model_question':return `model says "yes" to: ${c.question}`
-    case 'json_predicate':return `json predicate ${c.expr}`
+    case 'json_predicate':return `${c.filePath}: ${c.expr}`
     case 'manual':        return 'manual completion'
   }
 }

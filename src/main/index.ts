@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, clipboard, nativeImage, shell, session } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, clipboard, nativeImage, shell, session, webContents, desktopCapturer } from 'electron'
 import { join } from 'path'
 import { PtyManager } from './pty-manager'
 import { WorkspaceStore } from './workspace-store'
@@ -17,12 +17,24 @@ import { BrowserStore } from './browser-store'
 import {
   registerBrowserPane,
   unregisterBrowserPane,
-  getBrowserWebContents
+  getBrowserWebContents,
+  registerBrowserPaneTab,
+  unregisterBrowserPaneTab,
+  getPaneIdForWebContents
 } from './browser-pane-registry'
-import { capturePaneImage } from './pane-screenshot'
+import { capturePaneImage, getPaneRect } from './pane-screenshot'
 import { getActionLog, subscribeActionLog } from './browser-action-log'
 import { resolveApproval } from './browser-approval'
+import { requestCredentials, resolveLoginPrompt, requestCertBypass, resolveCertWarning } from './browser-security-prompts'
+import { requestScreenShareSource, resolveScreenShare } from './browser-screen-share'
+import { classifyError } from '../shared/ai-error-classifier'
+import { resolvePaneControlAck, sendPaneControl } from './pane-control-ack'
+import { detachCdpIfAttached } from './cdp-helpers'
+import { setWorkspaceStoreForNotify, notify } from './notify'
 import { RecipeStore } from './browser-recipes'
+import { RemoteAccessStore } from './remote-access-store'
+import { RemoteServer } from './remote-server/server'
+import { getPaneListForActiveWorkspace } from './ai-tools/pane'
 import {
   IPC_CHANNELS,
   PtySpawnConfig,
@@ -31,6 +43,7 @@ import {
   AIMessage,
   AIToolCall,
   DEFAULT_AI_SETTINGS,
+  DEFAULT_REMOTE_ACCESS_SETTINGS,
   AgentTask,
   DownloadInfo
 } from '../shared/types'
@@ -61,7 +74,13 @@ let configLoader: ConfigLoader | null = null
 let browserStore: BrowserStore | null = null
 let browserCredentialsStore: BrowserCredentialsStore | null = null
 let recipeStore: RecipeStore | null = null
+let remoteAccessStore: RemoteAccessStore | null = null
+let remoteServer: RemoteServer | null = null
 const activeDownloads = new Map<string, DownloadInfo>()
+// Parallel map of live DownloadItem references, so BROWSER_DOWNLOAD_CANCEL
+// can actually stop the transfer — activeDownloads only holds the plain-data
+// snapshot sent to the renderer, not the Electron object with .cancel() on it.
+const activeDownloadItems = new Map<string, Electron.DownloadItem>()
 
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged
 
@@ -82,6 +101,7 @@ function createWindow() {
 
   // Settings must exist before BrowserWindow so we can restore window geometry.
   workspaceStore = new WorkspaceStore()
+  setWorkspaceStoreForNotify(workspaceStore)
   const persistedWindow = workspaceStore.getSettings().windowState
 
   mainWindow = new BrowserWindow({
@@ -137,10 +157,52 @@ function createWindow() {
   agentStore = new AgentStore()
   orchestrationStore = new OrchestrationStore()
   goalStore = new GoalStore()
+
+  // Startup reconciliation: anything still 'running' means the previous
+  // process died mid-goal (crash/quit) rather than stopping cleanly — its
+  // in-memory RuntimeGoal is gone, so it's reclassified 'interrupted'
+  // (distinct from 'paused', a clean user-requested stop) rather than left
+  // stuck forever. Deliberately no auto-resume here: goals can spend money
+  // or take other consequential actions, and resuming the instant the app
+  // boots with no human look is the one place that would break this app's
+  // existing "explicit click for anything consequential" pattern. One
+  // notification, then GoalDashboard surfaces a Resume button.
+  const orphanedGoals = goalStore.reconcileOrphaned()
+  if (orphanedGoals.length > 0) {
+    for (const g of orphanedGoals) agentStore.updateAgentStatus(g.paneId, 'paused')
+    notify(
+      'Goals interrupted',
+      `${orphanedGoals.length} goal${orphanedGoals.length === 1 ? '' : 's'} interrupted by a restart — open Goal Runner to resume.`
+    )
+  }
   configLoader = new ConfigLoader()
   browserStore = new BrowserStore()
   browserCredentialsStore = new BrowserCredentialsStore()
   recipeStore = new RecipeStore()
+  remoteAccessStore = new RemoteAccessStore()
+  remoteServer = new RemoteServer({
+    remoteAccessStore,
+    getScrollback: ptyId => ptyManager?.getScrollbackBuffer(ptyId) ?? [],
+    subscribePty: (ptyId, cb) => ptyManager?.subscribe(ptyId, cb) ?? (() => {}),
+    subscribePtyExit: (ptyId, cb) => ptyManager?.subscribeExit(ptyId, cb) ?? (() => {}),
+    writePty: (ptyId, data) => ptyManager?.write(ptyId, data),
+    resizePty: (ptyId, cols, rows) => ptyManager?.resize(ptyId, cols, rows),
+    getPtyIdForPane: key => ptyManager?.getPtyIdForPane(key),
+    listPanes: () => (workspaceStore && ptyManager ? getPaneListForActiveWorkspace(workspaceStore, ptyManager) : []),
+    // Same request/ack round-trip the AI's switch_browser_tab tool already
+    // uses (ai-tools/controls.ts) -- reusing it rather than inventing a
+    // second mechanism. Note this also switches the tab active on the
+    // local screen, since browser-pane-registry.ts only ever tracks one
+    // webContents per pane (the active tab) regardless of caller.
+    switchBrowserTab: (paneId, tabId) =>
+      mainWindow ? sendPaneControl(mainWindow, IPC_CHANNELS.AI_BROWSER_TAB_ACTION, { paneId, action: 'switch', tabId }) : Promise.resolve(false),
+    getBrowserWebContents: paneId => getBrowserWebContents(paneId),
+    captureFrame: async paneId => (mainWindow ? capturePaneImage(mainWindow, paneId, { maxWidth: 1280 }) : null)
+  })
+  const remoteAccessSettings = workspaceStore?.getSettings().remoteAccess
+  if (remoteAccessSettings?.enabled) {
+    remoteServer.start(remoteAccessSettings).catch(err => console.error('[remote-server] failed to start on boot:', err))
+  }
 
   // Forward action-log entries to the renderer for live ticker display.
   subscribeActionLog(entry => {
@@ -148,8 +210,9 @@ function createWindow() {
   })
   orchestrationStore.setWindow(mainWindow)
   orchestrationStore.setAgentStore(agentStore)
-  aiManager = new AIManager(mainWindow, ptyManager, workspaceStore, agentStore, orchestrationStore, aiStore)
-  goalRunner = new GoalRunner(mainWindow, aiManager, aiMemoryStore, aiStore, agentStore, goalStore)
+  aiManager = new AIManager(mainWindow, ptyManager, workspaceStore, agentStore, orchestrationStore, aiStore, goalStore)
+  goalRunner = new GoalRunner(mainWindow, aiManager, aiMemoryStore, aiStore, agentStore, goalStore, workspaceStore)
+  aiManager.setGoalRunner(goalRunner)
 
   // Register IPC handlers
   registerIpcHandlers()
@@ -181,6 +244,38 @@ function registerIpcHandlers() {
         return { success: false, error: 'PTY manager not initialized' }
       }
       const ptyId = ptyManager.spawn(config)
+
+      // SSH password auto-fill, centralized here rather than in the
+      // renderer (see PtySpawnConfig.sshServerId's doc comment) -- fires
+      // once per pty regardless of whether a local pane, a remote-access
+      // web client, both, or neither ever subscribes to watch it. Reuses
+      // the subscribe()/subscribeExit() API built for remote-access rather
+      // than adding new PtyManager surface for this.
+      if (config.sshServerId) {
+        const serverId = config.sshServerId
+        let sent = false
+        const unsubscribeData = ptyManager.subscribe(ptyId, data => {
+          if (sent) return
+          const lowerData = data.toLowerCase()
+          if (!lowerData.includes('password:') && !lowerData.includes('password for') && !lowerData.includes("'s password")) return
+          const server = credentialsStore?.getServer(serverId)
+          if (!server || server.authMethod !== 'password') return
+          const password = credentialsStore?.getPassword(serverId)
+          if (!password) return
+          sent = true
+          // Small delay to ensure the prompt is ready, matching the
+          // renderer-side timing this replaces.
+          setTimeout(() => {
+            ptyManager?.write(ptyId, password + '\r')
+            unsubscribeData()
+            unsubscribeExit()
+          }, 100)
+        })
+        const unsubscribeExit = ptyManager.subscribeExit(ptyId, () => {
+          unsubscribeData()
+        })
+      }
+
       return { success: true, ptyId }
     } catch (error) {
       console.error('PTY spawn error:', error)
@@ -335,7 +430,8 @@ function registerIpcHandlers() {
         theme: 'dark',
         fontSize: 14,
         fontFamily: 'Cascadia Code, Consolas, monospace',
-        defaultBrowserUrl: 'https://www.google.com'
+        defaultBrowserUrl: 'https://www.google.com',
+        remoteAccess: DEFAULT_REMOTE_ACCESS_SETTINGS
       }
     } catch (error) {
       console.error('Settings get error:', error)
@@ -346,7 +442,8 @@ function registerIpcHandlers() {
         theme: 'dark',
         fontSize: 14,
         fontFamily: 'Cascadia Code, Consolas, monospace',
-        defaultBrowserUrl: 'https://www.google.com'
+        defaultBrowserUrl: 'https://www.google.com',
+        remoteAccess: DEFAULT_REMOTE_ACCESS_SETTINGS
       }
     }
   })
@@ -356,7 +453,17 @@ function registerIpcHandlers() {
       if (!workspaceStore) {
         throw new Error('Workspace store not initialized')
       }
-      return workspaceStore.updateSettings(updates)
+      const updated = workspaceStore.updateSettings(updates)
+      // Start/stop the remote-access server live when its settings change —
+      // no app restart needed to toggle it on/off or change port/bind/TLS.
+      if ('remoteAccess' in updates && remoteServer) {
+        if (updated.remoteAccess.enabled) {
+          await remoteServer.start(updated.remoteAccess)
+        } else {
+          await remoteServer.stop()
+        }
+      }
+      return updated
     } catch (error) {
       console.error('Settings update error:', error)
       throw error
@@ -377,6 +484,40 @@ function registerIpcHandlers() {
       console.error('Dialog error:', error)
       return null
     }
+  })
+
+  ipcMain.handle(IPC_CHANNELS.DIALOG_OPEN_FILE, async (_event, filters?: { name: string; extensions: string[] }[]) => {
+    try {
+      if (!mainWindow) return null
+      const result = await dialog.showOpenDialog(mainWindow, {
+        properties: ['openFile'],
+        filters: filters ?? []
+      })
+      return result.canceled ? null : result.filePaths[0]
+    } catch (error) {
+      console.error('Dialog error:', error)
+      return null
+    }
+  })
+
+  // Remote-access handlers
+  ipcMain.handle(IPC_CHANNELS.REMOTE_ACCESS_GET_STATUS, async () => {
+    return remoteServer?.getStatus() ?? { running: false, connectedClients: 0 }
+  })
+
+  ipcMain.handle(IPC_CHANNELS.REMOTE_ACCESS_HAS_CREDENTIALS, async () => {
+    return remoteAccessStore?.hasCredentials() ?? false
+  })
+
+  ipcMain.handle(IPC_CHANNELS.REMOTE_ACCESS_SET_CREDENTIALS, async (_event, username: string, password: string) => {
+    if (!remoteAccessStore) throw new Error('Remote access store not initialized')
+    remoteAccessStore.setCredentials(username, password)
+    // A credential change should invalidate anyone already logged in under the old password.
+    remoteServer?.invalidateAllSessions()
+  })
+
+  ipcMain.handle(IPC_CHANNELS.REMOTE_ACCESS_REGENERATE_SECRET, async () => {
+    remoteServer?.invalidateAllSessions()
   })
 
   // App info handlers
@@ -509,19 +650,6 @@ function registerIpcHandlers() {
     }
   })
 
-  // Get SSH password for auto-entry
-  ipcMain.handle(IPC_CHANNELS.SSH_GET_PASSWORD, async (_event, serverId: string) => {
-    try {
-      const server = credentialsStore?.getServer(serverId)
-      if (!server || server.authMethod !== 'password') {
-        return null
-      }
-      return credentialsStore?.getPassword(serverId) || null
-    } catch (error) {
-      console.error('Failed to get SSH password:', error)
-      return null
-    }
-  })
 
   // Get fresh SSH command (always rebuilds with latest settings like tmux).
   // paneId, when provided, gives the pane a unique tmux session — without it
@@ -675,13 +803,14 @@ function registerIpcHandlers() {
     systemPrompt?: string,
     temperature?: number,
     maxTokens?: number,
-    enableThinking?: boolean
+    enableThinking?: boolean,
+    toolChoice?: 'auto' | 'required'
   ) => {
     try {
       if (!aiStore) {
         throw new Error('AI store not initialized')
       }
-      return aiStore.createProvider(name, endpoint, model, visionModel, apiKey, systemPrompt, temperature, maxTokens, enableThinking)
+      return aiStore.createProvider(name, endpoint, model, visionModel, apiKey, systemPrompt, temperature, maxTokens, enableThinking, toolChoice)
     } catch (error) {
       console.error('AI provider create error:', error)
       throw error
@@ -756,19 +885,24 @@ function registerIpcHandlers() {
   ipcMain.on(IPC_CHANNELS.AI_CHAT_STREAM, async (_event, messages: AIMessage[]) => {
     try {
       if (!aiManager || !aiStore) {
-        mainWindow?.webContents.send(IPC_CHANNELS.AI_STREAM_ERROR, 'AI not initialized')
+        mainWindow?.webContents.send(IPC_CHANNELS.AI_STREAM_ERROR, { message: 'AI not initialized' })
         return
       }
       const provider = aiStore.getActiveProvider()
       if (!provider) {
-        mainWindow?.webContents.send(IPC_CHANNELS.AI_STREAM_ERROR, 'No active AI provider')
+        mainWindow?.webContents.send(IPC_CHANNELS.AI_STREAM_ERROR, { message: 'No active AI provider' })
         return
       }
       await aiManager.streamMessage(messages, provider, provider.resolvedApiKey)
     } catch (error) {
       console.error('AI chat stream error:', error)
-      mainWindow?.webContents.send(IPC_CHANNELS.AI_STREAM_ERROR, (error as Error).message)
+      const classified = classifyError(error)
+      mainWindow?.webContents.send(IPC_CHANNELS.AI_STREAM_ERROR, { message: classified.message, kind: classified.kind })
     }
+  })
+
+  ipcMain.handle(IPC_CHANNELS.AI_SET_INTENT, (_event, intent: string) => {
+    aiManager?.setInteractiveIntent(intent)
   })
 
   ipcMain.on(IPC_CHANNELS.AI_CANCEL, () => {
@@ -803,7 +937,11 @@ function registerIpcHandlers() {
       if (!mainWindow || mainWindow.isDestroyed()) {
         return null
       }
-      return await capturePaneImage(mainWindow, paneId)
+      // Cap width like AIManager.capturePaneImage's default — without this,
+      // the vision loop's auto-screenshot sends a full native-resolution
+      // capture straight to the vision model, which some multimodal
+      // processors (e.g. Qwen3-VL) reject outright on large images.
+      return await capturePaneImage(mainWindow, paneId, { maxWidth: 1024 })
     } catch (error) {
       console.error('AI screenshot error:', error)
       return null
@@ -930,6 +1068,30 @@ function registerIpcHandlers() {
   ipcMain.handle('goal:abort', async (_e, id: string) => {
     try { return goalRunner?.abort(id) ?? false }
     catch { return false }
+  })
+
+  ipcMain.handle('goal:pause', async (_e, id: string) => {
+    try { return goalRunner?.pause(id) ?? false }
+    catch { return false }
+  })
+
+  ipcMain.handle('goal:resume', async (_e, id: string) => {
+    try { return goalRunner?.resume(id) ?? false }
+    catch { return false }
+  })
+
+  // Steer a running/paused goal without aborting it — reuses the same
+  // AgentStore.context queue share_context writes to and runLoop already
+  // drains into the next model turn (see goal-runner.ts).
+  ipcMain.handle('goal:steer', async (_e, id: string, message: string) => {
+    try {
+      const checkpoint = goalStore?.get(id)
+      if (!checkpoint || checkpoint.status === 'completed' || checkpoint.status === 'failed' || checkpoint.status === 'aborted') {
+        return false
+      }
+      agentStore?.addContext(checkpoint.paneId, `[From user]: ${message}`)
+      return true
+    } catch { return false }
   })
 
   ipcMain.handle('goal:status', async (_e, id: string) => {
@@ -1340,11 +1502,28 @@ function registerIpcHandlers() {
   })
 
   ipcMain.handle(IPC_CHANNELS.BROWSER_DOWNLOAD_CANCEL, async (_e, id: string) => {
-    // Best-effort: we no longer hold the DownloadItem reference, so just clear UI state.
+    const item = activeDownloadItems.get(id)
+    if (item) {
+      try { item.cancel() } catch { /* already finished/cancelled */ }
+    }
     const dl = activeDownloads.get(id)
     if (dl && dl.state === 'progressing') {
       dl.state = 'cancelled'
     }
+    return true
+  })
+
+  ipcMain.handle(IPC_CHANNELS.BROWSER_DOWNLOAD_PAUSE, async (_e, id: string) => {
+    const item = activeDownloadItems.get(id)
+    if (!item) return false
+    try { item.pause() } catch { return false }
+    return true
+  })
+
+  ipcMain.handle(IPC_CHANNELS.BROWSER_DOWNLOAD_RESUME, async (_e, id: string) => {
+    const item = activeDownloadItems.get(id)
+    if (!item || !item.canResume()) return false
+    try { item.resume() } catch { return false }
     return true
   })
 
@@ -1353,6 +1532,30 @@ function registerIpcHandlers() {
     if (!/^https?:/i.test(url)) return false
     await shell.openExternal(url)
     return true
+  })
+
+  // "Add to dictionary" from the webview context menu's spellcheck suggestions
+  ipcMain.handle(IPC_CHANNELS.BROWSER_ADD_DICTIONARY_WORD, async (_e, word: string) => {
+    session.fromPartition('persist:browser-pane').addWordToSpellCheckerDictionary(word)
+    return true
+  })
+
+  // "Copy image" from the webview context menu — copies the actual image
+  // bytes to the clipboard (distinct from "Copy image address", which just
+  // copies the URL). Not exposed on the <webview> tag itself, so it's
+  // dispatched through the pane's registered WebContents like AI tool calls.
+  ipcMain.handle(IPC_CHANNELS.BROWSER_COPY_IMAGE_AT, async (_e, paneId: string, x: number, y: number) => {
+    const wc = getBrowserWebContents(paneId)
+    if (!wc) return false
+    wc.copyImageAt(x, y)
+    return true
+  })
+
+  // Fired when a background tab discards to idle-save memory — detaches its
+  // CDP debugger session rather than leaving it attached indefinitely.
+  ipcMain.on(IPC_CHANNELS.BROWSER_TAB_CDP_DETACH, (_e, webContentsId: number) => {
+    const wc = webContents.fromId(webContentsId)
+    if (wc && !wc.isDestroyed()) detachCdpIfAttached(wc)
   })
 
   // ====== Browser <-> AI bridge ======
@@ -1364,106 +1567,11 @@ function registerIpcHandlers() {
   ipcMain.on(IPC_CHANNELS.BROWSER_PANE_UNREGISTER, (_e, paneId: string) => {
     unregisterBrowserPane(paneId)
   })
-
-  // AI-driven browser control. All return uniform result shapes.
-
-  ipcMain.handle(IPC_CHANNELS.AI_BROWSER_NAVIGATE, async (_e, paneId: string, url: string) => {
-    const wc = getBrowserWebContents(paneId)
-    if (!wc) return { success: false, error: `No browser pane ${paneId}` }
-    try { await wc.loadURL(url); return { success: true } }
-    catch (error) { return { success: false, error: (error as Error).message } }
+  ipcMain.on(IPC_CHANNELS.BROWSER_PANE_TAB_REGISTER, (_e, paneId: string, tabId: string, webContentsId: number) => {
+    registerBrowserPaneTab(paneId, tabId, webContentsId)
   })
-
-  ipcMain.handle(IPC_CHANNELS.AI_BROWSER_GET_CONTENT, async (_e, paneId: string) => {
-    const wc = getBrowserWebContents(paneId)
-    if (!wc) return { success: false, error: `No browser pane ${paneId}` }
-    try {
-      const text = await wc.executeJavaScript(
-        `(() => { const b = document.body; return b ? b.innerText : '' })()`,
-        true
-      )
-      return { success: true, url: wc.getURL(), title: wc.getTitle(), text }
-    } catch (error) {
-      return { success: false, error: (error as Error).message }
-    }
-  })
-
-  ipcMain.handle(IPC_CHANNELS.AI_BROWSER_SCREENSHOT, async (_e, paneId: string) => {
-    const wc = getBrowserWebContents(paneId)
-    if (!wc) return null
-    try {
-      const image = await wc.capturePage()
-      return image.toDataURL()
-    } catch { return null }
-  })
-
-  ipcMain.handle(IPC_CHANNELS.AI_BROWSER_EXECUTE_JS, async (_e, paneId: string, code: string) => {
-    const wc = getBrowserWebContents(paneId)
-    if (!wc) return { success: false, error: `No browser pane ${paneId}` }
-    try {
-      const result = await wc.executeJavaScript(code, true)
-      return { success: true, result }
-    } catch (error) {
-      return { success: false, error: (error as Error).message }
-    }
-  })
-
-  ipcMain.handle(IPC_CHANNELS.AI_BROWSER_CLICK, async (_e, paneId: string, selector: string) => {
-    const wc = getBrowserWebContents(paneId)
-    if (!wc) return { success: false, error: `No browser pane ${paneId}` }
-    const code = `(() => {
-      const el = document.querySelector(${JSON.stringify(selector)});
-      if (!el) return { found: false };
-      el.scrollIntoView({ block: 'center', behavior: 'instant' });
-      el.click();
-      return { found: true, tag: el.tagName.toLowerCase() };
-    })()`
-    try {
-      const result = await wc.executeJavaScript(code, true)
-      return { success: true, ...(result as object) }
-    } catch (error) {
-      return { success: false, error: (error as Error).message }
-    }
-  })
-
-  ipcMain.handle(IPC_CHANNELS.AI_BROWSER_TYPE, async (_e, paneId: string, selector: string, text: string, submit?: boolean) => {
-    const wc = getBrowserWebContents(paneId)
-    if (!wc) return { success: false, error: `No browser pane ${paneId}` }
-    const code = `(() => {
-      const el = document.querySelector(${JSON.stringify(selector)});
-      if (!el) return { found: false };
-      el.focus();
-      const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-      const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
-      if (setter) setter.call(el, ${JSON.stringify(text)});
-      else el.value = ${JSON.stringify(text)};
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-      ${submit ? `if (el.form && typeof el.form.requestSubmit === 'function') { el.form.requestSubmit(); } else if (el.form) { el.form.submit(); }` : ``}
-      return { found: true };
-    })()`
-    try {
-      const result = await wc.executeJavaScript(code, true)
-      return { success: true, ...(result as object) }
-    } catch (error) {
-      return { success: false, error: (error as Error).message }
-    }
-  })
-
-  ipcMain.handle(IPC_CHANNELS.AI_BROWSER_BACK, async (_e, paneId: string) => {
-    const wc = getBrowserWebContents(paneId); if (!wc) return false
-    if (wc.canGoBack()) wc.goBack()
-    return true
-  })
-  ipcMain.handle(IPC_CHANNELS.AI_BROWSER_FORWARD, async (_e, paneId: string) => {
-    const wc = getBrowserWebContents(paneId); if (!wc) return false
-    if (wc.canGoForward()) wc.goForward()
-    return true
-  })
-  ipcMain.handle(IPC_CHANNELS.AI_BROWSER_RELOAD, async (_e, paneId: string) => {
-    const wc = getBrowserWebContents(paneId); if (!wc) return false
-    wc.reload()
-    return true
+  ipcMain.on(IPC_CHANNELS.BROWSER_PANE_TAB_UNREGISTER, (_e, paneId: string, tabId: string) => {
+    unregisterBrowserPaneTab(paneId, tabId)
   })
 
   // Action log read access
@@ -1474,6 +1582,25 @@ function registerIpcHandlers() {
   // Approval gate response from renderer
   ipcMain.on(IPC_CHANNELS.BROWSER_APPROVAL_RESPONSE, (_e, id: string, approved: boolean) => {
     resolveApproval(id, approved)
+  })
+
+  // HTTP auth / certificate-warning prompt responses from renderer
+  ipcMain.on(IPC_CHANNELS.BROWSER_LOGIN_RESPONSE, (_e, id: string, creds: { username: string; password: string } | null) => {
+    resolveLoginPrompt(id, creds)
+  })
+  ipcMain.on(IPC_CHANNELS.BROWSER_CERT_WARNING_RESPONSE, (_e, id: string, proceed: boolean) => {
+    resolveCertWarning(id, proceed)
+  })
+
+  // Screen-share picker response from renderer
+  ipcMain.on(IPC_CHANNELS.BROWSER_SCREEN_SHARE_RESPONSE, (_e, id: string, sourceId: string | null) => {
+    resolveScreenShare(id, sourceId)
+  })
+
+  // Pane-control ack from renderer (switch tab / reconnect / browser tab
+  // action / focus / maximize actually found a registered handler or not)
+  ipcMain.on(IPC_CHANNELS.PANE_CONTROL_ACK, (_e, requestId: string, ok: boolean) => {
+    resolvePaneControlAck(requestId, ok)
   })
 
   // Recipes
@@ -1511,6 +1638,27 @@ app.whenReady().then(() => {
     callback(allow.has(permission))
   })
 
+  // Screen/window sharing (Google Meet, Zoom-web, Discord-web "present
+  // screen"). display-capture is auto-allowed above, but Electron still
+  // requires this handler to actually supply a source — without it,
+  // getDisplayMedia() just hangs. Video-only for v1; system-audio loopback
+  // capture is deferred (Windows-specific, not needed for the core
+  // share-my-screen-in-a-call use case).
+  browserSession.setDisplayMediaRequestHandler(async (_request, callback) => {
+    try {
+      const sources = await desktopCapturer.getSources({
+        types: ['screen', 'window'],
+        thumbnailSize: { width: 300, height: 200 }
+      })
+      const list = sources.map(s => ({ id: s.id, name: s.name, thumbnail: s.thumbnail.toDataURL() }))
+      const pickedId = await requestScreenShareSource(mainWindow, list)
+      const picked = pickedId ? sources.find(s => s.id === pickedId) : undefined
+      callback(picked ? { video: picked } : {})
+    } catch {
+      callback({})
+    }
+  })
+
   // Download wiring: track every download and emit progress to the renderer.
   browserSession.on('will-download', (_event, item) => {
     const id = uuidv4()
@@ -1522,14 +1670,33 @@ app.whenReady().then(() => {
       state: 'progressing',
       receivedBytes: 0,
       totalBytes: item.getTotalBytes(),
-      startedAt: Date.now()
+      startedAt: Date.now(),
+      canResume: false
     }
     activeDownloads.set(id, info)
+    activeDownloadItems.set(id, item)
+
+    if (workspaceStore?.getSettings().browserDownloadsAskLocation) {
+      // Electron holds the item open while this resolves — setSavePath()
+      // shortly after will-download fires (even asynchronously) is the
+      // documented way to redirect a download before it writes to disk.
+      const dialogPromise = mainWindow
+        ? dialog.showSaveDialog(mainWindow, { defaultPath: item.getFilename() })
+        : dialog.showSaveDialog({ defaultPath: item.getFilename() })
+      dialogPromise.then(result => {
+        if (result.canceled || !result.filePath) {
+          item.cancel()
+        } else {
+          item.setSavePath(result.filePath)
+        }
+      })
+    }
 
     item.on('updated', (_e, state) => {
-      info.state = state === 'progressing' ? 'progressing' : 'interrupted'
+      info.state = item.isPaused() ? 'paused' : state === 'progressing' ? 'progressing' : 'interrupted'
       info.receivedBytes = item.getReceivedBytes()
       info.totalBytes = item.getTotalBytes()
+      info.canResume = item.canResume()
       mainWindow?.webContents.send(IPC_CHANNELS.BROWSER_DOWNLOAD_UPDATE, { ...info })
     })
     item.once('done', (_e, state) => {
@@ -1539,9 +1706,26 @@ app.whenReady().then(() => {
       info.savePath = item.getSavePath()
       info.receivedBytes = item.getReceivedBytes()
       info.totalBytes = item.getTotalBytes() || info.receivedBytes
+      info.canResume = false
       mainWindow?.webContents.send(IPC_CHANNELS.BROWSER_DOWNLOAD_UPDATE, { ...info })
+      activeDownloadItems.delete(id)
     })
   })
+
+  // See the setWindowOpenHandler callback below for why this exists: only
+  // URLs that actually look like an OAuth authorization request get a real
+  // popup window; everything else opens as a new tab.
+  function looksLikeOAuthPopup(url: string): boolean {
+    try {
+      const parsed = new URL(url)
+      const params = parsed.searchParams
+      if (params.has('client_id') && (params.has('response_type') || params.has('redirect_uri'))) return true
+      if (params.has('oauth_token')) return true // OAuth 1.0a
+      return /\/(oauth2?|authorize|sso|saml)(\/|$)/i.test(parsed.pathname)
+    } catch {
+      return false
+    }
+  }
 
   // Harden any webview that gets attached: strip preload, force isolation,
   // route popups to the user's default browser instead of opening as child windows.
@@ -1551,20 +1735,98 @@ app.whenReady().then(() => {
       webPreferences.nodeIntegration = false
       webPreferences.contextIsolation = true
     })
-    contents.setWindowOpenHandler(({ url }) => {
-      // For browser-pane webviews: route popups (target=_blank, window.open)
-      // to navigate the SAME webview, so AI automation and in-app browsing
-      // see the new page in-context. Otherwise these clicks silently bounce
-      // out to the OS browser and the AI thinks "nothing happened."
-      // The right-click "Open in default browser" item is still the escape
-      // hatch when the user explicitly wants an external window.
-      if (contents.getType() === 'webview' && /^https?:/i.test(url)) {
-        contents.loadURL(url).catch(() => {})
+    contents.setWindowOpenHandler(({ url, features }) => {
+      if (!(contents.getType() === 'webview' && /^https?:/i.test(url))) {
+        // Host renderer popups still go to the OS browser as before.
+        if (/^https?:/i.test(url)) shell.openExternal(url)
         return { action: 'deny' }
       }
-      // Host renderer popups still go to the OS browser as before.
-      if (/^https?:/i.test(url)) shell.openExternal(url)
+
+      // Popup vs. new-tab heuristic. Originally keyed off a non-empty
+      // `features` string (width=,height=,...), on the theory that only
+      // real OAuth popups pass one. That's wrong in practice: plenty of
+      // ordinary sites call window.open(url, '_blank', 'noopener,noreferrer')
+      // for perfectly normal outbound links and buttons — noopener/noreferrer
+      // alone makes `features` non-empty with no OAuth involved at all. Every
+      // one of those got misclassified as a real popup and opened as a tiny
+      // 500x640 chrome-only window elsewhere on screen — which is exactly
+      // what "clicking this link does nothing" / "this popup button is
+      // unusable" looks like from the user's seat.
+      //
+      // Key off the URL shape instead: OAuth 2.0 authorization endpoints are
+      // standardized (RFC 6749) around `client_id` + `response_type`/
+      // `redirect_uri` query params, OAuth 1.0a around `oauth_token`, and
+      // basically every provider's auth path contains "oauth"/"authorize"/
+      // "sso"/"saml". That's provider-agnostic — it doesn't need a hardcoded
+      // list of Google/GitHub/etc. domains and still catches custom IdPs.
+      // Anything that doesn't look like an auth request now opens as a new
+      // tab, matching what the user actually wants for links/buttons.
+      if (looksLikeOAuthPopup(url)) {
+        const widthMatch = /width=(\d+)/.exec(features)
+        const heightMatch = /height=(\d+)/.exec(features)
+        return {
+          action: 'allow',
+          overrideBrowserWindowOptions: {
+            width: widthMatch ? parseInt(widthMatch[1], 10) : 500,
+            height: heightMatch ? parseInt(heightMatch[1], 10) : 640,
+            parent: mainWindow ?? undefined,
+            webPreferences: {
+              contextIsolation: true,
+              nodeIntegration: false,
+              sandbox: true
+              // No `partition` override — inherits the opener's
+              // persist:browser-pane session so SSO cookies are visible,
+              // which OAuth completion requires.
+            }
+          }
+        }
+      }
+
+      // New tab: resolve which pane this webview belongs to (all-tabs
+      // reverse lookup, not just the active-tab map — the webview asking
+      // for a new tab isn't necessarily the active one) and reuse the same
+      // pane-control round trip the AI's open_browser_tab tool already
+      // drives. If no pane resolves (tab closed mid-flight), fall back to
+      // the OS browser rather than silently dropping it.
+      const paneId = getPaneIdForWebContents(contents.id)
+      if (paneId && mainWindow) {
+        sendPaneControl(mainWindow, IPC_CHANNELS.AI_BROWSER_TAB_ACTION, { paneId, action: 'open', url }).catch(() => {})
+      } else {
+        shell.openExternal(url)
+      }
       return { action: 'deny' }
+    })
+
+    // Real popup windows (the 'allow' branch above) are intentionally
+    // unmanaged: not registered in browser-pane-registry, not addressable by
+    // AI tools or remote access. OAuth SDKs call window.close() on their own
+    // completion page (Electron honors this on a real BrowserWindow), and
+    // `parent: mainWindow` keeps it correctly behaved without a destroy
+    // hook. Just deny any further nested popup from the child as cheap
+    // self-documenting insurance (the outer web-contents-created hook above
+    // already covers it either way, since it fires for every WebContents).
+    contents.on('did-create-window', (childWindow) => {
+      childWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+
+      // setWindowOpenHandler itself must return synchronously, so it can't
+      // await the pane's actual screen position — overrideBrowserWindowOptions
+      // just gets a plain width/height and the OS decides where to put it,
+      // which on a multi-pane grid usually isn't anywhere near the pane the
+      // user is looking at. did-create-window fires right after with a real
+      // BrowserWindow we can freely reposition asynchronously, so resolve
+      // which pane spawned this popup and center it over that pane's actual
+      // on-screen rect instead of leaving it wherever the OS defaulted to.
+      const paneId = getPaneIdForWebContents(contents.id)
+      if (paneId && mainWindow && !mainWindow.isDestroyed()) {
+        getPaneRect(mainWindow, paneId).then(rect => {
+          if (!rect || childWindow.isDestroyed()) return
+          const contentBounds = mainWindow!.getContentBounds()
+          const [winWidth, winHeight] = childWindow.getSize()
+          const centerX = contentBounds.x + rect.x + rect.width / 2
+          const centerY = contentBounds.y + rect.y + rect.height / 2
+          childWindow.setPosition(Math.round(centerX - winWidth / 2), Math.round(centerY - winHeight / 2))
+        }).catch(() => {})
+      }
     })
 
     // Don't let browser-pane webviews trap the user with beforeunload prompts.
@@ -1598,7 +1860,9 @@ app.whenReady().then(() => {
             canCopy: params.editFlags?.canCopy,
             canPaste: params.editFlags?.canPaste,
             canSelectAll: params.editFlags?.canSelectAll
-          }
+          },
+          misspelledWord: params.misspelledWord || undefined,
+          dictionarySuggestions: params.dictionarySuggestions?.length ? params.dictionarySuggestions : undefined
         })
       })
     }
@@ -1620,6 +1884,10 @@ app.whenReady().then(() => {
         else if (input.alt && !ctrl && input.key === 'ArrowRight') shortcut = 'forward'
         else if (input.key === 'Escape') shortcut = 'escape'
         else if (ctrl && !input.shift && !input.alt && (input.key === 'w' || input.key === 'W')) shortcut = 'closePane'
+        else if (ctrl && (input.key === '=' || input.key === '+')) shortcut = 'zoomIn'
+        else if (ctrl && input.key === '-') shortcut = 'zoomOut'
+        else if (ctrl && input.key === '0') shortcut = 'zoomReset'
+        else if (ctrl && !input.shift && !input.alt && (input.key === 'p' || input.key === 'P')) shortcut = 'print'
         if (shortcut) {
           event.preventDefault()
           mainWindow?.webContents.send(IPC_CHANNELS.BROWSER_SHORTCUT, {
@@ -1627,6 +1895,19 @@ app.whenReady().then(() => {
             shortcut
           })
         }
+      })
+
+      // In-page video fullscreen (YouTube's fullscreen button etc.) — the
+      // pane itself owns maximize state, keyed by paneId not webContentsId,
+      // so resolve that here via the same registry lookup already used for
+      // the popup-vs-new-tab flow above.
+      contents.on('enter-html-full-screen', () => {
+        const paneId = getPaneIdForWebContents(contents.id)
+        if (paneId) mainWindow?.webContents.send(IPC_CHANNELS.BROWSER_HTML_FULLSCREEN, { paneId, entering: true })
+      })
+      contents.on('leave-html-full-screen', () => {
+        const paneId = getPaneIdForWebContents(contents.id)
+        if (paneId) mainWindow?.webContents.send(IPC_CHANNELS.BROWSER_HTML_FULLSCREEN, { paneId, entering: false })
       })
     }
   })
@@ -1640,6 +1921,36 @@ app.whenReady().then(() => {
   })
 })
 
+// HTTP Basic/Digest auth (and authenticated proxies) — without this handler
+// Electron just fails the load with no prompt at all. Scoped to browser-pane
+// webviews only; anything else (e.g. this app's own dev-server connection)
+// falls through to Electron's default (deny) by never calling preventDefault.
+app.on('login', (event, webContents, _details, authInfo, callback) => {
+  if (webContents.getType() !== 'webview') return
+  event.preventDefault()
+  requestCredentials(mainWindow, {
+    url: authInfo.host ?? '',
+    realm: authInfo.realm ?? '',
+    isProxy: authInfo.isProxy
+  }).then(creds => {
+    if (creds) callback(creds.username, creds.password)
+    else callback()
+  })
+})
+
+// Invalid/self-signed certificates — without this handler Electron denies
+// by default with no way to click through, unlike a real browser's "your
+// connection is not private" interstitial. Scoped to browser-pane webviews
+// only, same as the login handler above.
+app.on('certificate-error', (event, webContents, url, error, certificate, callback) => {
+  if (webContents.getType() !== 'webview') return
+  event.preventDefault()
+  let hostname = url
+  try { hostname = new URL(url).hostname } catch { /* keep raw url as the key */ }
+  const bypassKey = `cert-bypass:${hostname}:${certificate.fingerprint}`
+  requestCertBypass(mainWindow, { url, error }, bypassKey).then(callback)
+})
+
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit()
@@ -1648,6 +1959,8 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   ptyManager?.killAll()
+  remoteServer?.stop().catch(() => {})
+  remoteServer?.dispose()
 })
 
 // Handle uncaught exceptions

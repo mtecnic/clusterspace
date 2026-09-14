@@ -11,6 +11,7 @@ import {
   PaneConfig
 } from '@shared/types'
 import { registerBrowserTabAction, registerReconnect } from './../lib/pane-controls'
+import { useWorkspace } from './../context/WorkspaceContext'
 import { BrowserTabWebview, BrowserTabWebviewHandle, BrowserTabStatus } from './BrowserTabWebview'
 
 // Resolve tabs from a pane config. If `tabs` is absent we synthesize a single
@@ -74,6 +75,21 @@ function formatBytes(n: number): string {
   return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`
 }
 
+// Positions a popup along one axis: opens forward from `click` (the normal
+// case), flips to open backward when it wouldn't fit forward, and only
+// falls back to clamping (pinning against the boundary, no longer directly
+// under the click) when neither direction has room — e.g. a narrow pane.
+// A plain min/max clamp alone *always* pins against whichever edge is
+// closest once the popup doesn't fit forward, which is what made the
+// webview context menu look like it was ignoring the click entirely
+// whenever the pane was narrower than the menu (240px) plus its margin.
+function flipPosition(click: number, size: number, boundMin: number, boundMax: number, margin = 8): number {
+  if (click + size + margin <= boundMax) return click
+  const flipped = click - size
+  if (flipped >= boundMin) return flipped
+  return Math.max(boundMin, boundMax - size - margin)
+}
+
 export function BrowserPane({
   config,
   isFocused,
@@ -105,6 +121,18 @@ export function BrowserPane({
 
   const activeStatus = statusByTab[activeTabId] ?? EMPTY_STATUS
   const activeWebContentsId = webContentsIds[activeTabId] ?? null
+
+  // Background-tab idle-discard threshold (Settings-configurable, reactive —
+  // useWorkspace's settings update live so a change takes effect on the next
+  // tab's inactive transition without needing a pane remount).
+  const { settings } = useWorkspace()
+  const idleThresholdMs = (settings?.browserTabIdleDiscardMinutes ?? 15) * 60_000
+
+  const handleDiscardedChange = useCallback((tabId: string, discarded: boolean) => {
+    if (!discarded) return
+    const id = webContentsIds[tabId]
+    if (id != null) window.electronAPI.detachBrowserTabDebugger(id)
+  }, [webContentsIds])
   const currentUrl = activeTab.url
   const pageTitle = activeTab.title ?? ''
   const favicon = activeTab.favicon
@@ -197,6 +225,12 @@ export function BrowserPane({
   }, [activeTabId, persistTabs])
 
   const handleWebContentsId = useCallback((tabId: string, id: number | null) => {
+    // All-tabs reverse registration (not just the active tab) so main-process
+    // popup handling can resolve "which pane does this background tab belong
+    // to" — separate from the active-only registerBrowserPane effect below.
+    if (id == null) window.electronAPI.unregisterBrowserPaneTab(config.id, tabId)
+    else window.electronAPI.registerBrowserPaneTab(config.id, tabId, id)
+
     setWebContentsIds(prev => {
       if (id == null) {
         if (!(tabId in prev)) return prev
@@ -207,10 +241,26 @@ export function BrowserPane({
       if (prev[tabId] === id) return prev
       return { ...prev, [tabId]: id }
     })
-  }, [])
+  }, [config.id])
 
   const handleTabStatus = useCallback((tabId: string, status: BrowserTabStatus) => {
     setStatusByTab(prev => ({ ...prev, [tabId]: status }))
+  }, [])
+
+  // A click on the page itself never reaches the host document's outside-
+  // click listener below (clicks inside a <webview>'s guest content don't
+  // bubble across the process boundary) — 'focus' does cross it, so use
+  // that as the "user clicked into the page" signal to close the
+  // toolbar-triggered popovers (bookmarks/overflow/autocomplete/downloads).
+  // Deliberately does NOT close webviewMenu: a right-click that opens it
+  // also transfers focus into the webview in the same gesture, so this
+  // would close the menu it just opened. webviewMenu gets its own
+  // click-catcher overlay below instead — see its render block.
+  const handleWebviewFocus = useCallback(() => {
+    setShowBookmarks(false)
+    setShowOverflow(false)
+    setShowAutocomplete(false)
+    setShowDownloads(false)
   }, [])
 
   const registerTabHandle = useCallback((tabId: string, handle: BrowserTabWebviewHandle | null) => {
@@ -253,6 +303,24 @@ export function BrowserPane({
     // Optimistically reflect the destination in the URL bar.
     setUrlInput(target.url)
   }, [activeTabId, tabs, persistTabs])
+
+  const handleTogglePin = useCallback((tabId: string) => {
+    setTabs(prev => {
+      const next = prev.map(t => t.id === tabId ? { ...t, pinned: !t.pinned } : t)
+      persistTabs(next, activeTabId)
+      return next
+    })
+  }, [activeTabId, persistTabs])
+
+  // Persists a tab's zoom factor as it changes via Ctrl+/Ctrl-/Ctrl+0 —
+  // same shape as handleTogglePin, just a different field.
+  const handleZoomChanged = useCallback((tabId: string, zoomLevel: number) => {
+    setTabs(prev => {
+      const next = prev.map(t => t.id === tabId ? { ...t, zoomLevel } : t)
+      persistTabs(next, activeTabId)
+      return next
+    })
+  }, [activeTabId, persistTabs])
 
   const handleCloseTab = useCallback((tabId: string) => {
     setTabs(prev => {
@@ -423,7 +491,8 @@ export function BrowserPane({
       case 'back': handleBack(); break
       case 'forward': handleForward(); break
       case 'escape':
-        if (showFind) closeFind()
+        if (webviewMenu) setWebviewMenu(null)
+        else if (showFind) closeFind()
         else if (showOverflow) setShowOverflow(false)
         else if (showBookmarks) setShowBookmarks(false)
         else if (showDownloads) setShowDownloads(false)
@@ -432,8 +501,26 @@ export function BrowserPane({
         // Convert back to terminal — same effect as the context-menu action.
         onUpdateConfig({ type: 'terminal', url: undefined })
         break
+      case 'zoomIn': {
+        const handle = activeHandle()
+        const current = handle?.getZoomFactor() ?? 1
+        handle?.setZoomFactor(Math.min(3, +(current + 0.1).toFixed(2)))
+        break
+      }
+      case 'zoomOut': {
+        const handle = activeHandle()
+        const current = handle?.getZoomFactor() ?? 1
+        handle?.setZoomFactor(Math.max(0.25, +(current - 0.1).toFixed(2)))
+        break
+      }
+      case 'zoomReset':
+        activeHandle()?.setZoomFactor(1)
+        break
+      case 'print':
+        activeHandle()?.print()
+        break
     }
-  }, [focusUrlBar, handleReload, handleBack, handleForward, activeHandle, showFind, showOverflow, showBookmarks, showDownloads, closeFind, onUpdateConfig])
+  }, [focusUrlBar, handleReload, handleBack, handleForward, activeHandle, webviewMenu, showFind, showOverflow, showBookmarks, showDownloads, closeFind, onUpdateConfig])
 
   // ---- URL input handlers ----
   const handleUrlSubmit = useCallback((e: React.FormEvent) => {
@@ -555,6 +642,13 @@ export function BrowserPane({
                 <span className="browser-tab-title">
                   {tab.title || hostnameOf(tab.url)}
                 </span>
+                <button
+                  type="button"
+                  className={`browser-tab-pin ${tab.pinned ? 'pinned' : ''}`}
+                  onClick={(e) => { e.stopPropagation(); handleTogglePin(tab.id) }}
+                  aria-label={tab.pinned ? 'Unpin tab' : 'Pin tab (exempt from background auto-discard)'}
+                  title={tab.pinned ? 'Unpin tab' : 'Pin tab (exempt from background auto-discard)'}
+                >📌</button>
                 <button
                   type="button"
                   className="browser-tab-close"
@@ -701,6 +795,12 @@ export function BrowserPane({
               onNavigated={handleTabNavigated}
               onWebContentsId={handleWebContentsId}
               onStatus={handleTabStatus}
+              onWebviewFocus={handleWebviewFocus}
+              pinned={tab.pinned}
+              idleThresholdMs={idleThresholdMs}
+              onDiscardedChange={handleDiscardedChange}
+              initialZoom={tab.zoomLevel}
+              onZoomChanged={handleZoomChanged}
             />
           ))}
         </div>
@@ -779,13 +879,22 @@ export function BrowserPane({
                 <div key={d.id} className="download-item">
                   <div className="download-row">
                     <span className="ac-title">{d.filename}</span>
-                    <span className="ac-url">{d.state === 'progressing' ? `${pct}%` : d.state}</span>
+                    <span className="ac-url">{d.state === 'progressing' || d.state === 'paused' ? `${pct}%` : d.state}</span>
                   </div>
-                  {d.state === 'progressing' && (
+                  {(d.state === 'progressing' || d.state === 'paused') && (
                     <div className="download-progress"><div style={{ width: `${pct}%` }} /></div>
                   )}
                   <div className="download-meta">
                     <span className="ac-url">{formatBytes(d.receivedBytes)}{d.totalBytes ? ` / ${formatBytes(d.totalBytes)}` : ''}</span>
+                    {d.state === 'progressing' && (
+                      <button className="bookmark-remove" onClick={() => window.electronAPI.pauseDownload(d.id)} title="Pause">⏸</button>
+                    )}
+                    {d.state === 'paused' && d.canResume && (
+                      <button className="bookmark-remove" onClick={() => window.electronAPI.resumeDownload(d.id)} title="Resume">▶</button>
+                    )}
+                    {(d.state === 'progressing' || d.state === 'paused') && (
+                      <button className="bookmark-remove" onClick={() => window.electronAPI.cancelDownload(d.id)} title="Cancel">✕</button>
+                    )}
                     {d.state === 'completed' && (
                       <>
                         <button className="bookmark-remove" onClick={() => window.electronAPI.openDownload(d.id)} title="Open">↗</button>
@@ -807,6 +916,12 @@ export function BrowserPane({
               setTimeout(() => findInputRef.current?.focus(), 0)
             }}>
               <span>Find in page</span><span className="kbd">Ctrl+F</span>
+            </div>
+            <div className="context-menu-item" onClick={() => {
+              activeHandle()?.print()
+              setShowOverflow(false)
+            }}>
+              <span>Print...</span><span className="kbd">Ctrl+P</span>
             </div>
             <div className="context-menu-item" onClick={() => {
               activeHandle()?.toggleDevTools()
@@ -874,15 +989,29 @@ export function BrowserPane({
 
       {webviewMenu && (() => {
         const rect = activeHandle()?.getBoundingClientRect()
-        const left = (rect?.left ?? 0) + webviewMenu.x
-        const top = (rect?.top ?? 0) + webviewMenu.y
+        // Confirmed via logged rect/params: Electron's webview context-menu
+        // event already reports x/y in the HOST WINDOW's coordinate space
+        // (same space getBoundingClientRect() uses), not relative to the
+        // webview's own guest viewport — adding rect.left/top on top of an
+        // already-window-relative value double-counted the webview's own
+        // offset, which is why the menu landed nowhere near the click.
+        const left = webviewMenu.x
+        const top = webviewMenu.y
         const close = () => setWebviewMenu(null)
         const params = webviewMenu
         const handle = activeHandle()
+        // Only inspectElement/copyImageAt need guest-relative coordinates
+        // (they're WebContents-viewport APIs) — convert back for those two.
+        const guestX = params.x - (rect?.left ?? 0)
+        const guestY = params.y - (rect?.top ?? 0)
 
         const items: Array<{ label: string; onClick: () => void; danger?: boolean } | 'divider'> = []
 
         if (params.linkURL) {
+          items.push({
+            label: 'Open link in new tab',
+            onClick: () => { void handleOpenNewTab(params.linkURL!); close() }
+          })
           items.push({
             label: 'Open link in default browser',
             onClick: () => { window.electronAPI.openExternal(params.linkURL!); close() }
@@ -900,8 +1029,46 @@ export function BrowserPane({
             onClick: () => { window.electronAPI.openExternal(params.srcURL!); close() }
           })
           items.push({
+            label: 'Save image as…',
+            onClick: () => { handle?.downloadURL(params.srcURL!); close() }
+          })
+          items.push({
+            label: 'Copy image',
+            onClick: () => { window.electronAPI.copyImageAt(config.id, guestX, guestY); close() }
+          })
+          items.push({
             label: 'Copy image address',
             onClick: () => { navigator.clipboard.writeText(params.srcURL!); close() }
+          })
+          items.push('divider')
+        }
+
+        if (params.mediaType === 'video' || params.mediaType === 'audio') {
+          items.push({
+            label: `Save ${params.mediaType} as…`,
+            onClick: () => { handle?.downloadURL(params.srcURL!); close() }
+          })
+          items.push({
+            label: 'Copy video/audio address',
+            onClick: () => { navigator.clipboard.writeText(params.srcURL!); close() }
+          })
+          items.push('divider')
+        }
+
+        if (params.isEditable && params.misspelledWord) {
+          if (params.dictionarySuggestions && params.dictionarySuggestions.length > 0) {
+            for (const suggestion of params.dictionarySuggestions) {
+              items.push({
+                label: suggestion,
+                onClick: () => { handle?.replaceMisspelling(suggestion); close() }
+              })
+            }
+          } else {
+            items.push({ label: 'No spelling suggestions', onClick: () => { close() } })
+          }
+          items.push({
+            label: 'Add to dictionary',
+            onClick: () => { window.electronAPI.addWordToDictionary(params.misspelledWord!); close() }
           })
           items.push('divider')
         }
@@ -932,35 +1099,71 @@ export function BrowserPane({
         items.push('divider')
         items.push({
           label: 'Inspect element',
-          onClick: () => { handle?.inspectElement(params.x, params.y); close() }
+          onClick: () => { handle?.inspectElement(guestX, guestY); close() }
         })
 
-        // Clamp to viewport
+        // Bounded by the pane's own box (never spill into another pane),
+        // intersected with the window as a backstop for panes near an edge.
+        // Opens forward from the click and flips backward when it wouldn't
+        // fit forward — a plain clamp instead pins the menu against
+        // whichever edge is closest the moment it doesn't fit forward,
+        // which is what made it look like the menu ignored the click
+        // whenever the pane was narrower than the menu (240px) + margin.
         const menuW = 240
         const menuH = items.length * 30
-        const clampedLeft = Math.min(left, window.innerWidth - menuW - 8)
-        const clampedTop = Math.min(top, window.innerHeight - menuH - 8)
+        const boundLeft = Math.max(0, rect?.left ?? 0)
+        const boundTop = Math.max(0, rect?.top ?? 0)
+        const boundRight = Math.min(window.innerWidth, rect ? rect.left + rect.width : window.innerWidth)
+        const boundBottom = Math.min(window.innerHeight, rect ? rect.top + rect.height : window.innerHeight)
+        const clampedLeft = flipPosition(left, menuW, boundLeft, boundRight)
+        const clampedTop = flipPosition(top, menuH, boundTop, boundBottom)
 
         return (
-          <div
-            className="context-menu browser-popover"
-            style={{ left: clampedLeft, top: clampedTop, position: 'fixed', minWidth: menuW }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            {items.map((item, i) => (
-              item === 'divider'
-                ? <div key={`d-${i}`} className="context-menu-divider" />
-                : (
-                  <div
-                    key={`${item.label}-${i}`}
-                    className={`context-menu-item ${item.danger ? 'danger' : ''}`}
-                    onClick={item.onClick}
-                  >
-                    <span>{item.label}</span>
-                  </div>
-                )
-            ))}
-          </div>
+          <>
+            {/* Click-catcher over the webview area — the ONLY reliable way
+                to dismiss this menu on a click into the page itself. A
+                host-document mousedown listener can't do it (clicks inside
+                <webview> guest content never bubble out to the host DOM at
+                all), and a 'focus' listener can't either: if the webview
+                already has focus — the common case — a later click doesn't
+                fire a new focus event, and if it doesn't, the SAME
+                right-click that opened this menu also focuses the webview,
+                closing it immediately. This is a plain host DOM element
+                sitting on top, so normal mouse events work on it. */}
+            {rect && (
+              <div
+                onMouseDown={close}
+                onContextMenu={(e) => { e.preventDefault(); close() }}
+                style={{
+                  position: 'fixed',
+                  left: rect.left,
+                  top: rect.top,
+                  width: rect.width,
+                  height: rect.height,
+                  zIndex: 1999
+                }}
+              />
+            )}
+            <div
+              className="context-menu browser-popover"
+              style={{ left: clampedLeft, top: clampedTop, position: 'fixed', minWidth: menuW }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              {items.map((item, i) => (
+                item === 'divider'
+                  ? <div key={`d-${i}`} className="context-menu-divider" />
+                  : (
+                    <div
+                      key={`${item.label}-${i}`}
+                      className={`context-menu-item ${item.danger ? 'danger' : ''}`}
+                      onClick={item.onClick}
+                    >
+                      <span>{item.label}</span>
+                    </div>
+                  )
+              ))}
+            </div>
+          </>
         )
       })()}
     </>

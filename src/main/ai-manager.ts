@@ -12,7 +12,8 @@ import {
   PaneAgentState,
   OrchestrationGoal,
   TaskStep,
-  Persona
+  Persona,
+  TodoSnapshot
 } from '../shared/types'
 import { PtyManager } from './pty-manager'
 import { WorkspaceStore } from './workspace-store'
@@ -20,12 +21,17 @@ import { AgentStore } from './agent-store'
 import { OrchestrationStore } from './orchestration-store'
 import { ConfigLoader } from './config-loader'
 import { AIStore } from './ai-store'
+import type { GoalStore } from './goal-store'
+import type { GoalRunner } from './goal-runner'
 import { promises as fs } from 'fs'
 import { getBrowserWebContents } from './browser-pane-registry'
 import { capturePaneImage as capturePaneImageHelper } from './pane-screenshot'
 import { appendActionLog } from './browser-action-log'
-import { requestApproval, selectorLooksLikePassword } from './browser-approval'
+import { requestApproval, selectorLooksLikePassword, urlIsSensitive } from './browser-approval'
+import { isMutatingTool } from '../shared/loop-guard'
+import { classifyError, classifyHttpError, ClassifiedAIError } from '../shared/ai-error-classifier'
 import { registerAllTools, toolRegistry, type ToolContext, type ToolRuntimeState } from './ai-tools'
+import { formatTodoSnapshot } from './ai-tools/todo'
 
 // OpenAI-compatible request/response types
 interface ChatCompletionRequest {
@@ -40,7 +46,10 @@ interface ChatCompletionRequest {
   stream?: boolean
   temperature?: number
   max_tokens?: number
-  reasoning_effort?: 'minimal' | 'low' | 'medium' | 'high'
+  // 'auto' (default) lets the model decide; 'required' forces it to call a
+  // tool every turn instead of answering with plain text — useful for
+  // agentic personas that should never just "talk" without acting.
+  tool_choice?: 'auto' | 'required'
   // vLLM/SGLang chat-template passthrough. Qwen3/Qwen3.5 read
   // enable_thinking here to toggle their reasoning mode.
   chat_template_kwargs?: { enable_thinking?: boolean }
@@ -52,6 +61,12 @@ interface ChatCompletionChoice {
     role: string
     content: string | null
     tool_calls?: Array<{ id: string; type: string; function: { name: string; arguments: string } }>
+    // Same reasoning-channel split as StreamChunk's delta below, just for the
+    // non-streaming response shape. Field name varies by vLLM version/
+    // reasoning-parser: some emit reasoning_content, others (observed for
+    // real: vllm-0.27.1's default parser) emit reasoning instead — check both.
+    reasoning_content?: string
+    reasoning?: string
   }
   finish_reason: string
 }
@@ -76,8 +91,11 @@ interface StreamChunk {
       content?: string
       // vLLM/SGLang reasoning parsers stream a model's thinking here instead of
       // in `content`. Qwen3.5 with enable_thinking can route its ENTIRE output
-      // into this channel, leaving `content` empty (vLLM issue #38894).
+      // into this channel, leaving `content` empty (vLLM issue #38894). Field
+      // name varies by vLLM version/reasoning-parser — observed for real on
+      // vllm-0.27.1's default parser: it's `reasoning`, not `reasoning_content`.
       reasoning_content?: string
+      reasoning?: string
       tool_calls?: Array<{
         index: number
         id?: string
@@ -89,6 +107,10 @@ interface StreamChunk {
   }>
 }
 
+// Fixed caller id for the single global interactive chat panel — goals use
+// their own checkpoint id instead. See toolStateByCaller/policiesByCaller.
+const INTERACTIVE_CALLER_ID = 'interactive'
+
 export class AIManager {
   private window: BrowserWindow
   private ptyManager: PtyManager
@@ -97,28 +119,70 @@ export class AIManager {
   private orchestrationStore: OrchestrationStore
   private configLoader: ConfigLoader
   private aiStore: AIStore
+  private goalStore: GoalStore
+  // Set post-construction via setGoalRunner — GoalRunner's own constructor
+  // takes this AIManager, so the two can't be wired up in one step.
+  private goalRunner: GoalRunner | null = null
   private activeRequests: Map<string, AbortController> = new Map()
 
   // Shared state for tools that need to coordinate across calls (e.g., the
-  // step protocol's declare → verify handshake). Lives on the AIManager so
-  // each provider/conversation gets its own bag; passed into the tool
-  // registry's dispatch() as part of ToolContext.
-  private toolState: ToolRuntimeState = { currentStep: null }
+  // step protocol's declare → verify handshake), keyed per-caller so a
+  // running goal and the interactive chat panel (or two concurrent goals)
+  // can't clobber each other's declared step. The interactive chat panel
+  // is a single global conversation with no natural id of its own, so it
+  // uses the fixed INTERACTIVE_CALLER_ID sentinel; each goal uses its own
+  // checkpoint id. Was previously one unscoped field on AIManager.
+  private toolStateByCaller: Map<string, ToolRuntimeState> = new Map()
 
   // COMPLETION_PATTERNS moved to src/main/ai-tools/terminal.ts.
 
-  // Active goal policy. When set (by GoalRunner before kicking off a goal),
-  // executeTool consults this instead of the legacy regex approval gate.
-  // When null, chat-from-the-AI-panel uses the legacy gate so user-driven
-  // exploration isn't surprised by extra prompts.
-  private activePolicy: import('./goal-policy').GoalPolicy | null = null
+  // Per-goal policy (set by GoalRunner before kicking off a goal). executeTool
+  // consults the policy for its callerId instead of the legacy regex approval
+  // gate. Interactive chat (callerId === INTERACTIVE_CALLER_ID) never has an
+  // entry here, so it always uses the legacy gate — previously this was a
+  // single unscoped field, so a running goal's policy could leak into
+  // concurrent interactive-chat tool calls (or vice versa).
+  private policiesByCaller: Map<string, import('./goal-policy').GoalPolicy> = new Map()
 
-  setActivePolicy(policy: import('./goal-policy').GoalPolicy | null): void {
-    this.activePolicy = policy
+  setPolicyForCaller(callerId: string, policy: import('./goal-policy').GoalPolicy | null): void {
+    if (policy) this.policiesByCaller.set(callerId, policy)
+    else this.policiesByCaller.delete(callerId)
   }
 
-  getActivePolicy(): import('./goal-policy').GoalPolicy | null {
-    return this.activePolicy
+  /** Wired up once, right after GoalRunner is constructed in index.ts — lets
+   *  tools (assign_task/create_goal) start real goal runs via ctx.goalRunner
+   *  instead of only writing bookkeeping records. */
+  setGoalRunner(goalRunner: GoalRunner): void {
+    this.goalRunner = goalRunner
+  }
+
+  /** Set once at the start of a conversation/goal — see ToolRuntimeState.originalIntent. */
+  setConversationIntent(callerId: string, intent: string): void {
+    let state = this.toolStateByCaller.get(callerId)
+    if (!state) {
+      state = { currentStep: null, originalIntent: null, todos: null }
+      this.toolStateByCaller.set(callerId, state)
+    }
+    state.originalIntent = intent
+  }
+
+  /** Interactive-chat convenience wrapper — keeps INTERACTIVE_CALLER_ID private to this file. */
+  setInteractiveIntent(intent: string): void {
+    this.setConversationIntent(INTERACTIVE_CALLER_ID, intent)
+  }
+
+  /** Read-only peek at a caller's live checklist (write_todos/complete_todo) —
+   *  e.g. for a bounded "you still have open items" nudge before accepting
+   *  a claim of completion. null if the model never called either tool. */
+  getTodoSnapshot(callerId: string): TodoSnapshot | null {
+    return this.toolStateByCaller.get(callerId)?.todos ?? null
+  }
+
+  /** Drop all per-caller state (policy + tool state) once a goal ends, so
+   *  the maps don't grow unboundedly across many goal runs. */
+  releaseCaller(callerId: string): void {
+    this.policiesByCaller.delete(callerId)
+    this.toolStateByCaller.delete(callerId)
   }
 
   constructor(
@@ -127,7 +191,8 @@ export class AIManager {
     workspaceStore: WorkspaceStore,
     agentStore: AgentStore,
     orchestrationStore: OrchestrationStore,
-    aiStore: AIStore
+    aiStore: AIStore,
+    goalStore: GoalStore
   ) {
     this.window = window
     this.ptyManager = ptyManager
@@ -135,6 +200,7 @@ export class AIManager {
     this.agentStore = agentStore
     this.orchestrationStore = orchestrationStore
     this.aiStore = aiStore
+    this.goalStore = goalStore
     this.configLoader = new ConfigLoader()
     // Populate the global tool registry on first AIManager construction.
     // Migration is incremental — registered tools take precedence; everything
@@ -143,7 +209,20 @@ export class AIManager {
   }
 
   /** Snapshot of services tools can use, plus the shared mutable state bag. */
-  private buildToolContext(): ToolContext {
+  private buildToolContext(callerId: string): ToolContext {
+    let state = this.toolStateByCaller.get(callerId)
+    if (!state) {
+      state = { currentStep: null, originalIntent: null, todos: null }
+      this.toolStateByCaller.set(callerId, state)
+    }
+    if (!this.goalRunner) {
+      // Startup-ordering invariant: index.ts calls setGoalRunner() right
+      // after constructing GoalRunner, before any tool call can possibly
+      // reach here. A null goalRunner at this point is a real bug, not a
+      // recoverable state — fail loudly rather than silently no-op tools
+      // that need it (assign_task/create_goal).
+      throw new Error('AIManager.buildToolContext called before setGoalRunner — startup ordering bug')
+    }
     return {
       window: this.window,
       ptyManager: this.ptyManager,
@@ -151,8 +230,12 @@ export class AIManager {
       agentStore: this.agentStore,
       orchestrationStore: this.orchestrationStore,
       configLoader: this.configLoader,
-      state: this.toolState,
-      vision: this.buildVisionHelpers()
+      state,
+      vision: this.buildVisionHelpers(),
+      callerId,
+      goalRunner: this.goalRunner,
+      goalStore: this.goalStore,
+      activePolicy: this.policiesByCaller.get(callerId) ?? null
     }
   }
 
@@ -380,7 +463,8 @@ export class AIManager {
   getToolDefinitions(): AIToolDefinition[] {
     // Migrated to ai-tools/ (registry, appended at bottom of this function):
     //   - terminal.ts: write_to_terminal, read_terminal_output, poll_terminal_status, wait_for_output
-    //   - pane.ts: list_panes, capture_screenshot, focus_pane, maximize_pane, create_workspace, restart_terminal
+    //   - pane.ts: list_panes, capture_screenshot, focus_pane, maximize_pane, create_workspace
+    //   - controls.ts: switch_terminal_tab, open_browser_tab, switch_browser_tab, close_browser_tab, reconnect_pane
     //   - step-protocol.ts: declare_step, verify_step
     //   - orchestration.ts: get_fleet_status, set_agent_role, assign_task, complete_task, fail_task, wait_for_agent, share_context, create_goal
     // Only browser tools remain inline (next migration batch).
@@ -507,10 +591,17 @@ export class AIManager {
   }
 
   // Send a message (non-streaming)
+  // callerId is deliberately opt-in (no default): every current call site
+  // is a synthetic side-channel judge/vision call (buildVisionHelpers'
+  // verify/describe, verifySuccessCriterion's model_question judge,
+  // runCritic's judge prompt) that must NOT see the running task's
+  // checklist — a judge asked "is this done?" while looking at the same
+  // plan the worker is following is no longer an independent check.
   async sendMessage(
     messages: AIMessage[],
     config: AIProviderConfig,
-    apiKey?: string
+    apiKey?: string,
+    callerId?: string
   ): Promise<AIMessage> {
     const requestId = uuidv4()
     const controller = new AbortController()
@@ -524,7 +615,7 @@ export class AIManager {
         headers['Authorization'] = `Bearer ${apiKey}`
       }
 
-      const request = this.buildRequest(messages, config, false)
+      const request = this.buildRequest(messages, config, false, callerId)
 
       const response = await fetch(`${config.endpoint}/chat/completions`, {
         method: 'POST',
@@ -534,71 +625,44 @@ export class AIManager {
       })
 
       if (!response.ok) {
-        const error = await response.text()
-        throw new Error(`HTTP ${response.status}: ${error}`)
+        const errorText = await response.text()
+        throw new ClassifiedAIError(classifyHttpError(response.status, errorText))
       }
 
       const data = await response.json() as ChatCompletionResponse
       const choice = data.choices[0]
 
-      // Parse tool calls with error handling
+      // Parse tool calls, with the same salvage passes the streaming path uses
+      // for malformed JSON (see parseToolArguments).
       const parsedToolCalls: AIToolCall[] = []
       if (choice.message.tool_calls) {
         for (const tc of choice.message.tool_calls) {
-          try {
-            parsedToolCalls.push({
-              id: tc.id,
-              name: tc.function.name,
-              arguments: JSON.parse(tc.function.arguments)
-            })
-          } catch (parseError) {
-            console.error('[AI] Failed to parse tool call arguments:', {
-              name: tc.function.name,
-              arguments: tc.function.arguments,
-              error: parseError
-            })
-            // Try to salvage - common issue is extra closing braces
-            let salvaged = tc.function.arguments.trim()
-            const openBraces = (salvaged.match(/\{/g) || []).length
-            const closeBraces = (salvaged.match(/\}/g) || []).length
-            if (closeBraces > openBraces) {
-              const excess = closeBraces - openBraces
-              for (let i = 0; i < excess; i++) {
-                salvaged = salvaged.replace(/\}([^}]*)$/, '$1')
-              }
-            }
-            try {
-              parsedToolCalls.push({
-                id: tc.id,
-                name: tc.function.name,
-                arguments: JSON.parse(salvaged)
-              })
-              console.log('[AI] Salvaged tool call arguments by fixing brace imbalance')
-            } catch {
-              const jsonMatch = salvaged.match(/\{[^{}]*\}/)
-              if (jsonMatch) {
-                try {
-                  parsedToolCalls.push({
-                    id: tc.id,
-                    name: tc.function.name,
-                    arguments: JSON.parse(jsonMatch[0])
-                  })
-                  console.log('[AI] Salvaged tool call with simple object extraction')
-                } catch {
-                  console.error('[AI] Could not salvage tool call arguments')
-                }
-              } else {
-                console.error('[AI] Could not salvage tool call arguments')
-              }
-            }
+          const args = this.parseToolArguments(tc.function.arguments)
+          if (args) {
+            parsedToolCalls.push({ id: tc.id, name: tc.function.name, arguments: args })
+          } else {
+            console.error('[AI] Could not salvage tool call arguments:', { name: tc.function.name, arguments: tc.function.arguments })
           }
         }
+      }
+
+      // Same reasoning-channel fallback as the streaming path (see the
+      // comment there) — a model that routes its whole answer into the
+      // reasoning channel otherwise returns silently empty content here,
+      // with no equivalent of streamMessage's stallReason to surface it.
+      // This is the path browser_verify_visual_state/browser_describe_screen
+      // go through — an empty fallback-less result here reads as "the vision
+      // judge looked and found nothing," not "the model never answered."
+      let content = this.stripThinkTags(choice.message.content || '')
+      if (!content) {
+        const reasoning = this.stripThinkTags(choice.message.reasoning_content ?? choice.message.reasoning ?? '')
+        if (reasoning) content = reasoning
       }
 
       return {
         id: uuidv4(),
         role: 'assistant',
-        content: this.stripThinkTags(choice.message.content || ''),
+        content,
         toolCalls: parsedToolCalls.length > 0 ? parsedToolCalls : undefined,
         timestamp: Date.now()
       }
@@ -611,10 +675,17 @@ export class AIManager {
   // and now also returns the final assembled assistant message so server-
   // side loops (like the GoalRunner) can drive multi-turn tool-use without
   // relying on the renderer's auto-loop.
+  //
+  // callerId defaults to the interactive chat panel's sentinel: every
+  // real, non-judge caller of this method (the interactive loop via IPC,
+  // and GoalRunner's actual work turns) wants its checklist re-injected,
+  // so defaulting here — unlike sendMessage, see its doc comment — means
+  // the interactive panel needs no changes at all to pick this up.
   async streamMessage(
     messages: AIMessage[],
     config: AIProviderConfig,
-    apiKey?: string
+    apiKey?: string,
+    callerId: string = INTERACTIVE_CALLER_ID
   ): Promise<AIMessage | null> {
     const requestId = uuidv4()
     const controller = new AbortController()
@@ -635,7 +706,7 @@ export class AIManager {
         headers['Authorization'] = `Bearer ${apiKey}`
       }
 
-      const request = this.buildRequest(messages, config, true)
+      const request = this.buildRequest(messages, config, true, callerId)
 
       // Debug: log request structure
       console.log('[AI] Streaming request:', {
@@ -654,14 +725,16 @@ export class AIManager {
       })
 
       if (!response.ok) {
-        const error = await response.text()
+        const errorText = await response.text()
+        const classified = classifyHttpError(response.status, errorText)
         // Log detailed error info for debugging
         console.error('[AI] Request failed:', {
           status: response.status,
-          error,
+          kind: classified.kind,
+          error: errorText,
           messageRoles: request.messages.map(m => m.role)
         })
-        throw new Error(`HTTP ${response.status}: ${error}`)
+        throw new ClassifiedAIError(classified)
       }
 
       const reader = response.body?.getReader()
@@ -702,8 +775,10 @@ export class AIManager {
 
             // Accumulate reasoning-channel output separately so it isn't lost
             // when a model streams everything there and leaves content empty.
-            if (delta?.reasoning_content) {
-              reasoningContent += delta.reasoning_content
+            // Check both field names — see StreamChunk's doc comment.
+            const reasoningChunk = delta?.reasoning_content ?? delta?.reasoning
+            if (reasoningChunk) {
+              reasoningContent += reasoningChunk
             }
 
             // Handle tool calls in streaming
@@ -791,10 +866,11 @@ export class AIManager {
       return finalMessage
     } catch (error) {
       if (!this.window.isDestroyed()) {
-        this.window.webContents.send(
-          IPC_CHANNELS.AI_STREAM_ERROR,
-          error instanceof Error ? error.message : 'Stream failed'
-        )
+        const classified = classifyError(error)
+        this.window.webContents.send(IPC_CHANNELS.AI_STREAM_ERROR, {
+          message: error instanceof Error ? error.message : 'Stream failed',
+          kind: classified.kind
+        })
       }
       return null
     } finally {
@@ -811,34 +887,145 @@ export class AIManager {
     }
   }
 
+  // Trim an array to fit charBudget by item count, not by slicing its JSON
+  // text — mid-string truncation on an array (e.g. list_panes' pane list,
+  // browser_screenshot_annotated's labels) can chop an item's id/selector in
+  // half, and the model has no way to tell a truncated field from a real
+  // one. Every included item is complete/untouched; always includes at
+  // least one item even if it alone exceeds the budget.
+  private truncateArrayByItems(arr: unknown[], charBudget: number): { kept: unknown[]; truncated: boolean } {
+    const kept: unknown[] = []
+    let size = 2 // "[]"
+    for (const item of arr) {
+      const itemJson = JSON.stringify(item)
+      if (size + itemJson.length + 1 > charBudget && kept.length > 0) break
+      kept.push(item)
+      size += itemJson.length + 1
+    }
+    return { kept, truncated: kept.length < arr.length }
+  }
+
+  // Cap a tool result's size before it's JSON.stringify'd into the model's
+  // context (AIContext.tsx does the actual stringify for interactive chat;
+  // goal-runner sends `result` straight to the model too). Most tools that
+  // can return large payloads (read_terminal_output, browser_get_content)
+  // already use the `PagedTextResult` envelope with its own cursor/hasMore
+  // paging — for those, truncate just the `content` field and flag
+  // `truncated: true` (reusing PagedTextResult's own field) so the envelope
+  // itself (hasMore/nextCursor/totalBytes) stays intact and the model can
+  // still page. An object whose largest field is an array (e.g.
+  // browser_screenshot_annotated's `labels`, browser_query_all's `elements`)
+  // gets that field trimmed by item count instead — same reasoning as a
+  // top-level array. Only a result with neither shape falls back to
+  // truncating its raw JSON-stringified form directly.
+  private truncateToolResult(result: unknown, maxChars = 3000): unknown {
+    if (typeof result === 'string') {
+      if (result.length <= maxChars) return result
+      return result.slice(0, 2000) + '\n\n...[truncated middle section]...\n\n' + result.slice(-500)
+    }
+    if (Array.isArray(result)) {
+      const json = JSON.stringify(result)
+      if (json.length <= maxChars) return result
+      const { kept } = this.truncateArrayByItems(result, maxChars)
+      console.log(`[AI] Truncating large array tool result from ${result.length} items (${json.length} chars) to ${kept.length} items`)
+      return {
+        items: kept,
+        truncated: true,
+        totalCount: result.length,
+        returnedCount: kept.length,
+        note: `Result had ${result.length} items (${json.length} chars total) — larger than the ${maxChars}-char context budget, so only the first ${kept.length} are included here (each one complete/untouched). This tool has no cursor/query param to fetch the rest — the remaining ${result.length - kept.length} items are simply not visible to you right now. Do NOT guess, invent, or reconstruct an id/field for an item beyond these ${kept.length} — treat anything past this list as unknown, and tell the user the result was truncated rather than acting on a fabricated value.`
+      }
+    }
+    if (result && typeof result === 'object') {
+      const obj = result as Record<string, unknown>
+      if (typeof obj.content === 'string' && obj.content.length > maxChars) {
+        return {
+          ...obj,
+          content: obj.content.slice(0, 2000) + '\n\n...[truncated middle section]...\n\n' + obj.content.slice(-500),
+          truncated: true
+        }
+      }
+      const json = JSON.stringify(obj)
+      if (json.length > maxChars) {
+        // Prefer trimming the largest array-valued field over raw JSON
+        // slicing — this is what browser_screenshot_annotated's `labels`
+        // (Set-of-Mark data the model needs intact to click by index) and
+        // similar array-shaped fields need to survive truncation usably.
+        let largestKey: string | null = null
+        let largestLen = -1
+        for (const [k, v] of Object.entries(obj)) {
+          if (Array.isArray(v) && v.length > 0) {
+            const len = JSON.stringify(v).length
+            if (len > largestLen) { largestLen = len; largestKey = k }
+          }
+        }
+        if (largestKey && largestLen > 200) {
+          const arr = obj[largestKey] as unknown[]
+          const restBudgetJson = JSON.stringify({ ...obj, [largestKey]: [] })
+          const arrayBudget = Math.max(500, maxChars - restBudgetJson.length)
+          const { kept, truncated } = this.truncateArrayByItems(arr, arrayBudget)
+          if (truncated) {
+            console.log(`[AI] Truncating array field "${largestKey}" in tool result from ${arr.length} to ${kept.length} items`)
+            return {
+              ...obj,
+              [largestKey]: kept,
+              truncated: true,
+              note: `Field "${largestKey}" had ${arr.length} items — trimmed to the first ${kept.length} to fit the ${maxChars}-char context budget (each included item is complete/untouched). Items beyond these ${kept.length} are unknown to you — don't guess or invent values for them.`
+            }
+          }
+        }
+        console.log(`[AI] Truncating large tool result from ${json.length} chars (no content/array field to trim)`)
+        return {
+          success: typeof obj.success === 'boolean' ? obj.success : true,
+          truncated: true,
+          preview: json.slice(0, 2000) + '\n\n...[truncated middle section]...\n\n' + json.slice(-500),
+          originalLength: json.length,
+          note: `Result was ${json.length} chars — larger than the ${maxChars}-char context budget and had no paginatable "content" field or usable array field to trim cleanly, so this is a raw truncated preview of its JSON — the middle section shown as "...[truncated middle section]..." is genuinely missing, not omitted for brevity. If this tool takes a selector/max_depth/limit param, narrow it; otherwise don't guess at what the truncated section contained.`
+        }
+      }
+    }
+    return result
+  }
+
   // Execute a tool call. Every tool now lives in the registry (see
   // src/main/ai-tools/). AIManager handles three things around dispatch:
   //   1. Approval gate (modal for sensitive browser ops)
   //   2. Browser action log (live ticker in the UI)
   //   3. Result truncation (avoid blowing the model's context budget)
-  async executeTool(toolCall: AIToolCall): Promise<AIToolResult> {
+  //
+  // callerId scopes policy + step-protocol state (see toolStateByCaller/
+  // policiesByCaller) — defaults to the single global interactive chat
+  // panel; GoalRunner passes its own checkpoint id so a running goal's
+  // policy/declared-step never leaks into (or is leaked into by) a
+  // concurrent interactive chat call or a different goal.
+  async executeTool(toolCall: AIToolCall, callerId: string = INTERACTIVE_CALLER_ID): Promise<AIToolResult> {
     try {
       const args = toolCall.arguments
       const dispatchStart = Date.now()
+      const activePolicy = this.policiesByCaller.get(callerId) ?? null
 
-      // 1a. Policy gate (Phase 2A) — if an active goal has a declared policy,
-      //     enforce it. Tools beyond the goal's risk ceiling, outside its
-      //     allowlist, or escaping its sandbox dir get prompted/denied.
-      if (this.activePolicy) {
+      // 1a. Policy gate (Phase 2A) — if this caller has a declared goal
+      //     policy, enforce it. Tools beyond the goal's risk ceiling, outside
+      //     its allowlist, or escaping its sandbox dir get prompted/denied.
+      if (activePolicy) {
         // Lazy import to avoid pulling goal-policy into bundles that don't
         // run goal flows.
         const { evaluate, getPermissions } = await import('./goal-policy')
         const perms = getPermissions(toolCall.name, args as Record<string, unknown>)
-        const verdict = evaluate(toolCall.name, perms, this.activePolicy)
+        const verdict = evaluate(toolCall.name, perms, activePolicy)
         if (!verdict.allow) {
           if (verdict.needsApproval) {
+            // Scoped to (goal, tool, exact reason) — a different reason (e.g.
+            // an escalated risk tier) still re-prompts; this only skips the
+            // prompt for a genuinely identical override already granted.
+            const approvalKey = `goal-policy:${callerId}:${toolCall.name}:${verdict.reason ?? ''}`
             const approved = await requestApproval(this.window, {
               paneId: (args.pane_id as string) ?? 'unknown',
               tool: toolCall.name,
               description: `Goal policy: ${verdict.reason ?? 'tool exceeds declared risk'}`,
               reason: 'Goal-policy override',
               args: args as Record<string, unknown>
-            })
+            }, approvalKey)
             if (!approved) {
               return { toolCallId: toolCall.id, result: { success: false, error: `Denied by goal policy: ${verdict.reason ?? 'risk exceeded'}` } }
             }
@@ -850,23 +1037,86 @@ export class AIManager {
         }
       }
 
+      // 1a.5. Step-protocol enforcement — opt-in per goal (GoalPolicy.
+      //     requireStepProtocol). declare_step/verify_step's own tool
+      //     descriptions say "REQUIRED" but that was only ever a prompt-text
+      //     convention the model could silently skip; this makes it a real
+      //     gate when a goal opts in. Interactive chat (no policy) is never
+      //     gated — this is deliberately opt-in, not a global requirement.
+      if (activePolicy?.requireStepProtocol && isMutatingTool(toolCall.name)) {
+        const state = this.toolStateByCaller.get(callerId)
+        if (!state?.currentStep) {
+          return {
+            toolCallId: toolCall.id,
+            result: { success: false, error: `This goal requires the step protocol: call declare_step before ${toolCall.name} (or any other mutating action).` }
+          }
+        }
+      }
+
       // 1b. Legacy regex gate for chat-from-the-AI-panel (no active policy).
       //     File uploads and password-field typing prompt regardless.
-      const needsGate =
-        !this.activePolicy && (
+      let needsGate =
+        !activePolicy && (
           toolCall.name === 'browser_set_files' ||
           (toolCall.name === 'browser_type' && typeof args.selector === 'string' && selectorLooksLikePassword(args.selector as string))
         )
+      // Sensitive-URL gate (payment/checkout/banking) — applies regardless of
+      // an active goal policy's risk ceiling, UNLESS the goal explicitly
+      // declared risk: 'spends_money' (the deliberate opt-out — see
+      // GoalCreateDialog's "Spends money — use sparingly" option). Whether an
+      // action "spends money" depends on the target URL/page, not the tool
+      // name, so no tool can ever be statically tagged spends_money in
+      // BUILTIN_PERMISSIONS — this dynamic check is what actually gives that
+      // risk tier teeth; previously it only ran when no goal was active at
+      // all, so a running goal (any risk tier) could interact with a payment
+      // page with zero extra scrutiny beyond its normal risk ceiling.
+      let sensitiveUrl: string | undefined
+      if (!needsGate && activePolicy?.risk !== 'spends_money' && toolCall.name.startsWith('browser_')) {
+        if (toolCall.name === 'browser_navigate' && urlIsSensitive(args.url as string | undefined)) {
+          needsGate = true
+          sensitiveUrl = args.url as string
+        } else if (typeof args.pane_id === 'string') {
+          // Only gate mutating actions (network_write in goal-policy's risk
+          // tiers) on the pane's *current* page — reads (get_content,
+          // screenshot, query, ...) don't need a prompt just for being on a
+          // sensitive page.
+          const { getPermissions } = await import('./goal-policy')
+          if (getPermissions(toolCall.name, args as Record<string, unknown>).risk === 'network_write') {
+            const currentUrl = getBrowserWebContents(args.pane_id)?.getURL()
+            if (urlIsSensitive(currentUrl)) {
+              needsGate = true
+              sensitiveUrl = currentUrl
+            }
+          }
+        }
+      }
       if (needsGate) {
+        // Approving once for a hostname/selector shouldn't re-prompt for the
+        // exact same one again this session. File uploads get no key — each
+        // one is genuinely a different action worth its own decision.
+        let approvalKey: string | undefined
+        if (sensitiveUrl) {
+          try {
+            approvalKey = `url:${new URL(sensitiveUrl).hostname}`
+          } catch {
+            approvalKey = `url:${sensitiveUrl}`
+          }
+        } else if (toolCall.name !== 'browser_set_files') {
+          approvalKey = `password-field:${args.selector}`
+        }
         const approved = await requestApproval(this.window, {
           paneId: args.pane_id as string,
           tool: toolCall.name,
-          description: toolCall.name === 'browser_set_files'
-            ? `Upload files: ${args.paths}`
-            : `Type into password field ${args.selector}`,
-          reason: toolCall.name === 'browser_set_files' ? 'File upload (sensitive)' : 'Password field interaction',
+          description: sensitiveUrl
+            ? `${toolCall.name} on a payment/checkout/banking-looking page: ${sensitiveUrl}`
+            : toolCall.name === 'browser_set_files'
+              ? `Upload files: ${args.paths}`
+              : `Type into password field ${args.selector}`,
+          reason: sensitiveUrl
+            ? 'Sensitive URL (payment/checkout/banking)'
+            : toolCall.name === 'browser_set_files' ? 'File upload (sensitive)' : 'Password field interaction',
           args: args as Record<string, unknown>
-        })
+        }, approvalKey)
         if (!approved) {
           appendActionLog({
             paneId: args.pane_id as string,
@@ -891,7 +1141,7 @@ export class AIManager {
       const dispatched = await toolRegistry.dispatch(
         toolCall.name,
         args as Record<string, unknown>,
-        this.buildToolContext()
+        this.buildToolContext(callerId)
       )
       let result: unknown = dispatched.ok ? dispatched.result : { success: false, error: dispatched.error }
 
@@ -909,12 +1159,8 @@ export class AIManager {
         })
       }
 
-      // 4. Truncate large string results to keep context manageable. (Phase
-      //    1B will replace this with a structured pagination envelope.)
-      if (typeof result === 'string' && result.length > 3000) {
-        console.log(`[AI] Truncating large tool result from ${result.length} chars`)
-        result = result.slice(0, 2000) + '\n\n...[truncated middle section]...\n\n' + result.slice(-500)
-      }
+      // 4. Truncate large results to keep context manageable.
+      result = this.truncateToolResult(result)
 
       return { toolCallId: toolCall.id, result }
     } catch (error) {
@@ -936,7 +1182,8 @@ export class AIManager {
   private buildRequest(
     messages: AIMessage[],
     config: AIProviderConfig,
-    stream: boolean
+    stream: boolean,
+    callerId?: string
   ): ChatCompletionRequest {
     const systemPrompt = config.systemPrompt || ''
 
@@ -1009,6 +1256,26 @@ export class AIManager {
       }
     }
 
+    // Live checklist re-injection (write_todos/complete_todo, src/main/
+    // ai-tools/todo.ts). Appended as a trailing user-role message, computed
+    // fresh on every request from live ToolRuntimeState — never folded into
+    // the system block above (would defeat prompt-cache stability on the
+    // frozen system prompt) and never written back into `messages` (so it
+    // can't be eaten by compaction/trimming the way an ordinary tool result
+    // would be — it's simply recomputed next time regardless). Only judge/
+    // vision side-channel calls omit callerId, and correctly see nothing
+    // here as a result.
+    if (callerId) {
+      const snapshot = this.toolStateByCaller.get(callerId)?.todos ?? null
+      const rendered = formatTodoSnapshot(snapshot)
+      if (rendered) {
+        formattedMessages.push({
+          role: 'user',
+          content: `[Live checklist — recomputed fresh each turn from your last write_todos/complete_todo call; not part of the saved conversation]\n${rendered}`
+        })
+      }
+    }
+
     const request: ChatCompletionRequest = {
       model: config.model,
       messages: formattedMessages,
@@ -1016,6 +1283,13 @@ export class AIManager {
       stream,
       temperature: config.temperature ?? 0.7,
       max_tokens: config.maxTokens ?? 4096
+    }
+
+    // Only send when explicitly set to 'required' — omitting tool_choice
+    // entirely (the 'auto' case) matches prior behavior and avoids sending
+    // an unrecognized field to servers that don't support it.
+    if (config.toolChoice === 'required') {
+      request.tool_choice = 'required'
     }
 
     // Only send the thinking toggle when explicitly configured. Leaving it

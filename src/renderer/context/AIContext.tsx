@@ -15,15 +15,32 @@ import {
   dispatchBrowserTabAction,
   dispatchReconnect
 } from '../lib/pane-controls'
-import { screenshotTargetFor } from '@shared/vision-loop'
+import { screenshotTargetFor, MAX_CONTEXT_SCREENSHOTS } from '@shared/vision-loop'
+import { createLoopGuardState, checkBeforeCall, recordOutcome, checkNarrativeMismatch, checkActionStarvation, isMutatingTool, batchIsParallelSafe, resultReportsFailure } from '@shared/loop-guard'
 
-// Immutable version of evictPriorScreenshots: returns a new array where prior
-// auto-screenshot messages have their (heavy) image stripped, keeping only the
-// latest screenshot in context. React-safe (no in-place mutation).
+// Immutable version of evictPriorScreenshots: returns a new array where all
+// but the newest (MAX_CONTEXT_SCREENSHOTS - 1) auto-screenshot messages have
+// their (heavy) image stripped — the caller appends one more right after,
+// bringing the total kept in context up to MAX_CONTEXT_SCREENSHOTS.
+// React-safe (no in-place mutation).
 function stripStaleScreenshots(msgs: AIMessage[]): AIMessage[] {
-  return msgs.map(m =>
-    m.autoScreenshot && m.images && m.images.length > 0 ? { ...m, images: undefined } : m
-  )
+  const indices: number[] = []
+  msgs.forEach((m, i) => {
+    if (m.autoScreenshot && m.images && m.images.length > 0) indices.push(i)
+  })
+  const keep = Math.max(0, MAX_CONTEXT_SCREENSHOTS - 1)
+  const stripSet = new Set(indices.slice(0, Math.max(0, indices.length - keep)))
+  return msgs.map((m, i) => stripSet.has(i) ? { ...m, images: undefined } : m)
+}
+
+// Truncated string form of a tool result, used only for loop-guard's
+// stagnant-result comparison (recordOutcome) — mirrors goal-runner.ts's
+// identically-named helper so both loop drivers flag the same pattern the
+// same way.
+function previewResult(result: unknown): string {
+  if (result == null) return ''
+  const s = typeof result === 'string' ? result : JSON.stringify(result)
+  return s.length > 200 ? s.slice(0, 200) + '…' : s
 }
 
 interface AIContextValue {
@@ -31,6 +48,11 @@ interface AIContextValue {
   settings: AISettings
   isEnabled: boolean
   isStreaming: boolean
+  // True while a batch of tool calls is being dispatched — distinct from
+  // isStreaming (the LLM token-streaming phase). Stop/Esc previously only
+  // worked during isStreaming, leaving no way to interrupt a slow/hung tool
+  // call or stop the auto-loop between turns.
+  isExecutingTools: boolean
   isPanelOpen: boolean
   isPanelMinimized: boolean
   activeProvider: AIProviderConfig | null
@@ -70,14 +92,23 @@ const AIContext = createContext<AIContextValue | null>(null)
 
 interface AIProviderProps {
   children: ReactNode
-  onFocusPane?: (paneId: string) => void
-  onMaximizePane?: (paneId: string) => void
+  // Returns whether paneId actually exists in the active workspace, so the
+  // pane-control ack path can report a real result.
+  onFocusPane?: (paneId: string) => boolean
+  onMaximizePane?: (paneId: string) => boolean
 }
 
 export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProviderProps) {
   const [settings, setSettings] = useState<AISettings>(DEFAULT_AI_SETTINGS)
   const [messages, setMessages] = useState<AIMessage[]>([])
   const [isStreaming, setIsStreaming] = useState(false)
+  const [isExecutingTools, setIsExecutingTools] = useState(false)
+  // Set by cancelStream(); handleToolCalls checks it between tool
+  // dispatches/turns to stop the auto-loop. Can't interrupt a tool call
+  // that's already in flight (no per-tool AbortSignal plumbing exists), but
+  // it does stop the next one from starting and stops the loop from
+  // continuing to another model turn.
+  const cancelRequestedRef = useRef(false)
   const [isPanelOpen, setIsPanelOpen] = useState(false)
   const [isPanelMinimized, setIsPanelMinimized] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -90,6 +121,25 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
   // Track tool call retry count for self-correction
   const toolRetryCountRef = useRef(0)
   const MAX_TOOL_RETRIES = 3
+
+  // Circuit breaker + duplicate-call guard (shared/loop-guard.ts) — reset
+  // per conversation turn in sendMessage, like the retry/auto-turn counters.
+  const guardStateRef = useRef(createLoopGuardState())
+
+  // Set right before kicking off a bounded "final turn" stream (loop-guard
+  // halt) — the model gets one more completion to explain what happened,
+  // but onAIStreamEnd must NOT act on any tool_calls it returns, since the
+  // run is ending regardless. Cleared as soon as that stream completes.
+  const finalTurnRef = useRef(false)
+
+  // Fallback text for the final turn's reply, shown verbatim if the model's
+  // last response comes back tool-calls-only with no text — which is
+  // exactly the failure mode most likely to trigger a final turn in the
+  // first place (the model doubling down on the same call instead of
+  // explaining itself). Without this, the user was left with a blank
+  // assistant bubble showing a tool call that will never run, and no
+  // explanation ever arrives.
+  const finalTurnFallbackRef = useRef('')
 
   // Track auto turns to prevent runaway loops
   const autoTurnCountRef = useRef(0)
@@ -137,6 +187,28 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
       setIsStreaming(false)
       streamContentRef.current = ''
 
+      // Bounded final turn after a loop-guard halt — never dispatch tool
+      // calls from this response, no matter what the model returned; the
+      // run is ending regardless. See handleToolCalls' haltRequested branch.
+      // Any tool_calls are stripped (they'll never be dispatched, so
+      // showing them would be a dangling promise) and empty content falls
+      // back to the reason the run was stopped for in the first place, so
+      // the user always sees a real explanation instead of a blank bubble.
+      if (finalTurnRef.current) {
+        finalTurnRef.current = false
+        const finalMessage: AIMessage = {
+          ...message,
+          content: message.content?.trim() ? message.content : finalTurnFallbackRef.current,
+          toolCalls: undefined
+        }
+        setMessages(prev => {
+          const newMessages = prev.slice(0, -1)
+          newMessages.push(finalMessage)
+          return newMessages
+        })
+        return
+      }
+
       // Replace placeholder with final message
       setMessages(prev => {
         const newMessages = prev.slice(0, -1)
@@ -146,28 +218,43 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
 
       // Handle tool calls - pass the assistant message to include in conversation
       if (message.toolCalls && message.toolCalls.length > 0) {
+        stallRetryCountRef.current = 0
         await handleToolCalls(message.toolCalls, message)
       } else if (message.stallReason) {
         // The turn ended with no actionable tool call for a diagnosable reason.
-        // Surface it instead of letting the auto-loop stop silently (which looks
-        // like a stall that never reaches max turns).
-        setError(`Agent stalled: ${message.stallReason}`)
+        // A handful of these are recoverable with a plain nudge (malformed
+        // tool-call JSON, a tool call written as plain text) rather than
+        // dead-stopping the auto-loop and leaving the user to notice the
+        // error banner and re-prompt by hand — see retryAfterStall's doc
+        // comment for which reasons qualify and why the others don't.
+        const recoverable = RECOVERABLE_STALL_PATTERNS.some(p => p.test(message.stallReason!))
+        if (recoverable && stallRetryCountRef.current < MAX_STALL_RETRIES) {
+          retryAfterStall(message.stallReason)
+        } else {
+          stallRetryCountRef.current = 0
+          setError(`Agent stalled: ${message.stallReason}`)
+        }
+      } else {
+        stallRetryCountRef.current = 0
       }
       // else: normal completion — the model answered with text. Nothing to do.
     })
 
-    const unsubError = window.electronAPI.onAIStreamError((err) => {
+    const unsubError = window.electronAPI.onAIStreamError(({ message: err, kind }) => {
       setIsStreaming(false)
       streamContentRef.current = ''
 
-      // Check if this is a format/API error that might be recoverable
-      const isFormatError = err.includes('400') || err.includes('No user query')
-
-      if (isFormatError && toolRetryCountRef.current < MAX_TOOL_RETRIES) {
-        // API format error - might be due to tool message format
-        setError(`API Error: ${err}. The model may not support this message format.`)
+      if (kind === 'context_overflow') {
+        setError(`Context window exceeded: ${err}. The conversation is too long for the model — start a new conversation, or trim older messages.`)
       } else {
-        setError(err)
+        // Check if this is a format/API error that might be recoverable
+        const isFormatError = err.includes('400') || err.includes('No user query')
+        if (isFormatError && toolRetryCountRef.current < MAX_TOOL_RETRIES) {
+          // API format error - might be due to tool message format
+          setError(`API Error: ${err}. The model may not support this message format.`)
+        } else {
+          setError(err)
+        }
       }
 
       // Remove the placeholder message
@@ -181,27 +268,39 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
     }
   }, [])
 
-  // Set up AI pane control listeners
+  // Set up AI pane control listeners. Each replies with an ack (when the
+  // command carried a requestId) reporting whether it actually found
+  // something to act on — see pane-control-ack.ts on the main side. Without
+  // this, a stale/hallucinated pane_id used to get told "success"
+  // unconditionally with no way for the tool caller to detect it.
   useEffect(() => {
-    const unsubFocus = window.electronAPI.onAIFocusPane((paneId) => {
-      onFocusPane?.(paneId)
+    const ack = (requestId: string | undefined, ok: boolean) => {
+      if (requestId) window.electronAPI.ackPaneControl(requestId, ok)
+    }
+
+    const unsubFocus = window.electronAPI.onAIFocusPane(({ paneId, requestId }) => {
+      const ok = onFocusPane?.(paneId) ?? false
+      ack(requestId, ok)
     })
 
-    const unsubMaximize = window.electronAPI.onAIMaximizePane((paneId) => {
-      onMaximizePane?.(paneId)
+    const unsubMaximize = window.electronAPI.onAIMaximizePane(({ paneId, requestId }) => {
+      const ok = onMaximizePane?.(paneId) ?? false
+      ack(requestId, ok)
     })
 
     // Tab/reconnect control — dispatch to the target pane's registered handlers.
-    const unsubSwitchTab = window.electronAPI.onAISwitchTerminalTab(({ paneId, tabId }) => {
-      dispatchSwitchTerminalTab(paneId, tabId)
+    const unsubSwitchTab = window.electronAPI.onAISwitchTerminalTab(({ paneId, tabId, requestId }) => {
+      ack(requestId, dispatchSwitchTerminalTab(paneId, tabId))
     })
-    const unsubBrowserTab = window.electronAPI.onAIBrowserTabAction(({ paneId, action, url, tabId }) => {
-      if (action === 'open') dispatchBrowserTabAction(paneId, { action: 'open', url })
-      else if (action === 'switch' && tabId) dispatchBrowserTabAction(paneId, { action: 'switch', tabId })
-      else if (action === 'close' && tabId) dispatchBrowserTabAction(paneId, { action: 'close', tabId })
+    const unsubBrowserTab = window.electronAPI.onAIBrowserTabAction(({ paneId, action, url, tabId, requestId }) => {
+      let ok = false
+      if (action === 'open') ok = dispatchBrowserTabAction(paneId, { action: 'open', url })
+      else if (action === 'switch' && tabId) ok = dispatchBrowserTabAction(paneId, { action: 'switch', tabId })
+      else if (action === 'close' && tabId) ok = dispatchBrowserTabAction(paneId, { action: 'close', tabId })
+      ack(requestId, ok)
     })
-    const unsubReconnect = window.electronAPI.onAIReconnectPane(({ paneId, tabId }) => {
-      dispatchReconnect(paneId, tabId)
+    const unsubReconnect = window.electronAPI.onAIReconnectPane(({ paneId, tabId, requestId }) => {
+      ack(requestId, dispatchReconnect(paneId, tabId))
     })
 
     return () => {
@@ -213,46 +312,154 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
     }
   }, [onFocusPane, onMaximizePane])
 
+  // Give the model one bounded final turn instead of cutting it off cold —
+  // shared by every "the agent is stuck, stop the loop" condition
+  // (loop-guard halt, MAX_TOOL_RETRIES, maxAutoTurns). Before this, those
+  // three had three different outcomes: a real final turn (halt, added
+  // first), a banner-only stop with no model turn at all (MAX_TOOL_RETRIES),
+  // and a hardcoded fake assistant string instead of a real model response
+  // (maxAutoTurns). finalTurnRef makes onAIStreamEnd treat the resulting
+  // response as terminal — any tool_calls it contains are never dispatched,
+  // since the run is ending regardless of what the model asks for next.
+  //
+  // `pendingMessages` = messages the caller has already (or is about to,
+  // via its own setMessages) commit to React state, but that messagesRef
+  // hasn't caught up to yet (state updates are async) — needed to build
+  // `allMessages` correctly without double-adding them to visible state.
+  // This function only ever adds the nudge itself to state; the caller is
+  // responsible for committing pendingMessages before or via its own call.
+  const requestFinalTurnAndStop = useCallback((pendingMessages: AIMessage[], reasonForModel: string, reasonForBanner?: string) => {
+    if (reasonForBanner) setError(reasonForBanner)
+    const nudge: AIMessage = {
+      id: uuidv4(),
+      role: 'system',
+      content: `${reasonForModel} This is your final turn — no more tool calls will run. Briefly explain to the user what happened and what they should try next.`,
+      timestamp: Date.now()
+    }
+    setMessages(prev => [...prev, nudge])
+    const allMessages = [...stripStaleScreenshots(messagesRef.current), ...pendingMessages, nudge]
+
+    finalTurnRef.current = true
+    // Deliberately reasonForModel, not reasonForBanner, even though the
+    // latter is available and would seem like the "nicer" fallback. This is
+    // the FALLBACK CHAT MESSAGE CONTENT — shown only when the model's own
+    // final-turn reply comes back blank, i.e. exactly the case where there
+    // is no explanation to point at. reasonForBanner's text ends "See the
+    // explanation below," written assuming the model's own prose follows
+    // it — when it doesn't (the whole reason this fallback exists),
+    // showing that exact sentence as the message becomes a self-reference
+    // to nothing: "see the explanation below" *is* the explanation, and
+    // there's nothing below it. reasonForModel has no such forward
+    // reference — it's a complete, standalone sentence on its own
+    // ("Stopping now: repeated duplicate tool calls exceeded the safety
+    // limit.") — so it reads correctly whether or not real model text
+    // follows. Observed for real, repeatedly, across three separate
+    // incidents in one session: this model's final-turn reply is
+    // consistently blank (it keeps trying to call a tool anyway, which
+    // onAIStreamEnd already correctly strips), so this fallback is the
+    // common case here, not the rare one.
+    finalTurnFallbackRef.current = reasonForModel
+    const placeholder: AIMessage = { id: uuidv4(), role: 'assistant', content: '', timestamp: Date.now() }
+    setMessages(prev => [...prev, placeholder])
+    setIsStreaming(true)
+    streamContentRef.current = ''
+    window.electronAPI.aiStreamMessage(allMessages)
+  }, [])
+
+  // A handful of stall reasons (ai-manager.ts's stallReason branches) are
+  // recoverable with a plain nudge rather than a hard stop: "malformed tool
+  // call arguments" and "wrote a tool call as plain text" both mean the
+  // model had a real next step in mind (often visible right in its own
+  // narration, e.g. "let me compile the digest") and just fumbled the
+  // syntax getting there — asking it to try again usually just works,
+  // unlike "truncated at max_tokens" or "empty response," which are config
+  // problems a retry can't fix. Unlike requestFinalTurnAndStop, this does
+  // NOT set finalTurnRef — the retry is a normal continuation turn, so if
+  // it comes back with valid tool calls this time, they get dispatched as
+  // usual instead of being discarded.
+  const RECOVERABLE_STALL_PATTERNS = [/arguments were malformed/i, /wrote a tool call as plain text/i]
+  const MAX_STALL_RETRIES = 2
+  const stallRetryCountRef = useRef(0)
+
+  const retryAfterStall = useCallback((stallReason: string) => {
+    stallRetryCountRef.current++
+    const nudge: AIMessage = {
+      id: uuidv4(),
+      role: 'system',
+      content: `${stallReason} Try again: if you don't actually need another tool call, just answer directly in plain text; otherwise reissue the same call with valid, well-formed arguments.`,
+      timestamp: Date.now()
+    }
+    setMessages(prev => [...prev, nudge])
+    const allMessages = [...stripStaleScreenshots(messagesRef.current), nudge]
+    const placeholder: AIMessage = { id: uuidv4(), role: 'assistant', content: '', timestamp: Date.now() }
+    setMessages(prev => [...prev, placeholder])
+    setIsStreaming(true)
+    streamContentRef.current = ''
+    window.electronAPI.aiStreamMessage(allMessages)
+  }, [])
+
   // Handle tool calls with retry logic
   // Takes assistantMessage to include in conversation (avoids stale closure)
   const handleToolCalls = useCallback(async (toolCalls: AIToolCall[], assistantMessage: AIMessage) => {
+    setIsExecutingTools(true)
+    try {
     const toolResults: AIMessage[] = []
     let hasErrors = false
     let shotPaneAfterBatch: string | null = null
+    let haltRequested = false
+    let cancelled = false
+    const dispatchedOks: boolean[] = []
 
-    for (const toolCall of toolCalls) {
+    // Dispatch one already-guard-checked tool call and return its outcome
+    // without mutating any of the outer batch state — callers (sequential or
+    // parallel) merge the result themselves, in order, so message ordering
+    // stays deterministic regardless of dispatch strategy.
+    const dispatchOne = async (toolCall: AIToolCall): Promise<{ ok: boolean; messages: AIMessage[]; shotTarget: string | null }> => {
       try {
         const result = await window.electronAPI.aiExecuteTool(toolCall)
-
-        // Check if tool returned an error
-        if (result.error) {
-          hasErrors = true
-          toolResults.push({
+        // Dispatch-level error (thrown) OR the tool's own payload reporting
+        // {success:false} — most tools (browser_* especially) signal failure
+        // the second way without ever throwing, so both must count here or
+        // the circuit breaker/narrative check never see them.
+        if (result.error || resultReportsFailure(result.result)) {
+          const disabledMsg = recordOutcome(guardStateRef.current, toolCall.name, false, { args: toolCall.arguments })
+          const msgs: AIMessage[] = [{
             id: uuidv4(),
             role: 'tool',
-            content: JSON.stringify({
-              error: result.error,
-              suggestion: 'Try a different approach or use list_panes first to see available panes.'
-            }),
+            content: result.error
+              ? JSON.stringify({
+                  error: result.error,
+                  suggestion: 'Try a different approach or use list_panes first to see available panes.'
+                })
+              : JSON.stringify(result.result),
             toolCallId: toolCall.id,
+            toolName: toolCall.name,
             timestamp: Date.now()
-          })
-          const t = screenshotTargetFor(toolCall, true)
-          if (t) shotPaneAfterBatch = t
-        } else {
-          toolResults.push({
-            id: uuidv4(),
-            role: 'tool',
-            content: JSON.stringify(result.result),
-            toolCallId: toolCall.id,
-            timestamp: Date.now()
-          })
-          const t = screenshotTargetFor(toolCall, false)
-          if (t) shotPaneAfterBatch = t
+          }]
+          if (disabledMsg) msgs.push({ id: uuidv4(), role: 'system', content: disabledMsg, timestamp: Date.now() })
+          return { ok: false, messages: msgs, shotTarget: screenshotTargetFor(toolCall, true) }
+        }
+        const stagnantMsg = recordOutcome(guardStateRef.current, toolCall.name, true, {
+          args: toolCall.arguments,
+          resultPreview: previewResult(result.result)
+        })
+        const successMsgs: AIMessage[] = [{
+          id: uuidv4(),
+          role: 'tool',
+          content: JSON.stringify(result.result),
+          toolCallId: toolCall.id,
+          toolName: toolCall.name,
+          timestamp: Date.now()
+        }]
+        if (stagnantMsg) successMsgs.push({ id: uuidv4(), role: 'system', content: stagnantMsg, timestamp: Date.now() })
+        return {
+          ok: true,
+          messages: successMsgs,
+          shotTarget: screenshotTargetFor(toolCall, false)
         }
       } catch (err) {
-        hasErrors = true
-        toolResults.push({
+        const disabledMsg = recordOutcome(guardStateRef.current, toolCall.name, false, { args: toolCall.arguments })
+        const msgs: AIMessage[] = [{
           id: uuidv4(),
           role: 'tool',
           content: JSON.stringify({
@@ -260,21 +467,131 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
             suggestion: 'The tool failed to execute. Please try a different approach.'
           }),
           toolCallId: toolCall.id,
+          toolName: toolCall.name,
           timestamp: Date.now()
-        })
-        const t = screenshotTargetFor(toolCall, true)
-        if (t) shotPaneAfterBatch = t
+        }]
+        if (disabledMsg) msgs.push({ id: uuidv4(), role: 'system', content: disabledMsg, timestamp: Date.now() })
+        return { ok: false, messages: msgs, shotTarget: screenshotTargetFor(toolCall, true) }
       }
+    }
+
+    const mergeOutcome = (r: { ok: boolean; messages: AIMessage[]; shotTarget: string | null }) => {
+      if (!r.ok) hasErrors = true
+      dispatchedOks.push(r.ok)
+      toolResults.push(...r.messages)
+      if (r.shotTarget) shotPaneAfterBatch = r.shotTarget
+    }
+
+    // Guard-check every call up front, sequentially — duplicate-call
+    // counting needs to see the whole batch in order (two identical calls
+    // in the same batch must count as a repeat), regardless of how the
+    // non-blocked ones are dispatched below.
+    const planned: Array<{ toolCall: AIToolCall; block: ReturnType<typeof checkBeforeCall> }> = []
+    for (const toolCall of toolCalls) {
+      planned.push({ toolCall, block: checkBeforeCall(guardStateRef.current, toolCall.name, toolCall.arguments) })
+    }
+    for (const { toolCall, block } of planned) {
+      if (!block) continue
+      // Deliberately NOT hasErrors = true here. A blocked call never
+      // dispatched — the harness refused it, not the tool. It's already
+      // governed by its own dedicated mechanism (block.haltLoop below,
+      // fed by loop-guard's own totalBlocks/HALT_AFTER_BLOCKS counter,
+      // which has a specific, useful message: "repeated duplicate tool
+      // calls exceeded the safety limit"). Counting it toward hasErrors
+      // too double-dips it into the generic MAX_TOOL_RETRIES(3) breaker
+      // below, which reaches its threshold (3 consecutive "error"
+      // batches) well before loop-guard's own HALT_AFTER_BLOCKS(5) does —
+      // so the model ends up killed by the generic, uninformative
+      // "tool failed after 3 attempts. See the explanation below" message
+      // (with nothing ever below it) instead of the specific one that
+      // actually explains what happened. Observed for real: a model stuck
+      // re-running an identical browser_execute_js call got guard-blocked
+      // 3 times in a row (attempts 4, 5, 6 of the same call — still short
+      // of HALT_AFTER_BLOCKS) and the run died on the wrong breaker.
+      toolResults.push({
+        id: uuidv4(),
+        role: 'tool',
+        content: JSON.stringify({ success: false, blocked: true, error: block.reason }),
+        toolCallId: toolCall.id,
+        toolName: toolCall.name,
+        timestamp: Date.now()
+      })
+      if (block.haltLoop) haltRequested = true
+    }
+
+    if (!haltRequested) {
+      const toDispatch = planned.filter(p => !p.block).map(p => p.toolCall)
+      // Only a batch of exclusively read-only/observational calls (see
+      // isParallelSafeTool) gets parallelized — mutating calls, and any
+      // batch mixing the two, stay strictly sequential so ordering/side-
+      // effect assumptions the model may be relying on aren't broken.
+      if (batchIsParallelSafe(toDispatch)) {
+        if (!cancelRequestedRef.current) {
+          const results = await Promise.all(toDispatch.map(dispatchOne))
+          for (const r of results) mergeOutcome(r)
+        } else {
+          cancelled = true
+        }
+      } else {
+        for (const toolCall of toDispatch) {
+          // Mid-execution interrupt: stop dispatching further calls in this
+          // batch once the user hits Stop/Esc. Can't abort a call already in
+          // flight (no per-tool cancellation signal exists), but this stops
+          // the next one from starting and stops the loop from reaching
+          // another model turn — previously Stop only worked mid-stream.
+          if (cancelRequestedRef.current) { cancelled = true; break }
+          mergeOutcome(await dispatchOne(toolCall))
+        }
+      }
+    }
+
+    if (cancelled) {
+      setMessages(prev => [...prev, ...toolResults])
+      return
+    }
+
+    if (haltRequested) {
+      setMessages(prev => [...stripStaleScreenshots(prev), ...toolResults])
+      requestFinalTurnAndStop(
+        toolResults,
+        'Stopping now: repeated duplicate tool calls exceeded the safety limit.',
+        'Stopped: repeated duplicate tool calls exceeded the safety limit. See the explanation below.'
+      )
+      return
+    }
+
+    // False-success/false-failure check: does the assistant's own narration
+    // (alongside this batch of tool calls) match what actually happened?
+    if (dispatchedOks.length > 0) {
+      const mismatch = checkNarrativeMismatch(assistantMessage.content, dispatchedOks.every(Boolean), dispatchedOks.some(Boolean))
+      if (mismatch) {
+        toolResults.push({ id: uuidv4(), role: 'system', content: mismatch, timestamp: Date.now() })
+      }
+    }
+
+    // Action-starvation nudge: an unbroken run of observational tool calls
+    // (reads, source introspection) with no mutating action in between —
+    // every call above can pass every other check (not blocked, not a
+    // duplicate, not stagnant) while the conversation makes zero actual
+    // progress. See loop-guard.ts's doc comment for the incident this
+    // caught: 200+ turns of browser_execute_js reads, never one click.
+    const tookAction = toolCalls.some(tc => isMutatingTool(tc.name))
+    const starvationMsg = checkActionStarvation(guardStateRef.current, tookAction)
+    if (starvationMsg) {
+      toolResults.push({ id: uuidv4(), role: 'system', content: starvationMsg, timestamp: Date.now() })
     }
 
     // Track retries if there were errors
     if (hasErrors) {
       toolRetryCountRef.current++
       if (toolRetryCountRef.current >= MAX_TOOL_RETRIES) {
-        setError(`Tool failed after ${MAX_TOOL_RETRIES} attempts. Please try a different approach.`)
         toolRetryCountRef.current = 0
-        // Don't continue - let user intervene
         setMessages(prev => [...prev, ...toolResults])
+        requestFinalTurnAndStop(
+          toolResults,
+          `Stopping now: tool calls have failed ${MAX_TOOL_RETRIES} times in a row.`,
+          `Stopped: tool failed after ${MAX_TOOL_RETRIES} attempts. See the explanation below.`
+        )
         return
       }
     } else {
@@ -317,16 +634,18 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
     // Check auto turn limit to prevent runaway loops
     autoTurnCountRef.current++
     if (autoTurnCountRef.current >= maxAutoTurnsRef.current) {
-      // Add a message asking user to review and continue
-      const pauseMessage: AIMessage = {
-        id: uuidv4(),
-        role: 'assistant',
-        content: `Reached ${maxAutoTurnsRef.current} automatic turns. Please review progress and provide guidance to continue.`,
-        timestamp: Date.now()
-      }
-      setMessages(prev => [...prev, pauseMessage])
       autoTurnCountRef.current = 0
+      // `appended` (toolResults + optional screenshot) was already committed
+      // to state just above — pass it as pendingMessages so allMessages
+      // includes it without double-adding it to visible state.
+      requestFinalTurnAndStop(appended, `Stopping now: reached ${maxAutoTurnsRef.current} automatic turns.`)
       return  // Stop auto-loop, require user input
+    }
+
+    // One more cancellation check — the screenshot capture above awaited,
+    // so Stop/Esc could have fired while it was in flight.
+    if (cancelRequestedRef.current) {
+      return
     }
 
     // Add placeholder for next assistant message
@@ -342,6 +661,9 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
 
     // Stream continuation
     window.electronAPI.aiStreamMessage(allMessages)
+    } finally {
+      setIsExecutingTools(false)
+    }
   }, [])
 
   // Get active provider
@@ -385,7 +707,19 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
 
     setError(null)
     toolRetryCountRef.current = 0 // Reset retry counter on new message
+    stallRetryCountRef.current = 0
+    guardStateRef.current = createLoopGuardState()
+    cancelRequestedRef.current = false
     autoTurnCountRef.current = 0  // Reset auto turn counter on new message
+
+    // Record the task-defining first message of a fresh conversation so
+    // declare_step can echo it back on every step — see
+    // ToolRuntimeState.originalIntent's doc comment. Deliberately only the
+    // first message, not every follow-up: a mid-task correction like "no,
+    // scroll down first" shouldn't overwrite what the actual task is.
+    if (messages.length === 0) {
+      window.electronAPI.aiSetIntent(content)
+    }
 
     // Add user message
     const userMessage: AIMessage = {
@@ -416,12 +750,17 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
   }, [activeProvider, messages])
 
   const cancelStream = useCallback(() => {
+    // Always set — handleToolCalls checks this between tool dispatches/turns
+    // even when there's no active token stream to cancel.
+    cancelRequestedRef.current = true
     window.electronAPI.aiCancel()
-    setIsStreaming(false)
-    streamContentRef.current = ''
-    // Remove placeholder message
-    setMessages(prev => prev.slice(0, -1))
-  }, [])
+    if (isStreaming) {
+      setIsStreaming(false)
+      streamContentRef.current = ''
+      // Remove placeholder message
+      setMessages(prev => prev.slice(0, -1))
+    }
+  }, [isStreaming])
 
   const clearChat = useCallback(() => {
     setMessages([])
@@ -524,6 +863,7 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
     settings,
     isEnabled: settings.enabled,
     isStreaming,
+    isExecutingTools,
     isPanelOpen,
     isPanelMinimized,
     activeProvider,

@@ -71,6 +71,19 @@ export function PaneGrid({
     setMaximizedPaneId(prev => prev === paneId ? null : paneId)
   }, [])
 
+  // In-page video fullscreen (e.g. YouTube's fullscreen button) drives the
+  // same maximize state as double-clicking a label, but needs an explicit
+  // set/clear rather than a toggle — the webview-originated event carries
+  // its own entering/leaving direction. Only clears if this pane is still
+  // the maximized one, so it can't clobber an unrelated manual maximize
+  // that happened in between.
+  useEffect(() => {
+    return window.electronAPI.onBrowserHtmlFullscreen(({ paneId, entering }) => {
+      if (entering) setMaximizedPaneId(paneId)
+      else setMaximizedPaneId(prev => (prev === paneId ? null : prev))
+    })
+  }, [])
+
   const handlePaneRestart = useCallback(() => {
     // Can add any additional logic here when a pane restarts
   }, [])

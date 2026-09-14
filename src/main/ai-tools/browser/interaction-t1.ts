@@ -1,6 +1,11 @@
 import { getBrowserWebContents } from '../../browser-pane-registry'
 import { toolRegistry } from '../registry'
-import { cdpClickAt } from './_helpers'
+import { cdpClickAt, buildElementLocatorJs, dispatchKeyEvent } from './_helpers'
+
+// Candidate pool for browser_type's "match_text alone" resolver tier —
+// text-entry targets, not the clickable-elements list browser_smart_click
+// uses by default.
+const TEXT_ENTRY_CANDIDATE_SELECTOR = 'input, textarea, [contenteditable], [role="textbox"], [role="searchbox"]'
 
 /**
  * Tier 1: reliable input + wait primitives. These are the bread-and-butter
@@ -23,14 +28,12 @@ export function registerBrowserInteractionT1Tools(): void {
     run: async ({ pane_id, selector }) => {
       const wc = getBrowserWebContents(pane_id)
       if (!wc) return { success: false, error: `No browser pane with id ${pane_id}` }
-      const code = `(async () => {
-        const el = document.querySelector(${JSON.stringify(selector)});
-        if (!el) return { found: false };
-        el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
-        await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
-        const r = el.getBoundingClientRect();
-        return { found: true, tag: el.tagName.toLowerCase(), x: Math.round(r.x + r.width/2), y: Math.round(r.y + r.height/2) };
-      })()`
+      // Shared locator (not a bespoke document.querySelector here) so this
+      // gets the same visible-match preference as browser_smart_click/
+      // browser_type — a bare querySelector always takes the first DOM-order
+      // match regardless of visibility, which silently clicks the wrong
+      // element on pages that reuse a selector for more than one thing.
+      const code = buildElementLocatorJs({ selector })
       try {
         const result = await wc.executeJavaScript(code, true) as { found: boolean; tag?: string; x?: number; y?: number }
         if (!result.found || result.x == null || result.y == null) return { success: true, found: false }
@@ -46,38 +49,75 @@ export function registerBrowserInteractionT1Tools(): void {
     }
   })
 
-  toolRegistry.register<{ pane_id: string; selector: string; text: string; submit?: boolean }, { success: boolean; found?: boolean; error?: string }>({
+  toolRegistry.register<{
+    pane_id: string
+    selector?: string
+    aria_label?: string
+    role?: string
+    match_text?: string
+    text: string
+    submit?: boolean
+  }, { success: boolean; found?: boolean; matchedBy?: string; error?: string }>({
     name: 'browser_type',
-    description: 'Set the value of an input or textarea matching a CSS selector and dispatch input/change events (so React/Vue/etc. notice). Optionally submits the parent form.',
+    description: 'Type text into an input, textarea, or contenteditable/rich-text box, replacing any existing content. Locate the target the same way browser_smart_click does — by selector, aria_label, role+match_text, or match_text alone — so you don\'t need to discover a CSS selector first. Dispatches real trusted key events (same mechanism as browser_keypress, one call per character) so it works on React/Draft.js/Lexical-style editors, not just plain form fields. Optionally presses Enter after (submit).',
     parameters: {
       type: 'object',
       properties: {
         pane_id: { type: 'string', description: 'The ID of the browser pane' },
-        selector: { type: 'string', description: 'CSS selector for the input/textarea' },
-        text: { type: 'string', description: 'Text to set as the value' },
-        submit: { type: 'boolean', description: 'If true, submits the parent form after setting the value (default: false)' }
+        selector: { type: 'string', description: 'Optional CSS selector for the input/textarea/contenteditable element (tried first)' },
+        aria_label: { type: 'string', description: 'Optional aria-label to match the target element' },
+        role: { type: 'string', description: 'Optional ARIA role (use with match_text)' },
+        match_text: { type: 'string', description: 'Visible text/placeholder to locate the target by (case-insensitive, exact then substring) — NOT the text to type, see `text`' },
+        text: { type: 'string', description: 'Text to type. Existing content in the field is cleared first.' },
+        submit: { type: 'boolean', description: 'If true, presses Enter after typing (default: false)' }
       },
-      required: ['pane_id', 'selector', 'text']
+      required: ['pane_id', 'text']
     },
-    run: async ({ pane_id, selector, text, submit }) => {
+    run: async ({ pane_id, selector, aria_label, role, match_text, text, submit }) => {
       const wc = getBrowserWebContents(pane_id)
       if (!wc) return { success: false, error: `No browser pane with id ${pane_id}` }
-      const code = `(() => {
-        const el = document.querySelector(${JSON.stringify(selector)});
-        if (!el) return { found: false };
-        el.focus();
-        const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-        const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
-        if (setter) setter.call(el, ${JSON.stringify(text)});
-        else el.value = ${JSON.stringify(text)};
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        el.dispatchEvent(new Event('change', { bubbles: true }));
-        ${submit ? `if (el.form && typeof el.form.requestSubmit === 'function') { el.form.requestSubmit(); } else if (el.form) { el.form.submit(); }` : ``}
-        return { found: true };
-      })()`
+      // Locate + scroll into view (read-only query, not a simulated
+      // interaction) — the actual focus and typing below both go through
+      // real input events, same as browser_click/browser_keypress. Same
+      // resolver chain as browser_smart_click, but matching against
+      // text-entry elements instead of clickable ones at the match_text tier.
+      const locate = buildElementLocatorJs({
+        selector,
+        ariaLabel: aria_label,
+        role,
+        text: match_text,
+        textCandidateSelector: TEXT_ENTRY_CANDIDATE_SELECTOR
+      })
       try {
-        const result = await wc.executeJavaScript(code, true) as { found: boolean }
-        return { success: true, ...result }
+        const loc = await wc.executeJavaScript(locate, true) as { found: boolean; matchedBy?: string; x?: number; y?: number }
+        if (!loc.found || loc.x == null || loc.y == null) return { success: true, found: false }
+        // A real click (not el.focus()) — some rich-text editors only fully
+        // initialize their internal selection/cursor state on a genuine
+        // user-gesture focus.
+        await cdpClickAt(wc, loc.x, loc.y)
+        // Clear existing content the same way a user would: select all, delete.
+        wc.sendInputEvent({ type: 'keyDown', keyCode: 'a', modifiers: ['control'] })
+        wc.sendInputEvent({ type: 'keyUp', keyCode: 'a', modifiers: ['control'] })
+        wc.sendInputEvent({ type: 'keyDown', keyCode: 'Backspace' })
+        wc.sendInputEvent({ type: 'keyUp', keyCode: 'Backspace' })
+        for (const ch of text) {
+          if (ch === '\n') {
+            wc.sendInputEvent({ type: 'keyDown', keyCode: 'Enter' })
+            wc.sendInputEvent({ type: 'keyUp', keyCode: 'Enter' })
+          } else if (ch === '\t') {
+            wc.sendInputEvent({ type: 'keyDown', keyCode: 'Tab' })
+            wc.sendInputEvent({ type: 'keyUp', keyCode: 'Tab' })
+          } else {
+            wc.sendInputEvent({ type: 'keyDown', keyCode: ch })
+            wc.sendInputEvent({ type: 'char', keyCode: ch })
+            wc.sendInputEvent({ type: 'keyUp', keyCode: ch })
+          }
+        }
+        if (submit) {
+          wc.sendInputEvent({ type: 'keyDown', keyCode: 'Enter' })
+          wc.sendInputEvent({ type: 'keyUp', keyCode: 'Enter' })
+        }
+        return { success: true, found: true, matchedBy: loc.matchedBy }
       } catch (error) {
         return { success: false, error: error instanceof Error ? error.message : String(error) }
       }
@@ -194,29 +234,25 @@ export function registerBrowserInteractionT1Tools(): void {
     }
   })
 
-  toolRegistry.register<{ pane_id: string; key: string; modifiers?: Array<'control' | 'shift' | 'alt' | 'meta'> }, { success: boolean; error?: string }>({
+  toolRegistry.register<{ pane_id: string; key: string; modifiers?: Array<'control' | 'shift' | 'alt' | 'meta'>; hold_ms?: number }, { success: boolean; error?: string }>({
     name: 'browser_keypress',
-    description: 'Send a keyboard event to the focused element. Use named keys (Enter, Tab, Escape, Backspace, ArrowLeft, ...) or single characters.',
+    description: 'Send a real, trusted keyboard event (via native input, not a synthetic DOM event) to the focused element or canvas. Use named keys (Enter, Tab, Escape, Backspace, ArrowLeft, w, a, s, d, ...) or single characters. For real-time-movement games/apps (WASD-style controls, canvas/WebGL content with no clickable DOM elements) pass `hold_ms` to sustain the keydown instead of an instantaneous tap — a single untimed press only advances one frame\'s worth of movement.',
     parameters: {
       type: 'object',
       properties: {
         pane_id: { type: 'string', description: 'The browser pane ID' },
         key: { type: 'string', description: 'Key name or character (e.g., "Enter", "Tab", "a")' },
-        modifiers: { type: 'array', items: { type: 'string', enum: ['control', 'shift', 'alt', 'meta'] }, description: 'Modifier keys to hold' }
+        modifiers: { type: 'array', items: { type: 'string', enum: ['control', 'shift', 'alt', 'meta'] }, description: 'Modifier keys to hold' },
+        hold_ms: { type: 'number', description: 'Hold the key down this long (ms) before releasing — for sustained movement in real-time games. Omit for an instant tap. Clamped to 5000ms.' }
       },
       required: ['pane_id', 'key']
     },
-    run: async ({ pane_id, key, modifiers }) => {
+    run: async ({ pane_id, key, modifiers, hold_ms }) => {
       const wc = getBrowserWebContents(pane_id)
       if (!wc) return { success: false, error: `No browser pane ${pane_id}` }
       try {
-        const mods = modifiers ?? []
-        // Single-character keys ('a', 'A', etc.) need a 'char' event between keyDown/keyUp.
-        // Named keys like 'Enter', 'Tab', etc. should not.
-        const isPrintable = key.length === 1
-        wc.sendInputEvent({ type: 'keyDown', keyCode: key, modifiers: mods })
-        if (isPrintable) wc.sendInputEvent({ type: 'char', keyCode: key, modifiers: mods })
-        wc.sendInputEvent({ type: 'keyUp', keyCode: key, modifiers: mods })
+        const clampedHoldMs = hold_ms != null ? Math.max(0, Math.min(5000, hold_ms)) : 0
+        await dispatchKeyEvent(wc, key, modifiers ?? [], clampedHoldMs)
         return { success: true }
       } catch (error) {
         return { success: false, error: error instanceof Error ? error.message : String(error) }

@@ -27,8 +27,6 @@ interface AgentContextValue {
 
   // Goal actions
   createGoal: (description: string, paneIds: string[]) => Promise<OrchestrationGoal>
-  pauseGoal: (goalId: string) => Promise<void>
-  resumeGoal: (goalId: string) => Promise<void>
 
   // Coordination actions
   waitForAgent: (waitingPaneId: string, targetPaneId: string) => Promise<void>
@@ -68,7 +66,24 @@ export function AgentProvider({ children }: { children: ReactNode }) {
       }
     })
 
-    return cleanup
+    // GoalRunner is now the real driver of agent status (see goal-runner.ts's
+    // syncFromGoalStep/updateAgentStatus calls) but it pushes on a separate
+    // 'goal:event' channel that GoalDashboard already listens to — without
+    // this, Fleet Dashboard's agent cards would only refresh on the old
+    // orchestration events above, which nothing goal-driven emits anymore.
+    // 'step' is intentionally excluded — it fires on every tool call, and a
+    // full agents refetch per step would be excessive for a compact overview
+    // that already drills into GoalDashboard for real-time detail.
+    const cleanupGoal = window.electronAPI.onGoalEvent((event) => {
+      if (event.type === 'started' || event.type === 'ended' || event.type === 'paused' || event.type === 'resumed') {
+        refreshAgents()
+      }
+    })
+
+    return () => {
+      cleanup()
+      cleanupGoal()
+    }
   }, [])
 
   const loadInitialData = async () => {
@@ -170,16 +185,6 @@ export function AgentProvider({ children }: { children: ReactNode }) {
     return goal
   }, [])
 
-  const pauseGoal = useCallback(async (goalId: string) => {
-    await window.electronAPI.pauseOrchestration(goalId)
-    await refreshAgents()
-  }, [refreshAgents])
-
-  const resumeGoal = useCallback(async (goalId: string) => {
-    await window.electronAPI.resumeOrchestration(goalId)
-    await refreshAgents()
-  }, [refreshAgents])
-
   const waitForAgent = useCallback(async (waitingPaneId: string, targetPaneId: string) => {
     await window.electronAPI.coordinationWaitFor(waitingPaneId, targetPaneId)
     await refreshAgents()
@@ -200,6 +205,7 @@ export function AgentProvider({ children }: { children: ReactNode }) {
       idle: 0,
       working: 0,
       blocked: 0,
+      paused: 0,
       complete: 0,
       error: 0
     }
@@ -228,8 +234,6 @@ export function AgentProvider({ children }: { children: ReactNode }) {
     completeTask,
     failTask,
     createGoal,
-    pauseGoal,
-    resumeGoal,
     waitForAgent,
     notifyComplete,
     shareContext,

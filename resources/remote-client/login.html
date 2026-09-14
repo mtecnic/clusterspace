@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ClusterSpace Remote</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div class="login-page">
+  <form class="login-card" id="login-form">
+    <h1>ClusterSpace Remote</h1>
+    <label for="username">Username</label>
+    <input type="text" id="username" name="username" autocomplete="username" required>
+    <label for="password">Password</label>
+    <input type="password" id="password" name="password" autocomplete="current-password" required>
+    <button type="submit" id="login-btn">Log in</button>
+    <div class="login-error" id="login-error"></div>
+  </form>
+</div>
+<script src="js/api.js"></script>
+<script src="js/login.js"></script>
+</body>
+</html>

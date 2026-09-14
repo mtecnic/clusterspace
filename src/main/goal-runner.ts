@@ -1,15 +1,25 @@
 import { spawn } from 'child_process'
+import { readFile } from 'fs/promises'
+import { isAbsolute, join } from 'path'
 import type { BrowserWindow } from 'electron'
 import { v4 as uuidv4 } from 'uuid'
+import { evaluateJsonPredicate } from './json-predicate'
 import type { AIMessage } from '../shared/types'
 import { screenshotTargetFor, evictPriorScreenshots } from '../shared/vision-loop'
+import {
+  createLoopGuardState, checkBeforeCall, recordOutcome, checkNarrativeMismatch,
+  checkActionStarvation, isMutatingTool, isVerificationTool, resultReportsFailure,
+  type LoopGuardState
+} from '../shared/loop-guard'
 import type { AIManager } from './ai-manager'
 import type { AIMemoryStore } from './ai-memory-store'
 import type { AIStore } from './ai-store'
 import type { AgentStore } from './agent-store'
+import type { WorkspaceStore } from './workspace-store'
 import type { GoalCheckpoint, GoalStore, SuccessCriterion } from './goal-store'
 import type { GoalPolicy } from './goal-policy'
 import { toolRegistry } from './ai-tools/registry'
+import { notify } from './notify'
 
 /**
  * GoalRunner — the headline of the autonomous roadmap.
@@ -35,6 +45,16 @@ import { toolRegistry } from './ai-tools/registry'
 const DEFAULT_WALL_CLOCK_MS = 60 * 60 * 1000  // 1 hour
 const POLL_INTERVAL_MS = 100
 const DEFAULT_CRITIC_INTERVAL_STEPS = 5
+// Backstop alongside the wall-clock cap — a goal issuing many fast/cheap
+// calls (e.g. polling in a tight loop) could otherwise run for the full
+// wall clock regardless of how many (possibly useless) turns that is.
+const DEFAULT_MAX_STEPS = 300
+// Bounded per goal — a single "you claimed done but never checked" nudge,
+// not a repeatable stall tactic.
+const MAX_VERIFY_NUDGES = 1
+// Same bound, same reasoning, for "you claimed done but your own checklist
+// still has open items" — see the claim_complete handling below.
+const MAX_TODO_NUDGES = 1
 
 export interface StartGoalInput {
   paneId: string
@@ -49,6 +69,11 @@ export interface StartGoalInput {
   /** Optional separate provider for critic calls (cheaper / faster model).
    *  Defaults to the main provider. */
   criticProviderId?: string
+  /** Hard cap on non-transient tool-call steps, independent of wall clock.
+   *  Default 300. */
+  maxSteps?: number
+  /** Links sibling goals launched together — see GoalCheckpoint.fleetId. */
+  fleetId?: string
 }
 
 type RunnerState =
@@ -60,6 +85,8 @@ interface RuntimeGoal {
   state: RunnerState
   startedAt: number
   wallClockMs: number
+  maxSteps: number
+  stepCount: number
   criticIntervalSteps: number
   criticProviderId?: string
   stepsSinceLastCritic: number
@@ -67,6 +94,36 @@ interface RuntimeGoal {
   pendingClaim?: { rationale: string }
   /** Set by abort_with_report. */
   pendingAbort?: { reason: string; report: string }
+  /** Circuit breaker + duplicate-call guard state (shared/loop-guard.ts). */
+  guard: LoopGuardState
+  /** True once a mutating action (browser click/type/navigate, terminal
+   *  write) has happened without a subsequent verification-ish tool call —
+   *  cleared the moment a verification tool runs. Used to nudge the model
+   *  to actually check its work before claim_complete is trusted. */
+  pendingVerifyNudge: boolean
+  verifyNudgesGiven: number
+  /** Bounded "you still have open checklist items" nudge on claim_complete —
+   *  see MAX_TODO_NUDGES. */
+  todoNudgesGiven: number
+  /** How many of runLoop's local `messages` have already been written back
+   *  to ai-memory-store (see the sync call at the bottom of the loop body).
+   *  Without this, conversationId is nominally linked but the persisted
+   *  conversation only ever has what existed when the goal started — so a
+   *  resume after a crash had nothing real to resume from. Initialized to
+   *  the length of the messages already loaded FROM the store (so those
+   *  aren't re-written), not to 0. */
+  lastSyncedMessageIndex: number
+}
+
+// A goal that's been checkpointed (visible in GoalDashboard as 'pending')
+// but hasn't started its loop yet — either the concurrency cap is full or
+// it's waiting on other goals to complete. Promoted by promoteFromQueue(),
+// which runs whenever any goal ends (the only thing that can free a
+// concurrency slot or satisfy a dependency).
+interface QueuedGoal {
+  checkpoint: GoalCheckpoint
+  input: StartGoalInput
+  waitForGoalIds: string[]
 }
 
 export class GoalRunner {
@@ -76,8 +133,10 @@ export class GoalRunner {
   private aiStore: AIStore
   private agentStore: AgentStore
   private goalStore: GoalStore
+  private workspaceStore: WorkspaceStore
   // Active goals by id, keyed for IPC abort/pause/status.
   private running = new Map<string, RuntimeGoal>()
+  private queue: QueuedGoal[] = []
   private transientToolsRegistered = false
 
   constructor(
@@ -86,7 +145,8 @@ export class GoalRunner {
     aiMemoryStore: AIMemoryStore,
     aiStore: AIStore,
     agentStore: AgentStore,
-    goalStore: GoalStore
+    goalStore: GoalStore,
+    workspaceStore: WorkspaceStore
   ) {
     this.window = window
     this.aiManager = aiManager
@@ -94,6 +154,7 @@ export class GoalRunner {
     this.aiStore = aiStore
     this.agentStore = agentStore
     this.goalStore = goalStore
+    this.workspaceStore = workspaceStore
     this.registerTransientTools()
   }
 
@@ -119,9 +180,9 @@ export class GoalRunner {
         },
         required: ['rationale']
       },
-      run: async ({ rationale }) => {
-        const active = this.findActiveForCurrentCaller()
-        if (!active) {
+      run: async ({ rationale }, ctx) => {
+        const active = this.running.get(ctx.callerId)
+        if (!active || active.state.kind !== 'running') {
           return { success: false, message: 'claim_complete called outside an active goal run. This is a no-op.' }
         }
         active.pendingClaim = { rationale }
@@ -140,9 +201,9 @@ export class GoalRunner {
         },
         required: ['reason', 'what_was_learned']
       },
-      run: async ({ reason, what_was_learned }) => {
-        const active = this.findActiveForCurrentCaller()
-        if (!active) {
+      run: async ({ reason, what_was_learned }, ctx) => {
+        const active = this.running.get(ctx.callerId)
+        if (!active || active.state.kind !== 'running') {
           return { success: false, message: 'abort_with_report called outside an active goal run. This is a no-op.' }
         }
         active.pendingAbort = { reason, report: what_was_learned }
@@ -151,25 +212,19 @@ export class GoalRunner {
     })
   }
 
-  /**
-   * For now we only support a single concurrent goal (most useful first).
-   * If multiple goals are running, this picks the most-recently-started
-   * one — fine for the initial implementation; per-pane disambiguation
-   * can come later when we support concurrent goals.
-   */
-  private findActiveForCurrentCaller(): RuntimeGoal | undefined {
-    let latest: RuntimeGoal | undefined
-    for (const g of this.running.values()) {
-      if (g.state.kind === 'running' && (!latest || g.startedAt > latest.startedAt)) {
-        latest = g
-      }
-    }
-    return latest
-  }
-
   // ---- Public API ----
 
-  async start(input: StartGoalInput): Promise<{ goalId: string; error?: string }> {
+  /**
+   * `waitForGoalIds` (used by assign_task's depends_on) holds this goal in
+   * the queue until every referenced goal reaches 'completed'; if one ends
+   * 'failed'/'aborted' instead, this goal is aborted without ever running.
+   * Enforcing `AppSettings.fleet.maxConcurrentGoals` shares the exact same
+   * queue/promotion mechanism — both are "not ready to run yet, but should
+   * already be visible as a 'pending' checkpoint" — so a fleet launch that
+   * exceeds the cap and a goal waiting on a dependency look identical to
+   * the caller and to GoalDashboard.
+   */
+  async start(input: StartGoalInput, opts?: { waitForGoalIds?: string[] }): Promise<{ goalId: string; error?: string }> {
     // Resolve provider.
     const providerId = input.providerId ?? this.aiStore.getSettings().activeProviderId ?? undefined
     if (!providerId) {
@@ -177,14 +232,13 @@ export class GoalRunner {
     }
     const provider = this.aiStore.getProvider(providerId)
     if (!provider) return { goalId: '', error: `Provider ${providerId} not found` }
-    const apiKey = this.aiStore.getApiKey(providerId)
 
     // Per-pane conversation.
-    const settings = this.aiStore.getSettings()
-    const workspaceId = settings.activeProviderId ? undefined : undefined  // workspace context not surfaced here yet
-    const conversation = this.aiMemoryStore.getOrCreateConversation(providerId, workspaceId, input.paneId)
+    const conversation = this.aiMemoryStore.getOrCreateConversation(providerId, undefined, input.paneId)
 
-    // Checkpoint.
+    // Checkpoint — created up front (status defaults to 'pending' in
+    // GoalStore.create) so a queued goal is visible in GoalDashboard
+    // immediately, not just once it actually starts running.
     const checkpoint = this.goalStore.create({
       paneId: input.paneId,
       goal: input.goal,
@@ -192,37 +246,234 @@ export class GoalRunner {
       policy: input.policy,
       providerId,
       personaId: input.personaId,
-      conversationId: conversation.id
+      conversationId: conversation.id,
+      fleetId: input.fleetId
     })
+    const resolvedInput: StartGoalInput = { ...input, providerId }
 
+    const deadDep = (opts?.waitForGoalIds ?? []).find(id => {
+      const dep = this.goalStore.get(id)
+      return dep != null && (dep.status === 'failed' || dep.status === 'aborted')
+    })
+    if (deadDep) {
+      const msg = `Dependency ${deadDep} did not complete successfully — this goal was never started.`
+      this.goalStore.update(checkpoint.id, { status: 'aborted', finalReport: msg })
+      this.emitEvent({ type: 'ended', goalId: checkpoint.id, status: 'aborted', finalReport: msg })
+      return { goalId: checkpoint.id, error: msg }
+    }
+    const waitForGoalIds = (opts?.waitForGoalIds ?? []).filter(id => this.goalStore.get(id)?.status !== 'completed')
+
+    const maxConcurrent = Math.max(1, this.workspaceStore.getSettings().fleet?.maxConcurrentGoals ?? 3)
+    const canStartNow = waitForGoalIds.length === 0 && this.running.size < maxConcurrent
+
+    if (!canStartNow) {
+      this.queue.push({ checkpoint, input: resolvedInput, waitForGoalIds })
+      return { goalId: checkpoint.id }
+    }
+
+    this.beginRun(checkpoint, resolvedInput, provider, conversation.messages)
+    return { goalId: checkpoint.id }
+  }
+
+  /** Actually kicks off a checkpoint's loop — called either immediately
+   *  from start() or later from promoteFromQueue() once a slot/dependency
+   *  frees up, or from resume() rebuilding a runtime for a checkpoint whose
+   *  process died. Resolves apiKey fresh rather than threading it through
+   *  the queue, since it's a cheap lookup and avoids holding a secret in
+   *  memory longer than necessary for a goal that might sit queued a while.
+   *
+   *  `alreadySyncedMessageCount` defaults to the full `conversationMessages`
+   *  length (nothing new to write back) — start()/promoteFromQueue() both
+   *  pass messages loaded verbatim from the store, so that default is
+   *  correct for them. resume() passes a strictly lower count: it appends
+   *  one new, not-yet-persisted marker message on top of what it loaded,
+   *  and needs that one message to actually get synced back on the next
+   *  loop iteration rather than being silently treated as already saved. */
+  private beginRun(
+    checkpoint: GoalCheckpoint,
+    input: StartGoalInput,
+    provider: ReturnType<AIStore['getProvider']>,
+    conversationMessages: AIMessage[],
+    alreadySyncedMessageCount: number = conversationMessages.length,
+    eventType: 'started' | 'resumed' = 'started'
+  ): void {
+    const apiKey = this.aiStore.getApiKey(checkpoint.providerId!)
     const runtime: RuntimeGoal = {
       checkpoint,
       state: { kind: 'running', abortRequested: false, pauseRequested: false },
       startedAt: Date.now(),
       wallClockMs: input.wallClockMs ?? DEFAULT_WALL_CLOCK_MS,
+      maxSteps: input.maxSteps ?? DEFAULT_MAX_STEPS,
+      stepCount: 0,
       criticIntervalSteps: input.criticIntervalSteps ?? DEFAULT_CRITIC_INTERVAL_STEPS,
       criticProviderId: input.criticProviderId,
-      stepsSinceLastCritic: 0
+      stepsSinceLastCritic: 0,
+      guard: createLoopGuardState(),
+      pendingVerifyNudge: false,
+      verifyNudgesGiven: 0,
+      todoNudgesGiven: 0,
+      lastSyncedMessageIndex: alreadySyncedMessageCount
     }
     this.running.set(checkpoint.id, runtime)
     this.goalStore.update(checkpoint.id, { status: 'running' })
     this.agentStore.updateAgentStatus(input.paneId, 'working')
-    this.emitEvent({ type: 'started', goalId: checkpoint.id })
+    this.emitEvent({ type: eventType, goalId: checkpoint.id })
 
-    // Kick off the loop. Don't await — return goalId so the caller can
-    // poll status / receive events.
-    this.runLoop(runtime, provider, apiKey, conversation.messages).catch(err => {
+    // Kick off the loop. Don't await — caller already returned goalId so it
+    // can poll status / receive events.
+    this.runLoop(runtime, provider, apiKey, conversationMessages).catch(err => {
       console.error('[goal-runner] loop crashed:', err)
       this.endGoal(runtime, 'failed', `Loop crashed: ${(err as Error).message ?? String(err)}`)
     })
+  }
 
-    return { goalId: checkpoint.id }
+  /** Re-checks the queue whenever a slot might have freed (called from
+   *  endGoal). Promotes what's now eligible, fails entries whose dependency
+   *  died, leaves the rest queued — in FIFO order so an earlier fleet
+   *  launch doesn't get starved by a later one. */
+  private promoteFromQueue(): void {
+    if (this.queue.length === 0) return
+    const maxConcurrent = Math.max(1, this.workspaceStore.getSettings().fleet?.maxConcurrentGoals ?? 3)
+
+    const stillQueued: QueuedGoal[] = []
+    for (const entry of this.queue) {
+      if (this.running.size >= maxConcurrent) {
+        stillQueued.push(entry)
+        continue
+      }
+
+      const deadDep = entry.waitForGoalIds.find(id => {
+        const dep = this.goalStore.get(id)
+        return dep != null && (dep.status === 'failed' || dep.status === 'aborted')
+      })
+      if (deadDep) {
+        const msg = `Dependency ${deadDep} did not complete successfully — this goal was never started.`
+        this.goalStore.update(entry.checkpoint.id, { status: 'aborted', finalReport: msg })
+        this.emitEvent({ type: 'ended', goalId: entry.checkpoint.id, status: 'aborted', finalReport: msg })
+        continue
+      }
+
+      const stillWaiting = entry.waitForGoalIds.filter(id => this.goalStore.get(id)?.status !== 'completed')
+      if (stillWaiting.length > 0) {
+        stillQueued.push({ ...entry, waitForGoalIds: stillWaiting })
+        continue
+      }
+
+      const provider = this.aiStore.getProvider(entry.checkpoint.providerId!)
+      if (!provider) {
+        const msg = `Provider ${entry.checkpoint.providerId} not found`
+        this.goalStore.update(entry.checkpoint.id, { status: 'failed', finalReport: msg })
+        this.emitEvent({ type: 'ended', goalId: entry.checkpoint.id, status: 'failed', finalReport: msg })
+        continue
+      }
+      const conversation = this.aiMemoryStore.getOrCreateConversation(entry.checkpoint.providerId!, undefined, entry.checkpoint.paneId)
+      this.beginRun(entry.checkpoint, entry.input, provider, conversation.messages)
+    }
+    this.queue = stillQueued
   }
 
   abort(goalId: string): boolean {
     const r = this.running.get(goalId)
-    if (!r || r.state.kind !== 'running') return false
-    r.state.abortRequested = true
+    if (r && r.state.kind === 'running') {
+      r.state.abortRequested = true
+      return true
+    }
+    const idx = this.queue.findIndex(q => q.checkpoint.id === goalId)
+    if (idx !== -1) {
+      const msg = 'Aborted while queued (never started).'
+      this.queue.splice(idx, 1)
+      this.goalStore.update(goalId, { status: 'aborted', finalReport: msg })
+      this.emitEvent({ type: 'ended', goalId, status: 'aborted', finalReport: msg })
+      return true
+    }
+    return false
+  }
+
+  // Lets a tool call in progress for this goal (e.g. wait_for_agent's poll)
+  // notice an abort request without waiting for the next runLoop iteration
+  // — that poll can run for minutes, and abort() alone only sets a flag
+  // runLoop itself checks between turns.
+  isAbortRequested(goalId: string): boolean {
+    const r = this.running.get(goalId)
+    return r?.state.kind === 'running' && r.state.abortRequested === true
+  }
+
+  // runLoop already checks state.pauseRequested every iteration (sleeps in
+  // POLL_INTERVAL_MS*5 increments while true) — this was dead capability
+  // with no public method to actually set the flag. pause/resume just flip
+  // it and mirror the status onto the persisted checkpoint so GoalDashboard
+  // reflects it without waiting for the next step event.
+  pause(goalId: string): boolean {
+    const r = this.running.get(goalId)
+    if (!r || r.state.kind !== 'running' || r.state.pauseRequested) return false
+    r.state.pauseRequested = true
+    this.goalStore.update(goalId, { status: 'paused' })
+    this.agentStore.updateAgentStatus(r.checkpoint.paneId, 'paused')
+    this.emitEvent({ type: 'paused', goalId })
+    return true
+  }
+
+  resume(goalId: string): boolean {
+    const r = this.running.get(goalId)
+    if (r) {
+      if (r.state.kind !== 'running' || !r.state.pauseRequested) return false
+      r.state.pauseRequested = false
+      this.goalStore.update(goalId, { status: 'running' })
+      this.agentStore.updateAgentStatus(r.checkpoint.paneId, 'working')
+      this.emitEvent({ type: 'resumed', goalId })
+      return true
+    }
+
+    // No live runtime for this id — either the process restarted
+    // (checkpoint status 'interrupted', see reconcileOrphaned) or this
+    // goal was paused in a now-dead process. Rebuild a fresh RuntimeGoal
+    // from what's persisted, via the same beginRun() path start() uses,
+    // rather than silently no-op'ing — which is exactly what this method
+    // did before this existed, leaving GoalDashboard's Resume button a
+    // dead click for anything outliving the process that created it.
+    const checkpoint = this.goalStore.get(goalId)
+    if (!checkpoint || (checkpoint.status !== 'paused' && checkpoint.status !== 'interrupted')) return false
+    if (!checkpoint.providerId) return false
+    const provider = this.aiStore.getProvider(checkpoint.providerId)
+    if (!provider) return false
+
+    // Exact-id lookup, deliberately NOT getOrCreateConversation — that has
+    // a 24h reuse window keyed on (providerId, workspaceId, paneId) and
+    // would silently hand back a DIFFERENT (or freshly empty) conversation
+    // for anything older than a day. That's exactly the silent-wrong-
+    // context failure this resume path exists to avoid: better to resume
+    // with an empty transcript (still correct, just cold) than a
+    // plausible-looking but unrelated one.
+    const conversation = this.aiMemoryStore.getConversation(checkpoint.conversationId)
+    const priorMessages: AIMessage[] = conversation?.messages ?? []
+    const resumeMarker: AIMessage = {
+      id: uuidv4(),
+      role: 'system',
+      content: `Resumed after an app restart at step ${checkpoint.step} — prior conversation restored.`,
+      timestamp: Date.now()
+    }
+
+    // wallClockMs/maxSteps/criticIntervalSteps/criticProviderId live only
+    // on StartGoalInput/RuntimeGoal, never persisted onto GoalCheckpoint —
+    // a resumed goal gets fresh defaults for these (a full new budget from
+    // the resume moment), not a continuation of whatever was left before
+    // the interruption. Arguably the right default (interrupted through no
+    // fault of its own budget), stated here rather than silently inherited.
+    const input: StartGoalInput = {
+      paneId: checkpoint.paneId,
+      goal: checkpoint.goal,
+      successCriterion: checkpoint.successCriterion,
+      policy: checkpoint.policy,
+      providerId: checkpoint.providerId,
+      personaId: checkpoint.personaId,
+      fleetId: checkpoint.fleetId
+    }
+    // priorMessages.length, not the post-append length: resumeMarker is
+    // brand new and hasn't been written to ai-memory-store yet, so the next
+    // loop iteration's sync (runLoop's lastSyncedMessageIndex check) needs
+    // to see it as unsynced and persist it — otherwise it's visible to the
+    // model this run but silently missing from the stored transcript.
+    this.beginRun(checkpoint, input, provider, [...priorMessages, resumeMarker], priorMessages.length, 'resumed')
     return true
   }
 
@@ -249,8 +500,11 @@ export class GoalRunner {
       return
     }
 
-    // Set policy so the dispatcher enforces while this goal runs.
-    this.aiManager.setActivePolicy(runtime.checkpoint.policy)
+    // Set policy so the dispatcher enforces while this goal runs. Scoped to
+    // this goal's own id — doesn't affect the interactive chat panel or any
+    // other concurrently-running goal.
+    this.aiManager.setPolicyForCaller(runtime.checkpoint.id, runtime.checkpoint.policy)
+    this.aiManager.setConversationIntent(runtime.checkpoint.id, runtime.checkpoint.goal)
 
     // Compose the initial user prompt that wraps the goal in the runner
     // contract — the model must use claim_complete to attempt finishing.
@@ -266,7 +520,19 @@ export class GoalRunner {
       while (true) {
         // Wall-clock cap.
         if (Date.now() - runtime.startedAt > runtime.wallClockMs) {
-          this.endGoal(runtime, 'failed', `Wall-clock cap exceeded (${runtime.wallClockMs}ms)`)
+          const reason = `Wall-clock cap exceeded (${runtime.wallClockMs}ms)`
+          const finalReport = await this.getFinalExplanation(provider, apiKey, messages, reason, runtime.checkpoint.id)
+          this.endGoal(runtime, 'failed', finalReport)
+          return
+        }
+        // Step-count cap — independent backstop from the wall clock. A goal
+        // issuing many fast/cheap calls (e.g. polling in a tight loop) could
+        // otherwise run for the full wall clock regardless of how many
+        // (possibly useless) turns that represents.
+        if (runtime.stepCount >= runtime.maxSteps) {
+          const reason = `Step cap exceeded (${runtime.maxSteps} tool-call steps)`
+          const finalReport = await this.getFinalExplanation(provider, apiKey, messages, reason, runtime.checkpoint.id)
+          this.endGoal(runtime, 'failed', finalReport)
           return
         }
         // External abort.
@@ -280,8 +546,25 @@ export class GoalRunner {
           continue
         }
 
-        // One model turn.
-        const assistant = await this.aiManager.streamMessage(messages, provider, apiKey ?? undefined)
+        // Fold in anything queued via share_context (another agent) or a
+        // human steering nudge from the Fleet Dashboard — both land in the
+        // same AgentStore.context queue. Placed after the pause check so it
+        // can't accumulate silently while paused; drained immediately so
+        // it's delivered once, not repeated on every subsequent step.
+        const sharedContext = this.agentStore.getAgent(runtime.checkpoint.paneId)?.context
+        if (sharedContext && sharedContext.length > 0) {
+          messages.push({
+            id: uuidv4(),
+            role: 'system',
+            content: sharedContext.join('\n'),
+            timestamp: Date.now()
+          })
+          this.agentStore.clearContext(runtime.checkpoint.paneId)
+        }
+
+        // One model turn. callerId lets streamMessage re-inject this goal's
+        // live checklist (write_todos/complete_todo) every turn.
+        const assistant = await this.aiManager.streamMessage(messages, provider, apiKey ?? undefined, runtime.checkpoint.id)
         if (!assistant) {
           this.endGoal(runtime, 'failed', 'Model call returned no message')
           return
@@ -303,10 +586,35 @@ export class GoalRunner {
         // Dispatch each tool call (executeTool handles policy + action log).
         let nonTransientStepsThisBatch = 0
         let shotPaneAfterBatch: string | null = null
+        let haltRequested = false
+        const dispatchedOks: boolean[] = []
         for (const tc of toolCalls) {
-          const result = await this.aiManager.executeTool(tc)
+          runtime.stepCount++
+
+          // Circuit breaker / duplicate-call guard — check before dispatch.
+          const block = checkBeforeCall(runtime.guard, tc.name, tc.arguments)
+          if (block) {
+            this.goalStore.appendStep(runtime.checkpoint.id, {
+              tool: tc.name, args: tc.arguments, resultPreview: block.reason, ok: false,
+              elapsedMs: Date.now() - runtime.startedAt
+            })
+            this.emitEvent({ type: 'step', goalId: runtime.checkpoint.id, tool: tc.name, ok: false, preview: block.reason })
+            messages.push({
+              id: uuidv4(), role: 'tool', content: JSON.stringify({ success: false, blocked: true, error: block.reason }),
+              toolCallId: tc.id, toolName: tc.name, timestamp: Date.now()
+            })
+            if (block.haltLoop) { haltRequested = true; break }
+            continue
+          }
+
+          const result = await this.aiManager.executeTool(tc, runtime.checkpoint.id)
           const resultPreview = this.previewResult(result.result)
-          const ok = !result.error
+          // Dispatch-level error (thrown) OR the tool's own payload reporting
+          // {success:false} — see resultReportsFailure's doc comment for why
+          // both must count.
+          const ok = !result.error && !resultReportsFailure(result.result)
+          dispatchedOks.push(ok)
+          const disabledMsg = recordOutcome(runtime.guard, tc.name, ok, { args: tc.arguments, resultPreview })
           this.goalStore.appendStep(runtime.checkpoint.id, {
             tool: tc.name,
             args: tc.arguments,
@@ -321,13 +629,26 @@ export class GoalRunner {
             ok,
             preview: resultPreview
           })
+          // Keep the pane's Fleet-visible "current task" snippet live — this
+          // is what PaneLabelWithAgent/FleetDashboard show without either
+          // component needing to know about goals at all.
+          this.agentStore.syncFromGoalStep(runtime.checkpoint.paneId, `${tc.name}: ${resultPreview}`.slice(0, 140))
           messages.push({
             id: uuidv4(),
             role: 'tool',
             content: typeof result.result === 'string' ? result.result : JSON.stringify(result.result),
             toolCallId: result.toolCallId,
+            toolName: tc.name,
             timestamp: Date.now()
           })
+          if (disabledMsg) {
+            messages.push({ id: uuidv4(), role: 'system', content: disabledMsg, timestamp: Date.now() })
+          }
+          // Verify-on-stop tracking: a mutating action taints the run until a
+          // verification-ish tool call clears it — checked when claim_complete
+          // fires, below.
+          if (isMutatingTool(tc.name)) runtime.pendingVerifyNudge = true
+          else if (isVerificationTool(tc.name)) runtime.pendingVerifyNudge = false
           // Vision grounding: browser actions always warrant a fresh look; other
           // tools only when they errored (fallback state for a retry). Captured
           // once after the batch so tool results stay contiguous.
@@ -340,6 +661,33 @@ export class GoalRunner {
           }
         }
         runtime.stepsSinceLastCritic += nonTransientStepsThisBatch
+
+        if (haltRequested) {
+          const reason = 'Loop halted: repeated duplicate tool calls exceeded the safety limit.'
+          const finalReport = await this.getFinalExplanation(provider, apiKey, messages, reason, runtime.checkpoint.id)
+          this.endGoal(runtime, 'aborted', finalReport)
+          return
+        }
+
+        // False-success/false-failure check: does the model's own narration
+        // (alongside this batch of tool calls) match what actually happened?
+        if (dispatchedOks.length > 0) {
+          const mismatch = checkNarrativeMismatch(assistant.content, dispatchedOks.every(Boolean), dispatchedOks.some(Boolean))
+          if (mismatch) {
+            messages.push({ id: uuidv4(), role: 'system', content: mismatch, timestamp: Date.now() })
+          }
+        }
+
+        // Action-starvation nudge: an unbroken run of observational tool
+        // calls (reads, source introspection) with no mutating action in
+        // between — every call above can pass every other check (not
+        // blocked, not a duplicate, not stagnant) while the goal makes zero
+        // actual progress.
+        const tookAction = toolCalls.some(tc => isMutatingTool(tc.name))
+        const starvationMsg = checkActionStarvation(runtime.guard, tookAction)
+        if (starvationMsg) {
+          messages.push({ id: uuidv4(), role: 'system', content: starvationMsg, timestamp: Date.now() })
+        }
 
         // Attach the post-action screenshot as the agent's current state. Only
         // the latest one is kept in context (older images are evicted).
@@ -367,7 +715,40 @@ export class GoalRunner {
         if (runtime.pendingClaim) {
           const claim = runtime.pendingClaim
           runtime.pendingClaim = undefined
-          const verdict = await this.verifySuccessCriterion(runtime.checkpoint.successCriterion, claim.rationale, provider, apiKey ?? undefined)
+          // Verify-on-stop: a mutating action happened with no verification
+          // tool call since — nudge once (bounded) instead of trusting the
+          // claim outright. Doesn't block forever: after MAX_VERIFY_NUDGES
+          // the claim proceeds to normal criterion verification regardless.
+          if (runtime.pendingVerifyNudge && runtime.verifyNudgesGiven < MAX_VERIFY_NUDGES) {
+            runtime.verifyNudgesGiven++
+            runtime.pendingVerifyNudge = false
+            messages.push({
+              id: uuidv4(),
+              role: 'system',
+              content: 'You claimed completion, but your last mutating action (a click/type/navigate or terminal write) was never followed by a check — no screenshot review, content read, or output read since. Verify the actual result first (e.g. browser_verify_visual_state, browser_get_content, read_terminal_output), then call claim_complete again if it still holds.',
+              timestamp: Date.now()
+            })
+            continue
+          }
+          // Same bounded-nudge shape as verify-on-stop above, for a
+          // different signal: the model's OWN checklist (write_todos/
+          // complete_todo) still has open items. One push to finish or
+          // explicitly revise the list, not a repeatable stall tactic —
+          // after MAX_TODO_NUDGES the claim proceeds regardless.
+          const todos = this.aiManager.getTodoSnapshot(runtime.checkpoint.id)
+          const openItems = todos?.items.filter(i => !i.done) ?? []
+          if (openItems.length > 0 && runtime.todoNudgesGiven < MAX_TODO_NUDGES) {
+            runtime.todoNudgesGiven++
+            const names = openItems.slice(0, 4).map(i => `${i.index}. ${i.text}`).join('; ')
+            messages.push({
+              id: uuidv4(),
+              role: 'system',
+              content: `You claimed completion, but your own checklist still has ${openItems.length} open item(s): ${names}. Finish them and call complete_todo, or call write_todos to remove/revise anything no longer relevant, then call claim_complete again.`,
+              timestamp: Date.now()
+            })
+            continue
+          }
+          const verdict = await this.verifySuccessCriterion(runtime.checkpoint.successCriterion, claim.rationale, provider, apiKey ?? undefined, runtime.checkpoint.policy)
           if (verdict.verified) {
             this.endGoal(runtime, 'completed', verdict.detail ?? claim.rationale)
             return
@@ -394,6 +775,17 @@ export class GoalRunner {
           runtime.stepsSinceLastCritic = 0
           await this.runCritic(runtime, provider, apiKey ?? undefined, messages)
         }
+
+        // Persist this round's new messages so conversationId actually has
+        // real content to resume from if the app dies before this goal
+        // ends cleanly — see lastSyncedMessageIndex's doc comment. Placed
+        // last in the loop body so it captures everything this round
+        // pushed (the assistant turn, tool results, any nudges, the
+        // critic's injection) in one call.
+        if (messages.length > runtime.lastSyncedMessageIndex) {
+          this.aiMemoryStore.addMessages(runtime.checkpoint.conversationId, messages.slice(runtime.lastSyncedMessageIndex))
+          runtime.lastSyncedMessageIndex = messages.length
+        }
       }
     } catch (err) {
       this.endGoal(runtime, 'failed', `Loop error: ${(err as Error).message ?? String(err)}`)
@@ -401,6 +793,47 @@ export class GoalRunner {
   }
 
   // ---- Helpers ----
+
+  /**
+   * One bounded, no-dispatch model turn used right before ending a run on a
+   * halt/cap condition (wall clock, step cap, duplicate-call halt). Without
+   * this, the loop cuts the model off cold — the user only ever sees a
+   * status flip with a canned reason string, never an explanation in the
+   * model's own words. Any tool_calls this turn returns are intentionally
+   * ignored (never dispatched) — the run is ending regardless of what the
+   * model asks for next. Falls back to `reason` alone if the call fails,
+   * times out, or returns empty content.
+   */
+  private async getFinalExplanation(
+    provider: ReturnType<AIStore['getProvider']>,
+    apiKey: string | null | undefined,
+    messages: AIMessage[],
+    reason: string,
+    callerId: string
+  ): Promise<string> {
+    if (!provider) return reason
+    const finalMessages: AIMessage[] = [
+      ...messages,
+      {
+        id: uuidv4(),
+        role: 'system',
+        content: `Stopping now: ${reason} This is your final turn — no more tool calls will run. Briefly explain to the user what happened and what they should try next.`,
+        timestamp: Date.now()
+      }
+    ]
+    try {
+      // callerId here is harmless and often useful — the model can
+      // reference what's still open on the checklist while explaining why
+      // the run is stopping. Any tool_calls in the reply are still ignored
+      // (see the doc comment above), so re-injecting the checklist can't
+      // cause a dispatch.
+      const assistant = await this.aiManager.streamMessage(finalMessages, provider, apiKey ?? undefined, callerId)
+      const text = assistant?.content?.trim()
+      return text ? `${reason}\n\n${text}` : reason
+    } catch {
+      return reason
+    }
+  }
 
   private buildGoalPrompt(c: GoalCheckpoint): string {
     const criterionDescription = this.humanizeCriterion(c.successCriterion)
@@ -415,6 +848,7 @@ export class GoalRunner {
       `- You cannot stop on your own. The loop runs until you call claim_complete (which the runner verifies) or abort_with_report (graceful give-up).`,
       `- When you believe the goal is achieved, call claim_complete with a brief rationale. If verification fails, you'll be told why and the loop resumes.`,
       `- If you genuinely cannot make progress, call abort_with_report with a reason and what you learned.`,
+      `- If this goal has several distinct phases, call write_todos with 3-7 concrete steps before your first action — it's re-shown to you every turn, so it's how you keep track of where you are on a long run instead of losing the thread.`,
       `- Use the step protocol (declare_step → action → verify_step) for non-trivial actions.`,
       `- You are running under policy: risk=${c.policy.risk}${c.policy.sandboxDir ? `, sandbox=${c.policy.sandboxDir}` : ''}. Tools exceeding this scope will prompt the user.`,
       ``,
@@ -429,7 +863,7 @@ export class GoalRunner {
       case 'model_question':
         return `Model answers "yes" to: "${c.question}"`
       case 'json_predicate':
-        return `JSON predicate evaluates true: ${c.expr}`
+        return `${c.filePath}: ${c.expr}`
       case 'manual':
         return 'User manually marks complete'
     }
@@ -439,7 +873,8 @@ export class GoalRunner {
     c: SuccessCriterion,
     rationale: string,
     provider: ReturnType<AIStore['getProvider']>,
-    apiKey?: string
+    apiKey?: string,
+    policy?: GoalPolicy
   ): Promise<{ verified: boolean; detail?: string }> {
     switch (c.type) {
       case 'shell':
@@ -491,12 +926,27 @@ export class GoalRunner {
           return { verified: false, detail: `Verification call failed: ${(err as Error).message}` }
         }
       }
-      case 'json_predicate':
-        // Sandboxed JSON predicate evaluation is non-trivial — deferring to
-        // a future phase. For now, accept the model's rationale and surface
-        // the predicate in the final report so the user can see what was
-        // asserted.
-        return { verified: true, detail: `JSON predicate "${c.expr}" — accepted rationale (full evaluator not yet implemented): ${rationale}` }
+      case 'json_predicate': {
+        // filePath is resolved against policy.sandboxDir when set (same
+        // sandbox concept the risk-tier check already uses) — relative
+        // paths are joined onto it, absolute paths are used as-is.
+        const resolvedPath = isAbsolute(c.filePath) || !policy?.sandboxDir
+          ? c.filePath
+          : join(policy.sandboxDir, c.filePath)
+        let raw: string
+        try {
+          raw = await readFile(resolvedPath, 'utf-8')
+        } catch (err) {
+          return { verified: false, detail: `could not read "${resolvedPath}": ${(err as Error).message}` }
+        }
+        let data: unknown
+        try {
+          data = JSON.parse(raw)
+        } catch (err) {
+          return { verified: false, detail: `"${resolvedPath}" is not valid JSON: ${(err as Error).message}` }
+        }
+        return evaluateJsonPredicate(data, c.expr)
+      }
     }
   }
 
@@ -629,7 +1079,7 @@ export class GoalRunner {
     runtime.state = { kind: 'done' }
     this.running.delete(runtime.checkpoint.id)
     this.goalStore.update(runtime.checkpoint.id, { status, finalReport })
-    this.aiManager.setActivePolicy(null)
+    this.aiManager.releaseCaller(runtime.checkpoint.id)
     // Map goal terminal status onto the agent's status pill.
     const agentStatus =
       status === 'completed' ? 'complete' :
@@ -637,6 +1087,13 @@ export class GoalRunner {
       'idle'
     this.agentStore.updateAgentStatus(runtime.checkpoint.paneId, agentStatus)
     this.emitEvent({ type: 'ended', goalId: runtime.checkpoint.id, status, finalReport })
+    notify(
+      status === 'completed' ? 'Agent finished' : status === 'failed' ? 'Agent failed' : 'Agent aborted',
+      runtime.checkpoint.goal
+    )
+    // A slot just freed and/or this goal might have been someone else's
+    // depends_on target — re-check the queue.
+    this.promoteFromQueue()
   }
 
   private emitEvent(event: GoalRunnerEvent): void {
@@ -651,4 +1108,6 @@ export type GoalRunnerEvent =
   | { type: 'step'; goalId: string; tool: string; ok: boolean; preview: string }
   | { type: 'verification_failed'; goalId: string; detail: string }
   | { type: 'critic'; goalId: string; verdict: string; reason: string }
+  | { type: 'paused'; goalId: string }
+  | { type: 'resumed'; goalId: string }
   | { type: 'ended'; goalId: string; status: GoalCheckpoint['status']; finalReport: string }

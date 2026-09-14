@@ -1,0 +1,483 @@
+import { isBrowserActionTool } from './vision-loop'
+
+/**
+ * Shared tool-loop safety checks, used by both the autonomous Goal Runner
+ * (main) and the interactive chat agent (renderer) — the two independently
+ * written tool-loop drivers that otherwise had no shared safety semantics
+ * beyond MAX_TOOL_RETRIES/maxAutoTurns (chat) vs. wall-clock-only (goals).
+ *
+ * Two mechanisms, inspired by a mature reference implementation
+ * (waive.online's agent/loop_guard.py):
+ *   - Circuit breaker: a tool that fails 3x in a row gets disabled for the
+ *     rest of the run, with a recovery hint suggesting what to try instead.
+ *   - Duplicate-call guard: an identical tool+args call repeated 3x gets
+ *     blocked with a nudge to use the existing result; 5 total blocks in a
+ *     run halts the loop entirely rather than grinding to the turn/wall-
+ *     clock cap.
+ *
+ * Plus a stateless narrative-vs-outcome check: compares the model's own
+ * claimed success/failure language against what the tool calls in that
+ * batch actually returned, catching hallucinated "that failed" (or "that
+ * worked") narration — cheap, heuristic, never blocks anything, just adds
+ * a corrective nudge.
+ *
+ * State is a plain object the caller owns (a ref in React, a field on
+ * RuntimeGoal in the goal runner) — this module only has pure functions
+ * over it, matching vision-loop.ts's style, so it works in both a
+ * class-based main-process loop and a hooks-based renderer loop.
+ */
+
+const CONSECUTIVE_FAILURE_LIMIT = 3
+const DUPLICATE_CALL_LIMIT = 3
+// Higher ceiling for a call whose exact-same-args repeat last SUCCEEDED —
+// "find-and-act-on-the-first-match" tools (browser_smart_click, etc.) are
+// the correct, idiomatic way to iterate a "do X to each item in a list"
+// task one item at a time, and identical arguments are *expected* on every
+// iteration (e.g. aria_label: "0 Likes. Like" — always resolves to
+// whichever post is currently first, not a "the same post again" stuck
+// loop). Observed hitting DUPLICATE_CALL_LIMIT for real on a 20-minute
+// "like posts with no engagement" task, killing it after only 4 minutes.
+// Still bounded — a genuinely pointless-but-succeeding loop (e.g. clicking
+// an already-toggled-on checkbox over and over) should eventually trip
+// this too, just much later than a real failure loop.
+const SUCCEEDING_DUPLICATE_CALL_LIMIT = 20
+const HALT_AFTER_BLOCKS = 5
+
+// Tools the elevated ceiling above must NOT apply to: nothing about repeating
+// the exact same call can mean "act on the next item in a list" the way
+// repeating the same aria_label/selector spec can for browser_smart_click.
+// Two distinct reasons land a tool here:
+//   - a fixed absolute target (a literal x/y, a specific key) — it can only
+//     ever hit the same physical point (or send the same keystroke), and
+//     dispatching it mechanically "succeeds" regardless of whether anything
+//     useful happens as a result. Observed for real twice: clicking a stale
+//     (x, y) at a broken reply box ~15 times before the (much later) cutoff
+//     caught it; and later, browser_keypress("w", hold_ms) held against a
+//     wall in a movement game — the keypress genuinely dispatches every
+//     time, so "last call succeeded" is true on every repeat even though
+//     the player never actually moved.
+//   - arbitrary code execution (browser_execute_js) — identical code run
+//     twice does the identical thing twice; there is no "whichever thing
+//     currently matches" resolution happening at all. Observed for real:
+//     the same status-check snippet repeated byte-for-byte 23 times against
+//     a value that had already stopped changing, because the "last call
+//     with these args succeeded" elevation doesn't know success here just
+//     meant "the JS didn't throw," not "this call made progress."
+const FIXED_TARGET_TOOLS: ReadonlySet<string> = new Set(['browser_click_at', 'browser_hover', 'browser_drag', 'browser_execute_js', 'browser_keypress'])
+
+// How many consecutive successful calls to the SAME tool, with genuinely
+// different arguments each time, can return byte-identical output before
+// it's flagged as stagnant. Deliberately separate from DUPLICATE_CALL_LIMIT
+// above, which only fires when the arguments are ALSO identical — this
+// catches the case where the model keeps varying some parameter thinking
+// that'll change the outcome, when it demonstrably isn't. Observed for
+// real: a model repeatedly widening a slice() bound in browser_execute_js
+// trying to "get past" truncation, oblivious that the underlying string had
+// already been exhausted and every call was returning "" — 47 calls before
+// the outer maxAutoTurns cap (100) finally stopped it, because every one of
+// those 47 had technically-different arguments so the exact-duplicate guard
+// never saw a repeat.
+const SAME_RESULT_STREAK_LIMIT = 4
+
+// How many times the stagnant-result nudge above can re-fire (advisory
+// only — never blocks) before escalating to an actual circuit-break via
+// disabledTools, the same mechanism the consecutive-failure breaker below
+// already uses. An advisory nudge alone isn't enough for a model that's
+// already demonstrated, in the same run, that it doesn't act on it — and
+// unlike the exact-duplicate guard, this pattern (genuinely different
+// arguments each time, same underlying result) never trips that guard at
+// all, so nothing else would ever stop it. Observed for real: 32
+// browser_execute_js calls re-scraping the same feed with cosmetically
+// tweaked selectors (adding an image extractor, then refining it, etc.),
+// ignoring four separate nudges (at streak 4, 8, 12, 16) across one run,
+// never once proceeding to the actual task.
+const SAME_RESULT_NUDGES_BEFORE_DISABLE = 3
+
+// Tools where returning the same result on every call is the NORMAL,
+// expected outcome while legitimately waiting on external state (a shell
+// command still running, a selector that hasn't appeared yet) — excluded
+// from the stagnant-result nudge above, which would otherwise misfire on
+// every polling loop.
+const POLLING_TOOLS: ReadonlySet<string> = new Set([
+  'poll_terminal_status', 'wait_for_output', 'read_terminal_output',
+  'browser_wait_for_selector', 'browser_wait_for_navigation', 'browser_wait_for_text'
+])
+
+// How many consecutive tool-call batches with zero mutating actions
+// (isMutatingTool) trigger an action-starvation nudge — and the interval at
+// which it repeats if the model keeps not acting. A single one-time nudge
+// isn't enough on its own (a model ignoring instructions once will often
+// ignore them again), so this re-fires every N calls rather than once.
+const ACTION_STARVATION_INTERVAL = 8
+
+// Bounded history of recent call signatures, used only for cycle detection
+// (the exact-repeat counter above has no size limit and never needs one).
+const RECENT_SIGNATURE_WINDOW = 8
+
+export interface LoopGuardState {
+  /** tool name -> consecutive failure count (reset to 0 on any success) */
+  consecutiveFailures: Record<string, number>
+  /** tool name -> the message shown once it's been circuit-broken */
+  disabledTools: Record<string, string>
+  /** "tool:sorted-args-json" -> how many times that exact call has been seen */
+  callSignatureCounts: Record<string, number>
+  /** "tool:sorted-args-json" -> whether the LAST dispatch of that exact call
+   *  succeeded — see SUCCEEDING_DUPLICATE_CALL_LIMIT's doc comment. */
+  lastOutcomeBySignature: Record<string, boolean>
+  /** total duplicate-call blocks this run — HALT_AFTER_BLOCKS stops the loop */
+  totalBlocks: number
+  /** last RECENT_SIGNATURE_WINDOW call signatures, oldest first — see detectCycle */
+  recentSignatures: string[]
+  /** tool name -> preview of the last successful result seen for it, regardless of args */
+  lastResultPreviewByTool: Record<string, string>
+  /** tool name -> how many consecutive successful calls (any args) returned that same preview */
+  sameResultStreak: Record<string, number>
+  /** consecutive tool-call batches with no mutating action — see checkActionStarvation */
+  noActionStreak: number
+  /** "tool:sorted-args-json" -> preview of the last successful result THIS
+   *  exact call produced — narrower than lastResultPreviewByTool (which
+   *  ignores args entirely). See signatureResultRepeated's doc comment for
+   *  why this exists as its own map. */
+  lastResultPreviewBySignature: Record<string, string>
+  /** "tool:sorted-args-json" -> whether this exact call's most recent
+   *  dispatch returned the SAME result as the dispatch before it. Absent
+   *  (undefined) until a signature has been dispatched at least twice —
+   *  deliberately not "assumed stuck" on a single occurrence. Used to gate
+   *  both the exact-duplicate guard and the alternating-cycle guard on
+   *  actual evidence of stagnation, not just repeated call shape — see
+   *  checkBeforeCall's use of this for the incident that motivated it: an
+   *  alternating A/B/A/B pattern got blocked as a "cycle" when B had only
+   *  run once and returned real (different-from-A) content — the guard had
+   *  no way to know B wasn't making progress, because it never looked. */
+  signatureResultRepeated: Record<string, boolean>
+}
+
+export function createLoopGuardState(): LoopGuardState {
+  return {
+    consecutiveFailures: {},
+    disabledTools: {},
+    callSignatureCounts: {},
+    lastOutcomeBySignature: {},
+    totalBlocks: 0,
+    recentSignatures: [],
+    lastResultPreviewByTool: {},
+    sameResultStreak: {},
+    noActionStreak: 0,
+    lastResultPreviewBySignature: {},
+    signatureResultRepeated: {}
+  }
+}
+
+/**
+ * Detects an alternating cycle (period 2 or 3) in the tail of recent call
+ * signatures — e.g. click A, probe B, click A, probe B, ... with genuinely
+ * different args each time, so callSignatureCounts (exact-repeat only)
+ * never fires. Requires 2 full repetitions of the cycle before flagging, to
+ * avoid punishing legitimate short back-and-forth (e.g. one retry after a
+ * fix). Returns the period on a match, or null.
+ */
+function detectCycle(recent: string[]): number | null {
+  for (const period of [2, 3]) {
+    const need = period * 2
+    if (recent.length < need) continue
+    const tail = recent.slice(-need)
+    let matches = true
+    for (let i = 0; i < period && matches; i++) {
+      if (tail[i] !== tail[i + period]) matches = false
+    }
+    if (matches && new Set(tail.slice(0, period)).size >= 2) return period
+  }
+  return null
+}
+
+// Per-tool fallback suggestion shown when it gets circuit-broken. Falls back
+// to a generic hint for tools not listed here.
+const RECOVERY_HINTS: Record<string, string> = {
+  browser_click: 'Try browser_smart_click, or take a screenshot and re-locate the element — the selector may be stale.',
+  browser_smart_click: 'Try browser_click_at with coordinates from a screenshot, or re-check the page with browser_get_content.',
+  browser_click_at: 'Take a fresh screenshot to re-derive coordinates — the page may have scrolled or changed layout.',
+  browser_type: 'Confirm the element is focused/visible first with browser_query, or try browser_click on it before typing.',
+  browser_navigate: 'Check the URL is well-formed (needs a scheme, e.g. https://) and that pane_id is actually a browser pane (see list_panes).',
+  browser_execute_js: 'If you were trying to simulate interaction (a click, keypress, or drag) rather than just read page state, use browser_click_at (real trusted click at pixel coordinates) or browser_keypress (real trusted keyboard input, with hold_ms for sustained movement) instead — especially on canvas/WebGL content with no selectable DOM element.',
+  write_to_terminal: 'Check the pane is actually connected with list_panes, or call reconnect_pane first.',
+  read_terminal_output: 'Check the pane is actually connected with list_panes, or call reconnect_pane first.'
+}
+
+/**
+ * Best-effort check of whether a tool's own result payload reports failure
+ * (`{success: false, ...}`) even though dispatch itself didn't throw. This
+ * is the dominant failure convention across browser_* tools (and most
+ * others) — they return `{success:false, error}` rather than throwing, so
+ * a caller that only treats thrown exceptions as failure (checking a
+ * dispatch-level error field) will never see these as failures at all.
+ * That blinds both the circuit breaker and the narrative-mismatch check to
+ * nearly every real-world "the action didn't work" case, since dispatch
+ * itself still "succeeded" (it just ran the tool, which then reported the
+ * actual action failed). Deliberately conservative: only trips when a
+ * `success` field is present and literally `false` — tools with no such
+ * field (list_panes, etc.) are left alone rather than guessed at.
+ */
+export function resultReportsFailure(result: unknown): boolean {
+  if (result && typeof result === 'object' && 'success' in result) {
+    return (result as { success?: unknown }).success === false
+  }
+  return false
+}
+
+function signatureFor(toolName: string, args: Record<string, unknown>): string {
+  try {
+    const sortedKeys = Object.keys(args).sort()
+    const sorted: Record<string, unknown> = {}
+    for (const k of sortedKeys) sorted[k] = args[k]
+    return `${toolName}:${JSON.stringify(sorted)}`
+  } catch {
+    return `${toolName}:${String(args)}`
+  }
+}
+
+export interface GuardBlock {
+  reason: string
+  /** True once totalBlocks has hit HALT_AFTER_BLOCKS — caller should stop the loop. */
+  haltLoop: boolean
+}
+
+/**
+ * Call before dispatching a tool call. Returns a block reason if the tool
+ * is circuit-broken or this exact call has been repeated too many times —
+ * the caller should skip dispatch and use `reason` as the tool result
+ * instead. Mutates callSignatureCounts as a side effect (every call is
+ * counted, blocked or not, so repeats keep accumulating toward the halt).
+ */
+export function checkBeforeCall(state: LoopGuardState, toolName: string, args: Record<string, unknown>): GuardBlock | null {
+  const disabledReason = state.disabledTools[toolName]
+  if (disabledReason) {
+    return { reason: disabledReason, haltLoop: false }
+  }
+  const sig = signatureFor(toolName, args)
+  const count = (state.callSignatureCounts[sig] ?? 0) + 1
+  state.callSignatureCounts[sig] = count
+  const eligibleForElevation = state.lastOutcomeBySignature[sig] === true && !FIXED_TARGET_TOOLS.has(toolName)
+  const limit = eligibleForElevation ? SUCCEEDING_DUPLICATE_CALL_LIMIT : DUPLICATE_CALL_LIMIT
+  // Direct evidence beats the heuristic ceiling: if this exact call's last
+  // two dispatches produced DIFFERENT results, it's demonstrably still
+  // returning new information every time (e.g. a poll of live state) —
+  // don't block no matter how many times it's repeated. Only kicks in once
+  // we have two data points (signatureResultRepeated[sig] === false);
+  // undefined (never repeated, or only ever seen once) falls through to the
+  // normal count-based limit as before.
+  const provingProgress = state.signatureResultRepeated[sig] === false
+  if (count > limit && !provingProgress) {
+    state.totalBlocks++
+    return {
+      reason: `Identical call to ${toolName} with the same arguments has now been made ${count} times. Stop repeating it — use the result you already have, or try a genuinely different approach.`,
+      haltLoop: state.totalBlocks >= HALT_AFTER_BLOCKS
+    }
+  }
+
+  // Not an exact repeat — check for an alternating cycle instead (different
+  // args each time, so the counter above never catches it).
+  state.recentSignatures.push(sig)
+  if (state.recentSignatures.length > RECENT_SIGNATURE_WINDOW) state.recentSignatures.shift()
+  const period = detectCycle(state.recentSignatures)
+  if (period !== null) {
+    // Signature shape repeating isn't enough on its own — require that
+    // EVERY distinct call in the alternation has already independently
+    // proven it returns the same result every time it's dispatched. A call
+    // that's only run once so far (or whose last repeat returned something
+    // new) has given no evidence it's contributing to a stuck loop, so
+    // don't punish the pattern yet. This is exactly what went wrong in
+    // practice: A/B/A/B got blocked on B's SECOND attempt when B had only
+    // been dispatched once and returned genuinely different content than A
+    // — the guard had no way to know that without checking, so it didn't.
+    const cycleSignatures = new Set(state.recentSignatures.slice(-period * 2, -period))
+    const allProvenStuck = [...cycleSignatures].every(s => state.signatureResultRepeated[s] === true)
+    if (allProvenStuck) {
+      state.totalBlocks++
+      return {
+        reason: `You're alternating between ${period} different calls without making progress (a cycle, not genuinely different approaches). Stop and try something structurally different — a different tool, a different strategy to find the target, or ask the user for guidance.`,
+        haltLoop: state.totalBlocks >= HALT_AFTER_BLOCKS
+      }
+    }
+  }
+  return null
+}
+
+/**
+ * Call after a tool call resolves (blocked calls should NOT call this — they
+ * never actually ran). Updates consecutive-failure tracking; returns the
+ * circuit-breaker message the moment a tool crosses the failure limit (only
+ * fired once, on the transition, not on every failure after).
+ */
+export function recordOutcome(
+  state: LoopGuardState,
+  toolName: string,
+  ok: boolean,
+  context?: { args?: Record<string, unknown>; resultPreview?: string }
+): string | null {
+  if (context?.args) {
+    state.lastOutcomeBySignature[signatureFor(toolName, context.args)] = ok
+  }
+  if (ok) {
+    state.consecutiveFailures[toolName] = 0
+
+    // Per-exact-signature result tracking, independent of the per-tool
+    // sameResultStreak below — this is what checkBeforeCall's exact-
+    // duplicate and cycle guards use to tell "genuinely stuck" apart from
+    // "looks repetitive but is still returning new information." Not
+    // exempted for POLLING_TOOLS: an unchanging poll result is exactly the
+    // "no new info" case those guards should still be able to act on if a
+    // model gets stuck polling something that will never change.
+    if (context?.args && context?.resultPreview !== undefined) {
+      const sig = signatureFor(toolName, context.args)
+      const prevPreview = state.lastResultPreviewBySignature[sig]
+      if (prevPreview !== undefined) {
+        state.signatureResultRepeated[sig] = prevPreview === context.resultPreview
+      }
+      state.lastResultPreviewBySignature[sig] = context.resultPreview
+    }
+
+    if (context?.resultPreview !== undefined && !POLLING_TOOLS.has(toolName)) {
+      const preview = context.resultPreview
+      if (state.lastResultPreviewByTool[toolName] === preview) {
+        state.sameResultStreak[toolName] = (state.sameResultStreak[toolName] ?? 1) + 1
+      } else {
+        state.lastResultPreviewByTool[toolName] = preview
+        state.sameResultStreak[toolName] = 1
+      }
+      const streak = state.sameResultStreak[toolName]
+      // Re-fires every SAME_RESULT_STREAK_LIMIT calls rather than once — a
+      // model that keeps calling with identical (not just varying) args
+      // gets caught by the exact-duplicate-call guard separately and much
+      // sooner, but when args genuinely differ each time this is the only
+      // signal at all, and one nudge wasn't enough to stop a model that had
+      // already demonstrated it ignores this kind of instruction once.
+      if (streak >= SAME_RESULT_STREAK_LIMIT && streak % SAME_RESULT_STREAK_LIMIT === 0) {
+        const nudgeNumber = streak / SAME_RESULT_STREAK_LIMIT
+        if (nudgeNumber > SAME_RESULT_NUDGES_BEFORE_DISABLE && !state.disabledTools[toolName]) {
+          const reason = `${toolName} has returned the same result ${streak} times in a row despite different arguments each time, and is now disabled for the rest of this run — you already have everything this call is going to give you. Use the result you already have and move on to the actual task, or ask the user for guidance.`
+          state.disabledTools[toolName] = reason
+          return reason
+        }
+        return `${toolName} has returned the same result ${streak} times in a row even though its arguments were different each time — whatever you're varying isn't changing the outcome. Stop adjusting that parameter and try a genuinely different approach, or accept the result you already have.`
+      }
+    }
+    return null
+  }
+  const next = (state.consecutiveFailures[toolName] ?? 0) + 1
+  state.consecutiveFailures[toolName] = next
+  if (next >= CONSECUTIVE_FAILURE_LIMIT && !state.disabledTools[toolName]) {
+    const hint = RECOVERY_HINTS[toolName] ?? 'Try a different tool or a different approach.'
+    // Interpolate the last-attempted args (truncated) so the message points
+    // at what actually failed, not just a generic per-tool suggestion.
+    let argsSummary = ''
+    if (context?.args) {
+      try {
+        const json = JSON.stringify(context.args)
+        argsSummary = ` Last attempted: ${json.length > 150 ? json.slice(0, 150) + '…' : json}.`
+      } catch {
+        // args weren't serializable — skip the summary rather than fail the whole call.
+      }
+    }
+    const reason = `${toolName} has failed ${next} times in a row and is now disabled for the rest of this run.${argsSummary} ${hint}`
+    state.disabledTools[toolName] = reason
+    return reason
+  }
+  return null
+}
+
+// Deliberately simple/conservative phrase lists — false positives just add a
+// disregardable nudge, not a hard gate, so erring toward fewer matches is fine.
+const FAILURE_LANGUAGE = /\b(failed|couldn't|could not|unable to|didn't work|does(?:n't| not) work|ran into an error|hit an error)\b/i
+const SUCCESS_LANGUAGE = /\b(successfully|worked (?:great|fine|as expected)|that worked|all good|no issues)\b/i
+
+/**
+ * Compare the assistant's own narration (the text alongside a batch of tool
+ * calls) against what that batch actually returned. Returns a corrective
+ * nudge string when they disagree, or null when there's nothing to flag —
+ * this never blocks anything, it's purely advisory context for the next turn.
+ */
+export function checkNarrativeMismatch(assistantText: string, batchAllOk: boolean, batchAnyOk: boolean): string | null {
+  const text = (assistantText || '').trim()
+  if (!text) return null
+  const claimsFailure = FAILURE_LANGUAGE.test(text)
+  const claimsSuccess = SUCCESS_LANGUAGE.test(text)
+  if (claimsFailure && batchAllOk) {
+    return 'Note: every tool call in your last turn actually succeeded (see the results above) — re-read them before concluding something failed.'
+  }
+  if (claimsSuccess && !batchAnyOk) {
+    return 'Note: every tool call in your last turn actually failed (see the results above) — re-read them before reporting success.'
+  }
+  return null
+}
+
+/**
+ * Advisory nudge for a failure mode distinct from everything else in this
+ * module: an unbroken run of observational tool calls (reads, source
+ * introspection, screenshots) with no mutating action in between. Nothing
+ * above catches this — every call can be individually well-formed, with
+ * genuinely different arguments AND a genuinely different result each
+ * time, while the run makes zero actual progress toward the task. Observed
+ * for real: a 200+ turn "play this game" conversation spent entirely on
+ * browser_execute_js introspection of the page's internals, never once
+ * clicking/buying/selling anything. Re-fires every ACTION_STARVATION_INTERVAL
+ * calls rather than once, since a model that ignores this once may well
+ * ignore it again.
+ */
+export function checkActionStarvation(state: LoopGuardState, tookAction: boolean): string | null {
+  if (tookAction) {
+    state.noActionStreak = 0
+    return null
+  }
+  state.noActionStreak++
+  if (state.noActionStreak % ACTION_STARVATION_INTERVAL === 0) {
+    return `You've made ${state.noActionStreak} tool calls in a row without taking any concrete action (click, type, navigate, keypress, write, etc.) — pure information-gathering. If you already have enough information, take a real action now instead of continuing to read/inspect.`
+  }
+  return null
+}
+
+/** Tools whose result meaningfully confirms/observes prior state — used by the
+ *  goal runner's verify-on-stop nudge to decide whether a mutating action was
+ *  ever actually checked before the model tries to claim completion. */
+const VERIFICATION_TOOLS: ReadonlySet<string> = new Set([
+  'browser_verify_visual_state', 'browser_describe_screen', 'browser_get_content',
+  'browser_screenshot', 'browser_screenshot_full_page', 'browser_screenshot_annotated',
+  'capture_screenshot', 'read_terminal_output', 'poll_terminal_status', 'wait_for_output',
+  'browser_get_axtree', 'browser_query', 'browser_query_all'
+])
+
+export function isVerificationTool(name: string): boolean {
+  return VERIFICATION_TOOLS.has(name)
+}
+
+/** Mutating actions worth confirming before claiming a goal complete. */
+export function isMutatingTool(name: string): boolean {
+  return isBrowserActionTool(name) || name === 'write_to_terminal'
+}
+
+// Tools safe to dispatch concurrently within a single batch — pure reads/
+// observations with no meaningful ordering dependency between two calls of
+// this set. Deliberately excludes declare_step/verify_step despite being
+// read-only risk-wise (goal-policy.ts): their correctness depends on call
+// order within a batch (verify_step assumes declare_step already ran).
+// Also excludes every mutating/write tool — anything not in this list stays
+// strictly sequential, which is the safe default.
+const PARALLEL_SAFE_TOOLS: ReadonlySet<string> = new Set([
+  'list_panes', 'capture_screenshot', 'get_fleet_status',
+  'read_terminal_output', 'poll_terminal_status', 'wait_for_output',
+  'browser_get_content', 'browser_get_axtree', 'browser_query', 'browser_query_all',
+  'browser_screenshot', 'browser_screenshot_full_page', 'browser_screenshot_annotated',
+  'browser_get_action_log', 'browser_get_cookies', 'browser_verify_visual_state',
+  'browser_describe_screen', 'browser_wait_for_selector', 'browser_wait_for_navigation',
+  'browser_wait_for_text', 'browser_list_recipes'
+])
+
+export function isParallelSafeTool(name: string): boolean {
+  return PARALLEL_SAFE_TOOLS.has(name)
+}
+
+/** True when every call in the batch is parallel-safe and there's more than
+ *  one — a single call gains nothing from Promise.all and this keeps the
+ *  common case on the simpler sequential path. */
+export function batchIsParallelSafe(toolCalls: ReadonlyArray<{ name: string }>): boolean {
+  return toolCalls.length > 1 && toolCalls.every(tc => isParallelSafeTool(tc.name))
+}

@@ -97,7 +97,7 @@ export function TerminalTabContent({
     return () => clearTimeout(t)
   }, [isActive])
 
-  // Expose reconnect to AI tools (reconnect_pane / restart_terminal). restart()
+  // Expose reconnect to AI tools (reconnect_pane). restart()
   // force-kills any live PTY and respawns fresh, reattaching to the tmux session.
   useEffect(() => {
     return registerReconnect(tabKey, () => { void restart() })

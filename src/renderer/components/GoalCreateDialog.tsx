@@ -27,9 +27,11 @@ export function GoalCreateDialog({ panes, onClose, onCreated }: GoalCreateDialog
   const [shellCommand, setShellCommand] = useState<string>('')
   const [shellExitCode, setShellExitCode] = useState<string>('0')
   const [modelQuestion, setModelQuestion] = useState<string>('')
+  const [jsonFilePath, setJsonFilePath] = useState<string>('')
   const [jsonExpr, setJsonExpr] = useState<string>('')
 
   const [risk, setRisk] = useState<GoalRisk>('write_local')
+  const [requireStepProtocol, setRequireStepProtocol] = useState<boolean>(false)
   const [sandboxDir, setSandboxDir] = useState<string>('')
   const [wallClockMinutes, setWallClockMinutes] = useState<string>('60')
   const [criticInterval, setCriticInterval] = useState<string>('5')
@@ -50,8 +52,9 @@ export function GoalCreateDialog({ panes, onClose, onCreated }: GoalCreateDialog
         return { type: 'model_question', question: modelQuestion.trim() }
       }
       case 'json_predicate': {
+        if (!jsonFilePath.trim()) return 'File path is required.'
         if (!jsonExpr.trim()) return 'JSON expression is required.'
-        return { type: 'json_predicate', expr: jsonExpr.trim() }
+        return { type: 'json_predicate', filePath: jsonFilePath.trim(), expr: jsonExpr.trim() }
       }
       case 'manual':
         return { type: 'manual' }
@@ -70,6 +73,7 @@ export function GoalCreateDialog({ panes, onClose, onCreated }: GoalCreateDialog
 
     const policy: GoalPolicy = { risk }
     if (sandboxDir.trim()) policy.sandboxDir = sandboxDir.trim()
+    if (requireStepProtocol) policy.requireStepProtocol = true
 
     setSubmitting(true)
     try {
@@ -183,16 +187,26 @@ export function GoalCreateDialog({ panes, onClose, onCreated }: GoalCreateDialog
               <div className="space-y-2">
                 <input
                   type="text"
-                  value={jsonExpr}
-                  onChange={e => setJsonExpr(e.target.value)}
-                  placeholder="e.g. response.status === 200 && response.body.ok === true"
+                  value={jsonFilePath}
+                  onChange={e => setJsonFilePath(e.target.value)}
+                  placeholder="e.g. /tmp/build-result.json (relative paths resolve inside the sandbox dir below, if set)"
                   className="w-full px-3 py-2 bg-cs-surface border border-cs-border rounded text-cs-text text-sm font-mono"
                 />
-                <p className="text-[10px] text-cs-text-muted">⚠ Predicate evaluator is not fully implemented yet — currently accepted as documentation only.</p>
+                <input
+                  type="text"
+                  value={jsonExpr}
+                  onChange={e => setJsonExpr(e.target.value)}
+                  placeholder="e.g. status == &quot;complete&quot;  or  errorCount == 0  or  manifest.path exists"
+                  className="w-full px-3 py-2 bg-cs-surface border border-cs-border rounded text-cs-text text-sm font-mono"
+                />
+                <p className="text-[10px] text-cs-text-muted">Reads the file as JSON and checks one comparison: a dot path into the JSON, then one of == != &gt; &lt; &gt;= &lt;= exists notexists, then a literal (quote strings).</p>
               </div>
             )}
             {criterionType === 'manual' && (
-              <p className="text-xs text-cs-text-muted">You'll mark the goal complete yourself in the dashboard.</p>
+              <div className="space-y-2">
+                <p className="text-xs text-cs-text-muted">You'll mark the goal complete yourself in the dashboard.</p>
+                <p className="text-[10px] text-cs-text-muted">⚠ No independent check — the model's own claim is trusted outright. Prefer model_question if you want a second opinion before the goal is marked complete.</p>
+              </div>
             )}
           </div>
 
@@ -217,6 +231,18 @@ export function GoalCreateDialog({ panes, onClose, onCreated }: GoalCreateDialog
                 </label>
               ))}
             </div>
+            <label className="flex items-start gap-2 p-2 mt-1 rounded hover:bg-cs-surface cursor-pointer">
+              <input
+                type="checkbox"
+                checked={requireStepProtocol}
+                onChange={e => setRequireStepProtocol(e.target.checked)}
+                className="mt-0.5"
+              />
+              <div>
+                <div className="text-sm text-cs-text">Require step protocol</div>
+                <div className="text-[10px] text-cs-text-muted">Reject terminal writes / browser actions unless declare_step was called first for that action. Off by default — declare_step/verify_step remain available either way, just not enforced.</div>
+              </div>
+            </label>
           </div>
 
           {/* Sandbox + caps */}
