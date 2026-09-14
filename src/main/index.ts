@@ -22,7 +22,7 @@ import {
   unregisterBrowserPaneTab,
   getPaneIdForWebContents
 } from './browser-pane-registry'
-import { capturePaneImage } from './pane-screenshot'
+import { capturePaneImage, getPaneRect } from './pane-screenshot'
 import { getActionLog, subscribeActionLog } from './browser-action-log'
 import { resolveApproval } from './browser-approval'
 import { requestCredentials, resolveLoginPrompt, requestCertBypass, resolveCertWarning } from './browser-security-prompts'
@@ -1807,6 +1807,26 @@ app.whenReady().then(() => {
     // already covers it either way, since it fires for every WebContents).
     contents.on('did-create-window', (childWindow) => {
       childWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+
+      // setWindowOpenHandler itself must return synchronously, so it can't
+      // await the pane's actual screen position — overrideBrowserWindowOptions
+      // just gets a plain width/height and the OS decides where to put it,
+      // which on a multi-pane grid usually isn't anywhere near the pane the
+      // user is looking at. did-create-window fires right after with a real
+      // BrowserWindow we can freely reposition asynchronously, so resolve
+      // which pane spawned this popup and center it over that pane's actual
+      // on-screen rect instead of leaving it wherever the OS defaulted to.
+      const paneId = getPaneIdForWebContents(contents.id)
+      if (paneId && mainWindow && !mainWindow.isDestroyed()) {
+        getPaneRect(mainWindow, paneId).then(rect => {
+          if (!rect || childWindow.isDestroyed()) return
+          const contentBounds = mainWindow!.getContentBounds()
+          const [winWidth, winHeight] = childWindow.getSize()
+          const centerX = contentBounds.x + rect.x + rect.width / 2
+          const centerY = contentBounds.y + rect.y + rect.height / 2
+          childWindow.setPosition(Math.round(centerX - winWidth / 2), Math.round(centerY - winHeight / 2))
+        }).catch(() => {})
+      }
     })
 
     // Don't let browser-pane webviews trap the user with beforeunload prompts.

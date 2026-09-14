@@ -104,7 +104,7 @@ function toDataUrl(image: Electron.NativeImage, maxWidth?: number): string {
   return `data:image/jpeg;base64,${jpeg.toString('base64')}`
 }
 
-async function getPaneRect(window: BrowserWindow, paneId: string): Promise<Rectangle | null> {
+export async function getPaneRect(window: BrowserWindow, paneId: string): Promise<Rectangle | null> {
   // getBoundingClientRect returns CSS/DIP coordinates relative to the viewport,
   // which is exactly what capturePage(rect) expects.
   const safeId = paneId.replace(/["\\]/g, '\\$&')
