@@ -1736,9 +1736,16 @@ app.whenReady().then(() => {
       webPreferences.contextIsolation = true
     })
     contents.setWindowOpenHandler(({ url, features }) => {
+      // TEMP DIAGNOSTIC — pinpointing a report that link clicks / popup
+      // buttons in the browser pane silently do nothing. Remove once the
+      // actual break point in this chain is confirmed.
+      console.log('[popup-diag] setWindowOpenHandler fired', {
+        url, features, contentsType: contents.getType(), contentsId: contents.id
+      })
       if (!(contents.getType() === 'webview' && /^https?:/i.test(url))) {
         // Host renderer popups still go to the OS browser as before.
         if (/^https?:/i.test(url)) shell.openExternal(url)
+        console.log('[popup-diag] early-return branch (not an https webview request), action: deny')
         return { action: 'deny' }
       }
 
@@ -1762,6 +1769,7 @@ app.whenReady().then(() => {
       // Anything that doesn't look like an auth request now opens as a new
       // tab, matching what the user actually wants for links/buttons.
       if (looksLikeOAuthPopup(url)) {
+        console.log('[popup-diag] classified as OAuth popup, action: allow (real BrowserWindow)')
         const widthMatch = /width=(\d+)/.exec(features)
         const heightMatch = /height=(\d+)/.exec(features)
         return {
@@ -1789,9 +1797,13 @@ app.whenReady().then(() => {
       // drives. If no pane resolves (tab closed mid-flight), fall back to
       // the OS browser rather than silently dropping it.
       const paneId = getPaneIdForWebContents(contents.id)
+      console.log('[popup-diag] classified as new-tab request', { resolvedPaneId: paneId, hasMainWindow: !!mainWindow })
       if (paneId && mainWindow) {
-        sendPaneControl(mainWindow, IPC_CHANNELS.AI_BROWSER_TAB_ACTION, { paneId, action: 'open', url }).catch(() => {})
+        sendPaneControl(mainWindow, IPC_CHANNELS.AI_BROWSER_TAB_ACTION, { paneId, action: 'open', url })
+          .then(ok => console.log('[popup-diag] sendPaneControl ack', { paneId, ok }))
+          .catch(err => console.log('[popup-diag] sendPaneControl threw', err))
       } else {
+        console.log('[popup-diag] no paneId/mainWindow resolved — falling back to shell.openExternal')
         shell.openExternal(url)
       }
       return { action: 'deny' }

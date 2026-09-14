@@ -146,6 +146,8 @@ export const BrowserTabWebview = forwardRef<BrowserTabWebviewHandle, BrowserTabW
       if (!webview) return
 
       const onStartLoading: EventListener = () => {
+        // TEMP DIAGNOSTIC — see matching [popup-diag] logs in src/main/index.ts.
+        console.log('[popup-diag] did-start-loading', { tabId })
         setIsLoading(true)
         // A new load starting means the guest is alive again — dismiss any
         // crash/fail overlay so a successful recovery hides it.
