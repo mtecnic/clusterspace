@@ -1712,6 +1712,21 @@ app.whenReady().then(() => {
     })
   })
 
+  // See the setWindowOpenHandler callback below for why this exists: only
+  // URLs that actually look like an OAuth authorization request get a real
+  // popup window; everything else opens as a new tab.
+  function looksLikeOAuthPopup(url: string): boolean {
+    try {
+      const parsed = new URL(url)
+      const params = parsed.searchParams
+      if (params.has('client_id') && (params.has('response_type') || params.has('redirect_uri'))) return true
+      if (params.has('oauth_token')) return true // OAuth 1.0a
+      return /\/(oauth2?|authorize|sso|saml)(\/|$)/i.test(parsed.pathname)
+    } catch {
+      return false
+    }
+  }
+
   // Harden any webview that gets attached: strip preload, force isolation,
   // route popups to the user's default browser instead of opening as child windows.
   app.on('web-contents-created', (_e, contents) => {
@@ -1727,14 +1742,26 @@ app.whenReady().then(() => {
         return { action: 'deny' }
       }
 
-      // Popup vs. new-tab heuristic, biased toward classifying ambiguous
-      // cases as popups: a non-empty `features` string (width=,height=,...)
-      // is what window.open() sends for a real popup (OAuth "Sign in with
-      // Google/GitHub" etc.), while target="_blank" links and features-less
-      // window.open() calls leave it empty. Wrongly tabifying a real OAuth
-      // popup silently breaks login; wrongly popup'ing a plain link just
-      // costs an extra small window — so the asymmetry favors this bias.
-      if (features && features.trim().length > 0) {
+      // Popup vs. new-tab heuristic. Originally keyed off a non-empty
+      // `features` string (width=,height=,...), on the theory that only
+      // real OAuth popups pass one. That's wrong in practice: plenty of
+      // ordinary sites call window.open(url, '_blank', 'noopener,noreferrer')
+      // for perfectly normal outbound links and buttons — noopener/noreferrer
+      // alone makes `features` non-empty with no OAuth involved at all. Every
+      // one of those got misclassified as a real popup and opened as a tiny
+      // 500x640 chrome-only window elsewhere on screen — which is exactly
+      // what "clicking this link does nothing" / "this popup button is
+      // unusable" looks like from the user's seat.
+      //
+      // Key off the URL shape instead: OAuth 2.0 authorization endpoints are
+      // standardized (RFC 6749) around `client_id` + `response_type`/
+      // `redirect_uri` query params, OAuth 1.0a around `oauth_token`, and
+      // basically every provider's auth path contains "oauth"/"authorize"/
+      // "sso"/"saml". That's provider-agnostic — it doesn't need a hardcoded
+      // list of Google/GitHub/etc. domains and still catches custom IdPs.
+      // Anything that doesn't look like an auth request now opens as a new
+      // tab, matching what the user actually wants for links/buttons.
+      if (looksLikeOAuthPopup(url)) {
         const widthMatch = /width=(\d+)/.exec(features)
         const heightMatch = /height=(\d+)/.exec(features)
         return {
