@@ -171,6 +171,19 @@ export class AIManager {
     this.setConversationIntent(INTERACTIVE_CALLER_ID, intent)
   }
 
+  /** Interactive-chat convenience wrapper around releaseCaller — call this
+   *  whenever the chat panel switches which conversation is active (new
+   *  chat, restoring a past one, or deleting the one currently open).
+   *  Without it, INTERACTIVE_CALLER_ID's todo/step/intent state (set by
+   *  write_todos/complete_todo/declare_step) is a single global slot shared
+   *  by every interactive conversation, so a leftover checklist from an
+   *  old, unrelated chat gets re-injected (see buildRequest) into a brand
+   *  new conversation and the model resumes executing it instead of
+   *  answering what was actually just asked. */
+  resetInteractiveState(): void {
+    this.releaseCaller(INTERACTIVE_CALLER_ID)
+  }
+
   /** Read-only peek at a caller's live checklist (write_todos/complete_todo) —
    *  e.g. for a bounded "you still have open items" nudge before accepting
    *  a claim of completion. null if the model never called either tool. */

@@ -33,14 +33,26 @@ function stripStaleScreenshots(msgs: AIMessage[]): AIMessage[] {
   return msgs.map((m, i) => stripSet.has(i) ? { ...m, images: undefined } : m)
 }
 
-// Truncated string form of a tool result, used only for loop-guard's
-// stagnant-result comparison (recordOutcome) — mirrors goal-runner.ts's
-// identically-named helper so both loop drivers flag the same pattern the
-// same way.
+// Fingerprint of a tool result, used only for loop-guard's stagnant-result
+// comparison (recordOutcome) — mirrors goal-runner.ts's identically-named
+// helper so both loop drivers flag the same pattern the same way. A plain
+// prefix truncation would make two genuinely DIFFERENT long results (e.g.
+// a rendered todo checklist, where only a later line changes between calls)
+// compare equal whenever they share their first 200 chars — observed for
+// real: complete_todo's checklist render is 800+ chars and items 1-4 stay
+// identical text while a later item's checkbox/cursor moves, so a prefix
+// comparison saw 4 "identical" results even though every call marked a
+// different item done. Hashing the FULL string instead means two different
+// results are (short of a hash collision) never mistaken for the same one.
 function previewResult(result: unknown): string {
   if (result == null) return ''
   const s = typeof result === 'string' ? result : JSON.stringify(result)
-  return s.length > 200 ? s.slice(0, 200) + '…' : s
+  if (s.length <= 200) return s
+  let hash = 0
+  for (let i = 0; i < s.length; i++) {
+    hash = (Math.imul(hash, 31) + s.charCodeAt(i)) | 0
+  }
+  return `${s.length}:${hash}`
 }
 
 interface AIContextValue {
@@ -765,6 +777,13 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
   const clearChat = useCallback(() => {
     setMessages([])
     setError(null)
+    // Disconnect from whatever conversation was active — without this the
+    // next message would keep autosaving into (and inheriting the live
+    // todo/step state of) the thread the user just cleared.
+    setConversationId(null)
+    window.electronAPI.aiResetInteractiveState().catch(err => {
+      console.error('Failed to reset interactive AI state:', err)
+    })
   }, [])
 
   // Settings actions
@@ -808,6 +827,12 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
     try {
       const conversation = await window.electronAPI.getAIConversation(id)
       if (conversation) {
+        // The live todo/step state (write_todos/complete_todo) belongs to
+        // whichever conversation was active when it was set — switching
+        // threads must not let a leftover checklist from the PREVIOUS
+        // thread get re-injected into this one (see resetInteractiveState's
+        // doc comment).
+        await window.electronAPI.aiResetInteractiveState()
         setMessages(conversation.messages)
         setConversationId(conversation.id)
         setError(null)
@@ -819,15 +844,24 @@ export function AIProvider({ children, onFocusPane, onMaximizePane }: AIProvider
 
   const deleteConversation = useCallback(async (id: string) => {
     try {
-      await window.electronAPI.deleteAIConversation(id)
+      const deleted = await window.electronAPI.deleteAIConversation(id)
+      if (!deleted) {
+        // The backend didn't actually remove it (already gone, or a store
+        // error) — don't drop it from the visible list, or it'll look
+        // deleted until the next history reload brings it right back.
+        setError('Could not delete that conversation. Try again.')
+        return
+      }
       setConversations(prev => prev.filter(c => c.id !== id))
       // If we deleted the current conversation, start fresh
       if (id === conversationId) {
         setMessages([])
         setConversationId(null)
+        await window.electronAPI.aiResetInteractiveState()
       }
     } catch (err) {
       console.error('Failed to delete conversation:', err)
+      setError('Could not delete that conversation. Try again.')
     }
   }, [conversationId])
 

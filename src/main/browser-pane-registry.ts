@@ -28,6 +28,20 @@ export function isBrowserPaneRegistered(paneId: string): boolean {
   return getBrowserWebContents(paneId) != null
 }
 
+// Appended to every "No browser pane <id>" tool error, so a wrong/stale/
+// hallucinated pane_id is self-correcting on the model's very next turn
+// instead of costing a blind retry (or several — each one counting toward
+// the circuit breaker) against the same made-up ID. Observed for real: on
+// a 4-pane task, the model recalled pane-4's id correctly for the first
+// ~80 turns, then fabricated an entirely different UUID for it once that
+// id had aged out of easy recall, retried the fabrication once more, and
+// got circuit-broken — with no clue from the error what the real id was.
+export function knownPaneIdsHint(): string {
+  const ids = [...map.keys()]
+  if (ids.length === 0) return ' No browser panes are currently registered — call list_panes.'
+  return ` Currently open panes: ${ids.join(', ')}. Call list_panes if unsure which id belongs to which pane.`
+}
+
 // Separate reverse/all-tabs lookup: every open tab across every pane, not
 // just the active one. Used to resolve which pane a popup-turned-new-tab
 // request (setWindowOpenHandler, fired by the webview that asked for it,

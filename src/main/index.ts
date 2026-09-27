@@ -905,6 +905,10 @@ function registerIpcHandlers() {
     aiManager?.setInteractiveIntent(intent)
   })
 
+  ipcMain.handle(IPC_CHANNELS.AI_RESET_INTERACTIVE_STATE, () => {
+    aiManager?.resetInteractiveState()
+  })
+
   ipcMain.on(IPC_CHANNELS.AI_CANCEL, () => {
     try {
       aiManager?.cancelAllStreams()

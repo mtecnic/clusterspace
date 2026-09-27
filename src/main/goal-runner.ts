@@ -1069,10 +1069,17 @@ export class GoalRunner {
     }).join(', ')
   }
 
+  // Fingerprint, not a prefix — see the identically-named helper in
+  // AIContext.tsx for why a plain truncation is wrong here.
   private previewResult(result: unknown): string {
     if (result == null) return ''
     const s = typeof result === 'string' ? result : JSON.stringify(result)
-    return s.length > 200 ? s.slice(0, 200) + '…' : s
+    if (s.length <= 200) return s
+    let hash = 0
+    for (let i = 0; i < s.length; i++) {
+      hash = (Math.imul(hash, 31) + s.charCodeAt(i)) | 0
+    }
+    return `${s.length}:${hash}`
   }
 
   private endGoal(runtime: RuntimeGoal, status: GoalCheckpoint['status'], finalReport: string): void {

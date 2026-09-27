@@ -1,4 +1,4 @@
-import { getBrowserWebContents } from '../../browser-pane-registry'
+import { getBrowserWebContents, knownPaneIdsHint } from '../../browser-pane-registry'
 import type { PagedTextResult } from '../../../shared/types'
 import { toolRegistry } from '../registry'
 import { saveScreenshotToDisk } from './_helpers'
@@ -48,7 +48,7 @@ export function registerBrowserNavigationTools(): void {
     },
     run: async ({ pane_id, url }) => {
       const wc = getBrowserWebContents(pane_id)
-      if (!wc) return { success: false, error: `No browser pane with id ${pane_id}` }
+      if (!wc) return { success: false, error: `No browser pane with id ${pane_id}.${knownPaneIdsHint()}` }
       try {
         await wc.loadURL(url)
         return { success: true, url: wc.getURL(), title: wc.getTitle() }
@@ -72,7 +72,7 @@ export function registerBrowserNavigationTools(): void {
     },
     run: async ({ pane_id, max_chars, cursor }) => {
       const wc = getBrowserWebContents(pane_id)
-      if (!wc) return { success: false, content: '', hasMore: false, totalBytes: 0, error: `No browser pane with id ${pane_id}` }
+      if (!wc) return { success: false, content: '', hasMore: false, totalBytes: 0, error: `No browser pane with id ${pane_id}.${knownPaneIdsHint()}` }
       const cap = max_chars ?? 8000
       try {
         const raw = await wc.executeJavaScript(
@@ -110,7 +110,7 @@ export function registerBrowserNavigationTools(): void {
     },
     run: async ({ pane_id }) => {
       const wc = getBrowserWebContents(pane_id)
-      if (!wc) return { success: false, error: `No browser pane ${pane_id}` }
+      if (!wc) return { success: false, error: `No browser pane ${pane_id}.${knownPaneIdsHint()}` }
       try {
         const image = await wc.capturePage()
         const size = image.getSize()
@@ -134,7 +134,7 @@ export function registerBrowserNavigationTools(): void {
     },
     run: async ({ pane_id, code }) => {
       const wc = getBrowserWebContents(pane_id)
-      if (!wc) return { success: false, error: `No browser pane with id ${pane_id}` }
+      if (!wc) return { success: false, error: `No browser pane with id ${pane_id}.${knownPaneIdsHint()}` }
       const blockReason = looksLikeSimulatedInteraction(code)
       if (blockReason) return { success: false, error: blockReason }
       try {
