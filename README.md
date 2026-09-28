@@ -362,6 +362,20 @@ PRs welcome. The code prefers explicit, readable patterns over clever ones; smal
 
 ---
 
+## Credits
+
+ClusterSpace is a shell around other people's excellent work. Every terminal pane is
+[**xterm.js**](https://github.com/xtermjs/xterm.js); the pseudo-terminals behind them are
+[**node-pty**](https://github.com/microsoft/node-pty); and the reason SSH sessions survive
+disconnects at all is [**tmux**](https://github.com/tmux/tmux), doing the hard part on the
+remote host. Built on [Electron](https://github.com/electron/electron) and
+[React](https://github.com/facebook/react).
+
+Full attribution, versions and licences: [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+
+---
+
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE) — see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) for bundled
+third-party components, which remain under their own licences.
