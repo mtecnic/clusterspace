@@ -336,7 +336,21 @@ export function recordOutcome(
       state.lastResultPreviewBySignature[sig] = context.resultPreview
     }
 
-    if (context?.resultPreview !== undefined && !POLLING_TOOLS.has(toolName)) {
+    // Mutating action tools (browser_type, browser_click, browser_scroll,
+    // write_to_terminal, ...) are exempted for the same reason POLLING_TOOLS
+    // are, from the opposite direction: their success payload is an
+    // action-invariant ack ({success, found, matchedBy} etc.) that never
+    // encodes what was actually typed/clicked/scrolled, so four genuinely
+    // different, genuinely successful actions (typing four different drafts
+    // into four different panes) are structurally indistinguishable from
+    // four no-op repeats here. Observed for real: staging distinct draft
+    // replies into 4 separate composers tripped this nudge twice
+    // (complete_todo and browser_type) purely because their ack shape can't
+    // vary, not because anything was actually stuck — the exact-duplicate-
+    // call guard in checkBeforeCall already covers a mutating tool called
+    // with literally the same args over and over, which this isn't meant to
+    // duplicate.
+    if (context?.resultPreview !== undefined && !POLLING_TOOLS.has(toolName) && !isMutatingTool(toolName)) {
       const preview = context.resultPreview
       if (state.lastResultPreviewByTool[toolName] === preview) {
         state.sameResultStreak[toolName] = (state.sameResultStreak[toolName] ?? 1) + 1

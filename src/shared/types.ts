@@ -699,6 +699,7 @@ export const IPC_CHANNELS = {
   AI_STREAM_END: 'ai:stream:end',
   AI_STREAM_ERROR: 'ai:stream:error',
   AI_SET_INTENT: 'ai:set-intent',
+  AI_RESET_INTERACTIVE_STATE: 'ai:reset-interactive-state',
   AI_CANCEL: 'ai:cancel',
   AI_SCREENSHOT_PANE: 'ai:screenshot:pane',
   AI_SCREENSHOT_WORKSPACE: 'ai:screenshot:workspace',

@@ -1,4 +1,4 @@
-import { getBrowserWebContents } from '../../browser-pane-registry'
+import { getBrowserWebContents, knownPaneIdsHint } from '../../browser-pane-registry'
 import { toolRegistry } from '../registry'
 import { saveScreenshotToDisk } from './_helpers'
 
@@ -38,7 +38,7 @@ export function registerBrowserVisionTools(): void {
         return { success: false, error: 'No vision model available. Configure a provider with a visionModel field (or use a dual-purpose model like claude-3.5-sonnet or gpt-4o).' }
       }
       const wc = getBrowserWebContents(pane_id)
-      if (!wc) return { success: false, error: `No browser pane ${pane_id}` }
+      if (!wc) return { success: false, error: `No browser pane ${pane_id}.${knownPaneIdsHint()}` }
       try {
         const image = await wc.capturePage()
         const size = image.getSize()
@@ -78,7 +78,7 @@ export function registerBrowserVisionTools(): void {
         return { success: false, error: 'No vision model available.' }
       }
       const wc = getBrowserWebContents(pane_id)
-      if (!wc) return { success: false, error: `No browser pane ${pane_id}` }
+      if (!wc) return { success: false, error: `No browser pane ${pane_id}.${knownPaneIdsHint()}` }
       try {
         const image = await wc.capturePage()
         const size = image.getSize()

@@ -1,4 +1,4 @@
-import { getBrowserWebContents } from '../../browser-pane-registry'
+import { getBrowserWebContents, knownPaneIdsHint } from '../../browser-pane-registry'
 import { sendCdpCommand } from '../../cdp-helpers'
 import { toolRegistry } from '../registry'
 import { saveScreenshotToDisk, cdpClickAt } from './_helpers'
@@ -36,7 +36,7 @@ export function registerBrowserInteractionT2Tools(): void {
     },
     run: async ({ pane_id, selector, attrs }) => {
       const wc = getBrowserWebContents(pane_id)
-      if (!wc) return { success: false, error: `No browser pane ${pane_id}` }
+      if (!wc) return { success: false, error: `No browser pane ${pane_id}.${knownPaneIdsHint()}` }
       const wantedAttrs = attrs ?? ['text', 'value', 'href', 'title', 'aria-label', 'role', 'placeholder', 'name', 'id']
       const code = `(() => {
         const el = document.querySelector(${JSON.stringify(selector)});
@@ -77,7 +77,7 @@ export function registerBrowserInteractionT2Tools(): void {
     },
     run: async ({ pane_id, selector, attrs, limit }) => {
       const wc = getBrowserWebContents(pane_id)
-      if (!wc) return { success: false, error: `No browser pane ${pane_id}` }
+      if (!wc) return { success: false, error: `No browser pane ${pane_id}.${knownPaneIdsHint()}` }
       const wantedAttrs = attrs ?? ['text', 'value', 'href', 'title', 'aria-label', 'role']
       const cap = limit ?? 50
       const code = `(() => {
@@ -121,7 +121,7 @@ export function registerBrowserInteractionT2Tools(): void {
     },
     run: async ({ pane_id, max_depth }) => {
       const wc = getBrowserWebContents(pane_id)
-      if (!wc) return { success: false, error: `No browser pane ${pane_id}` }
+      if (!wc) return { success: false, error: `No browser pane ${pane_id}.${knownPaneIdsHint()}` }
       try {
         const result = await sendCdpCommand<{ nodes: unknown[] }>(wc, 'Accessibility.getFullAXTree')
         type AXNode = { nodeId: string; ignored?: boolean; role?: { value?: string }; name?: { value?: string }; value?: { value?: unknown }; childIds?: string[]; backendDOMNodeId?: number; properties?: Array<{ name: string; value: { value?: unknown } }> }
@@ -198,7 +198,7 @@ export function registerBrowserInteractionT2Tools(): void {
     },
     run: async ({ pane_id, selector, paths }) => {
       const wc = getBrowserWebContents(pane_id)
-      if (!wc) return { success: false, error: `No browser pane ${pane_id}` }
+      if (!wc) return { success: false, error: `No browser pane ${pane_id}.${knownPaneIdsHint()}` }
       try {
         const root = await sendCdpCommand<{ root: { nodeId: number } }>(wc, 'DOM.getDocument')
         const node = await sendCdpCommand<{ nodeId: number }>(wc, 'DOM.querySelector', {
@@ -229,7 +229,7 @@ export function registerBrowserInteractionT2Tools(): void {
     },
     run: async ({ pane_id, x, y, button }) => {
       const wc = getBrowserWebContents(pane_id)
-      if (!wc) return { success: false, error: `No browser pane ${pane_id}` }
+      if (!wc) return { success: false, error: `No browser pane ${pane_id}.${knownPaneIdsHint()}` }
       try {
         const urlBefore = wc.getURL()
         await cdpClickAt(wc, x, y, button ?? 'left')
@@ -257,7 +257,7 @@ export function registerBrowserInteractionT2Tools(): void {
     },
     run: async ({ pane_id, selector, x: argX, y: argY }) => {
       const wc = getBrowserWebContents(pane_id)
-      if (!wc) return { success: false, error: `No browser pane ${pane_id}` }
+      if (!wc) return { success: false, error: `No browser pane ${pane_id}.${knownPaneIdsHint()}` }
       try {
         let x: number | undefined = argX
         let y: number | undefined = argY
@@ -293,7 +293,7 @@ export function registerBrowserInteractionT2Tools(): void {
     },
     run: async ({ pane_id, from_x, from_y, to_x, to_y, steps }) => {
       const wc = getBrowserWebContents(pane_id)
-      if (!wc) return { success: false, error: `No browser pane ${pane_id}` }
+      if (!wc) return { success: false, error: `No browser pane ${pane_id}.${knownPaneIdsHint()}` }
       const n = steps ?? 10
       try {
         wc.sendInputEvent({ type: 'mouseDown', x: from_x, y: from_y, button: 'left', clickCount: 1 })
@@ -324,7 +324,7 @@ export function registerBrowserInteractionT2Tools(): void {
     },
     run: async ({ pane_id }) => {
       const wc = getBrowserWebContents(pane_id)
-      if (!wc) return { success: false, error: `No browser pane ${pane_id}` }
+      if (!wc) return { success: false, error: `No browser pane ${pane_id}.${knownPaneIdsHint()}` }
       try {
         const result = await sendCdpCommand<{ data: string }>(wc, 'Page.captureScreenshot', {
           format: 'png',
@@ -360,7 +360,7 @@ export function registerBrowserInteractionT2Tools(): void {
     },
     run: async ({ pane_id, selectors, max_elements }) => {
       const wc = getBrowserWebContents(pane_id)
-      if (!wc) return { success: false, error: `No browser pane ${pane_id}` }
+      if (!wc) return { success: false, error: `No browser pane ${pane_id}.${knownPaneIdsHint()}` }
       const cap = max_elements ?? 30
       // Auto-detect mode builds its own selector per element (id if present,
       // else a short nth-of-type path) since there's no caller-supplied one —
@@ -452,7 +452,7 @@ export function registerBrowserInteractionT2Tools(): void {
     },
     run: async ({ pane_id, index }) => {
       const wc = getBrowserWebContents(pane_id)
-      if (!wc) return { success: false, error: `No browser pane ${pane_id}` }
+      if (!wc) return { success: false, error: `No browser pane ${pane_id}.${knownPaneIdsHint()}` }
       const labels = lastAnnotation.get(pane_id)
       if (!labels) return { success: false, error: 'No annotated screenshot on record for this pane — call browser_screenshot_annotated first.' }
       const label = labels.find(l => l.index === index)

@@ -1,4 +1,4 @@
-import { getBrowserWebContents } from '../../browser-pane-registry'
+import { getBrowserWebContents, knownPaneIdsHint } from '../../browser-pane-registry'
 import { toolRegistry } from '../registry'
 import { cdpClickAt, buildElementLocatorJs, dispatchKeyEvent } from './_helpers'
 
@@ -27,7 +27,7 @@ export function registerBrowserInteractionT1Tools(): void {
     },
     run: async ({ pane_id, selector }) => {
       const wc = getBrowserWebContents(pane_id)
-      if (!wc) return { success: false, error: `No browser pane with id ${pane_id}` }
+      if (!wc) return { success: false, error: `No browser pane with id ${pane_id}.${knownPaneIdsHint()}` }
       // Shared locator (not a bespoke document.querySelector here) so this
       // gets the same visible-match preference as browser_smart_click/
       // browser_type — a bare querySelector always takes the first DOM-order
@@ -75,7 +75,7 @@ export function registerBrowserInteractionT1Tools(): void {
     },
     run: async ({ pane_id, selector, aria_label, role, match_text, text, submit }) => {
       const wc = getBrowserWebContents(pane_id)
-      if (!wc) return { success: false, error: `No browser pane with id ${pane_id}` }
+      if (!wc) return { success: false, error: `No browser pane with id ${pane_id}.${knownPaneIdsHint()}` }
       // Locate + scroll into view (read-only query, not a simulated
       // interaction) — the actual focus and typing below both go through
       // real input events, same as browser_click/browser_keypress. Same
@@ -139,7 +139,7 @@ export function registerBrowserInteractionT1Tools(): void {
     },
     run: async ({ pane_id, selector, timeout_ms, visible }) => {
       const wc = getBrowserWebContents(pane_id)
-      if (!wc) return { success: false, found: false, error: `No browser pane ${pane_id}` }
+      if (!wc) return { success: false, found: false, error: `No browser pane ${pane_id}.${knownPaneIdsHint()}` }
       const timeoutMs = timeout_ms ?? 10000
       const requireVisible = !!visible
       const code = `(async () => {
@@ -212,7 +212,7 @@ export function registerBrowserInteractionT1Tools(): void {
     },
     run: async ({ pane_id, pattern, timeout_ms }) => {
       const wc = getBrowserWebContents(pane_id)
-      if (!wc) return { success: false, found: false, error: `No browser pane ${pane_id}` }
+      if (!wc) return { success: false, found: false, error: `No browser pane ${pane_id}.${knownPaneIdsHint()}` }
       const timeoutMs = timeout_ms ?? 10000
       const code = `(async () => {
         const re = new RegExp(${JSON.stringify(pattern)});
@@ -249,7 +249,7 @@ export function registerBrowserInteractionT1Tools(): void {
     },
     run: async ({ pane_id, key, modifiers, hold_ms }) => {
       const wc = getBrowserWebContents(pane_id)
-      if (!wc) return { success: false, error: `No browser pane ${pane_id}` }
+      if (!wc) return { success: false, error: `No browser pane ${pane_id}.${knownPaneIdsHint()}` }
       try {
         const clampedHoldMs = hold_ms != null ? Math.max(0, Math.min(5000, hold_ms)) : 0
         await dispatchKeyEvent(wc, key, modifiers ?? [], clampedHoldMs)
@@ -275,7 +275,7 @@ export function registerBrowserInteractionT1Tools(): void {
     },
     run: async ({ pane_id, by, to, selector }) => {
       const wc = getBrowserWebContents(pane_id)
-      if (!wc) return { success: false, error: `No browser pane ${pane_id}` }
+      if (!wc) return { success: false, error: `No browser pane ${pane_id}.${knownPaneIdsHint()}` }
       let code: string
       if (selector) {
         code = `(() => { const el = document.querySelector(${JSON.stringify(selector)}); if (!el) return { found: false }; el.scrollIntoView({ block: 'center', behavior: 'instant' }); return { found: true }; })()`
@@ -311,7 +311,7 @@ export function registerBrowserInteractionT1Tools(): void {
     },
     run: async ({ pane_id, selector, value }) => {
       const wc = getBrowserWebContents(pane_id)
-      if (!wc) return { success: false, error: `No browser pane ${pane_id}` }
+      if (!wc) return { success: false, error: `No browser pane ${pane_id}.${knownPaneIdsHint()}` }
       const code = `(() => {
         const el = document.querySelector(${JSON.stringify(selector)});
         if (!el || el.tagName !== 'SELECT') return { found: false };
@@ -343,7 +343,7 @@ export function registerBrowserInteractionT1Tools(): void {
     },
     run: async ({ pane_id, selector, checked }) => {
       const wc = getBrowserWebContents(pane_id)
-      if (!wc) return { success: false, error: `No browser pane ${pane_id}` }
+      if (!wc) return { success: false, error: `No browser pane ${pane_id}.${knownPaneIdsHint()}` }
       const code = `(() => {
         const el = document.querySelector(${JSON.stringify(selector)});
         if (!el) return { found: false };

@@ -1,6 +1,6 @@
 import { BrowserWindow, session, dialog } from 'electron'
 import { writeFile } from 'fs/promises'
-import { getBrowserWebContents } from '../../browser-pane-registry'
+import { getBrowserWebContents, knownPaneIdsHint } from '../../browser-pane-registry'
 import { getActionLog } from '../../browser-action-log'
 import { getRecipeStore, runRecipe, type Recipe } from '../../browser-recipes'
 import { toolRegistry } from '../registry'
@@ -49,7 +49,7 @@ export function registerBrowserAdvancedTools(): void {
     },
     run: async ({ pane_id, selector, aria_label, role, text }) => {
       const wc = getBrowserWebContents(pane_id)
-      if (!wc) return { success: false, error: `No browser pane ${pane_id}` }
+      if (!wc) return { success: false, error: `No browser pane ${pane_id}.${knownPaneIdsHint()}` }
       const code = buildElementLocatorJs({ selector, ariaLabel: aria_label, role, text })
       try {
         const result = await wc.executeJavaScript(code, true) as { found: boolean; matchedBy?: string; tag?: string; x?: number; y?: number }
@@ -300,7 +300,7 @@ export function registerBrowserAdvancedTools(): void {
     },
     run: async ({ pane_id, path }, { window }) => {
       const wc = getBrowserWebContents(pane_id)
-      if (!wc) return { success: false, error: `No browser pane ${pane_id}` }
+      if (!wc) return { success: false, error: `No browser pane ${pane_id}.${knownPaneIdsHint()}` }
       try {
         let savePath = path
         if (!savePath) {
@@ -333,7 +333,7 @@ export function registerBrowserAdvancedTools(): void {
     },
     run: async ({ pane_id, path }, { window }) => {
       const wc = getBrowserWebContents(pane_id)
-      if (!wc) return { success: false, error: `No browser pane ${pane_id}` }
+      if (!wc) return { success: false, error: `No browser pane ${pane_id}.${knownPaneIdsHint()}` }
       try {
         let savePath = path
         if (!savePath) {
@@ -377,7 +377,7 @@ export function registerBrowserAdvancedTools(): void {
         // Already a browser — optionally navigate.
         if (url) {
           const wc = getBrowserWebContents(pane_id)
-          if (!wc) return { success: false, pane_id, error: `No browser pane with id ${pane_id}` }
+          if (!wc) return { success: false, pane_id, error: `No browser pane with id ${pane_id}.${knownPaneIdsHint()}` }
           try {
             await wc.loadURL(url)
             return { success: true, pane_id, url: wc.getURL() }
