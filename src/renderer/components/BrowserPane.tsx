@@ -145,7 +145,12 @@ export function BrowserPane({
   const [showOverflow, setShowOverflow] = useState(false)
   const [showAutocomplete, setShowAutocomplete] = useState(false)
   const [suggestions, setSuggestions] = useState<HistoryEntry[]>([])
-  const [autoIndex, setAutoIndex] = useState(0)
+  // null = no suggestion explicitly selected yet (Enter should use the
+  // literally-typed text). Set to a number only by ArrowDown/ArrowUp or
+  // hovering a suggestion — NOT just because suggestions loaded, or typing
+  // a URL that happens to be close to a saved one would silently navigate
+  // to the saved one instead of what's actually in the bar.
+  const [autoIndex, setAutoIndex] = useState<number | null>(null)
 
   const [showFind, setShowFind] = useState(false)
   const [findQuery, setFindQuery] = useState('')
@@ -454,7 +459,7 @@ export function BrowserPane({
     window.electronAPI.searchBrowserHistory(q, 8).then(results => {
       if (!cancelled) {
         setSuggestions(results)
-        setAutoIndex(0)
+        setAutoIndex(null)
       }
     }).catch(() => {})
     return () => { cancelled = true }
@@ -526,7 +531,7 @@ export function BrowserPane({
   const handleUrlSubmit = useCallback((e: React.FormEvent) => {
     e.preventDefault()
     setShowAutocomplete(false)
-    if (showAutocomplete && suggestions[autoIndex]) {
+    if (showAutocomplete && autoIndex !== null && suggestions[autoIndex]) {
       navigate(suggestions[autoIndex].url)
     } else {
       navigate(urlInput)
@@ -541,10 +546,10 @@ export function BrowserPane({
       urlInputRef.current?.blur()
     } else if (e.key === 'ArrowDown' && showAutocomplete && suggestions.length > 0) {
       e.preventDefault()
-      setAutoIndex(i => Math.min(i + 1, suggestions.length - 1))
+      setAutoIndex(i => i === null ? 0 : Math.min(i + 1, suggestions.length - 1))
     } else if (e.key === 'ArrowUp' && showAutocomplete && suggestions.length > 0) {
       e.preventDefault()
-      setAutoIndex(i => Math.max(i - 1, 0))
+      setAutoIndex(i => i === null ? null : Math.max(i - 1, 0))
     }
   }, [currentUrl, showAutocomplete, suggestions.length])
 
