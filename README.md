@@ -38,6 +38,7 @@ ClusterSpace turns "I have nine terminals open across four monitors" into one ti
 - [Quick Start](#quick-start)
 - [Keyboard](#keyboard)
 - [SSH + tmux Architecture](#ssh--tmux-architecture)
+- [Companion: MuxTer](#companion-muxter)
 - [Architecture at a Glance](#architecture-at-a-glance)
 - [Project Structure](#project-structure)
 - [Data Locations](#data-locations)
@@ -206,6 +207,25 @@ ssh -t user@host tmux new-session -A -s <session-name>
 For multi-tab terminal panes, each tab opens its **own** SSH connection attached to a different tmux session. There's no "switch-client" magic; tab switches are pure CSS, and the cost is one extra SSH process per tab (typically negligible).
 
 Closing a tab kills the local PTY but leaves the remote tmux session alive (you can reattach later). The kill-confirm dialog gives you "Destroy remote session" if you want it gone permanently.
+
+---
+
+## Companion: MuxTer
+
+**[MuxTer](https://github.com/mtecnic/muxter) is the must-have tool for the other end of those SSH connections.**
+
+Every ClusterSpace pane leaves a tmux session running on the host, which is what makes it survive disconnects. MuxTer runs on that host and shows all of them in one terminal: the sessions listed on the left, and the selected one live on the right, colour and all.
+
+- **Check on your agent fleet from anywhere.** One plain `ssh` from a laptop or a phone shows every `clusterspace-pane-…` session at once, with no ClusterSpace window needed.
+- **Watch without disturbing.** View mode is read-only, so an agent mid-task never gets a stray keystroke from you looking at it.
+- **Step in when it's stuck.** Press `i` to type into a session, and `Esc` to step back out.
+
+```bash
+git clone https://github.com/mtecnic/muxter.git && cd muxter
+uv sync && uv run muxter      # then type /clusterspace to show only ClusterSpace's sessions
+```
+
+ClusterSpace keeps the sessions alive; MuxTer lets you see into all of them.
 
 ---
 
