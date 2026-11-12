@@ -112,6 +112,8 @@ function createWindow() {
     minWidth: 800,
     minHeight: 600,
     title: 'ClusterSpace',
+    // Packaged builds take the icon from the exe; this covers `npm run dev`.
+    icon: join(__dirname, '../../resources', process.platform === 'win32' ? 'icon.ico' : 'icon.png'),
     backgroundColor: '#0d1117',
     show: false,
     webPreferences: {
@@ -1612,6 +1614,8 @@ function registerIpcHandlers() {
   ipcMain.handle(IPC_CHANNELS.BROWSER_RECIPES_SAVE, async (_e, recipe) => recipeStore?.save(recipe) ?? null)
   ipcMain.handle(IPC_CHANNELS.BROWSER_RECIPES_DELETE, async (_e, idOrName: string) => recipeStore?.delete(idOrName) ?? false)
 }
+
+if (process.platform === 'win32') app.setAppUserModelId('com.clusterspace.app')
 
 app.whenReady().then(() => {
   // Spoof a real Chrome UA at the session level so XHR/fetch/sub-resources

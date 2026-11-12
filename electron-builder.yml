@@ -33,6 +33,7 @@ extraResources:
       - "**/*"
 
 win:
+  icon: resources/icon.ico
   target:
     - target: nsis
       arch:
@@ -45,6 +46,9 @@ nsis:
   createDesktopShortcut: true
   createStartMenuShortcut: true
   shortcutName: ClusterSpace
+  installerIcon: resources/icon.ico
+  uninstallerIcon: resources/icon.ico
+  installerHeaderIcon: resources/icon.ico
   perMachine: false
   allowElevation: true
 
